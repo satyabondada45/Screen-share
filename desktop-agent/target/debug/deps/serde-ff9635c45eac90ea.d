@@ -1,0 +1,14 @@
+C:\xampp\htdocs\Screen Share\desktop-agent\target\debug\deps\serde-ff9635c45eac90ea.d: C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\xampp\htdocs\Screen\ Share\desktop-agent\target\debug\build\serde-f99a26f07268229f\out/private.rs
+
+C:\xampp\htdocs\Screen Share\desktop-agent\target\debug\deps\libserde-ff9635c45eac90ea.rlib: C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\xampp\htdocs\Screen\ Share\desktop-agent\target\debug\build\serde-f99a26f07268229f\out/private.rs
+
+C:\xampp\htdocs\Screen Share\desktop-agent\target\debug\deps\libserde-ff9635c45eac90ea.rmeta: C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs C:\xampp\htdocs\Screen\ Share\desktop-agent\target\debug\build\serde-f99a26f07268229f\out/private.rs
+
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs:
+C:\xampp\htdocs\Screen\ Share\desktop-agent\target\debug\build\serde-f99a26f07268229f\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\target\\debug\\build\\serde-f99a26f07268229f\\out
