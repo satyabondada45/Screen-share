@@ -22,17 +22,17 @@ try {
         INSERT INTO devices (device_uid, name, os_type, ip_address, is_online, last_seen_at, created_at)
         VALUES (:device_uid, :name, :os_type, :ip_address, 1, NOW(), NOW())
         ON DUPLICATE KEY UPDATE 
-            name = :name,
-            os_type = :os_type,
+            name = VALUES(name),
+            os_type = VALUES(os_type),
+            ip_address = VALUES(ip_address),
             is_online = 1,
-            ip_address = :ip_address,
             last_seen_at = NOW()
     ");
 
     $stmt->execute([
         ':device_uid' => $deviceId,
-        ':name' => $hostname,
-        ':os_type' => $osInfo,
+        ':name'       => $hostname,
+        ':os_type'    => $osInfo,
         ':ip_address' => $ipAddress
     ]);
 

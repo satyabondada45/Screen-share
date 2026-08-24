@@ -11,11 +11,12 @@ pub struct BackendClient {
 impl BackendClient {
     pub fn new(base_url: &str, device_id: &str) -> Self {
         Self {
-            base_url: base_url.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
             device_id: device_id.to_string(),
         }
     }
 
+    /// Registers the host agent device with the PHP MySQL backend.
     pub fn register(&self) -> bool {
         let url = format!("{}/devices/register.php", self.base_url);
         let hostname = env::var("COMPUTERNAME")
@@ -27,22 +28,43 @@ impl BackendClient {
         payload.insert("os_info", env::consts::OS.to_string());
         payload.insert("hostname", hostname);
 
-        let client = reqwest::blocking::Client::new();
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => reqwest::blocking::Client::new(),
+        };
+
         match client.post(&url).json(&payload).send() {
-            Ok(res) => res.status().is_success(),
+            Ok(res) => {
+                if res.status().is_success() {
+                    true
+                } else {
+                    let status = res.status();
+                    let body = res.text().unwrap_or_default();
+                    eprintln!("[Backend Sync] Server responded with HTTP {}: {}", status, body);
+                    false
+                }
+            }
             Err(e) => {
-                eprintln!("[Backend Sync] Registration failed: {:?}", e);
+                eprintln!("[Backend Sync] Connection failed to {}: {:?}", url, e);
                 false
             }
         }
     }
 
+    /// Spawns a background worker thread that pings the heartbeat endpoint every 30 seconds.
     pub fn start_heartbeat_thread(&self) {
         let url = format!("{}/devices/heartbeat.php", self.base_url);
         let dev_id = self.device_id.clone();
 
         thread::spawn(move || {
-            let client = reqwest::blocking::Client::new();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
             let mut payload = HashMap::new();
             payload.insert("device_id", dev_id);
 
@@ -53,6 +75,7 @@ impl BackendClient {
         });
     }
 
+    /// Logs the start of an active remote session in the database.
     pub fn log_session_start(&self, session_key: &str) {
         let url = format!("{}/sessions/start.php", self.base_url);
         let mut payload = HashMap::new();
@@ -60,6 +83,21 @@ impl BackendClient {
         payload.insert("session_key", session_key.to_string());
 
         let client = reqwest::blocking::Client::new();
-        let _ = client.post(&url).json(&payload).send();
+        if let Err(e) = client.post(&url).json(&payload).send() {
+            eprintln!("[Backend Sync] Failed to log session start: {:?}", e);
+        }
+    }
+
+    /// Records session conclusion and bandwidth utilization upon disconnection.
+    pub fn log_session_end(&self, session_key: &str, bandwidth_mb: f64) {
+        let url = format!("{}/sessions/end.php", self.base_url);
+        let mut payload = HashMap::new();
+        payload.insert("session_key", session_key.to_string());
+        payload.insert("bandwidth_used_mb", bandwidth_mb.to_string());
+
+        let client = reqwest::blocking::Client::new();
+        if let Err(e) = client.post(&url).json(&payload).send() {
+            eprintln!("[Backend Sync] Failed to log session end: {:?}", e);
+        }
     }
 }

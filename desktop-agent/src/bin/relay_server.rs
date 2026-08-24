@@ -1,129 +1,123 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-struct AgentSession {
-    viewer_tx: Sender<TcpStream>,
-}
+type ClientMap = Arc<Mutex<HashMap<String, TcpStream>>>;
 
-type AgentRegistry = Arc<Mutex<HashMap<String, AgentSession>>>;
-
-fn pipe_stream(mut reader: TcpStream, mut writer: TcpStream) {
-    let mut buf = [0u8; 65536];
+fn proxy_stream(mut reader: TcpStream, mut writer: TcpStream) {
+    let mut buffer = [0u8; 65536];
     loop {
-        match reader.read(&mut buf) {
+        match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                if writer.write_all(&buf[..n]).is_err() {
+                if writer.write_all(&buffer[..n]).is_err() {
                     break;
                 }
             }
             Err(_) => break,
         }
     }
-    let _ = writer.shutdown(std::net::Shutdown::Both);
 }
 
-fn main() {
-    let server = TcpListener::bind("0.0.0.0:9001").expect("Failed to bind port 9001");
-    println!("========================================");
-    println!("  RELAY SERVER READY: 0.0.0.0:9001");
-    println!("========================================");
+fn handle_connection(mut stream: TcpStream, hosts: ClientMap) {
+    let mut init_buf = [0u8; 7]; // 1B Type + 6B ID
+    if stream.read_exact(&mut init_buf).is_err() {
+        return;
+    }
 
-    let registry: AgentRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let conn_type = init_buf[0];
+    let session_id = match String::from_utf8(init_buf[1..7].to_vec()) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
 
-    for stream in server.incoming() {
-        let mut stream = match stream {
-            Ok(s) => {
-                let _ = s.set_nodelay(true);
-                s
+    match conn_type {
+        // 1: Host Agent Registration
+        1 => {
+            println!("[Relay] Host registered for session ID: {}", session_id);
+            if let Ok(mut map) = hosts.lock() {
+                map.insert(session_id.clone(), stream);
             }
-            Err(_) => continue,
-        };
-
-        let reg = Arc::clone(&registry);
-
-        thread::spawn(move || {
-            let mut handshake = [0u8; 7];
-            if stream.read_exact(&mut handshake).is_err() {
+        }
+        // 2: Viewer Connection Request
+        2 => {
+            let mut auth_hash = [0u8; 32];
+            if stream.read_exact(&mut auth_hash).is_err() {
                 return;
             }
 
-            let action = handshake[0];
-            let peer_id = match std::str::from_utf8(&handshake[1..7]) {
-                Ok(s) => s.to_string(),
-                Err(_) => return,
+            println!("[Relay] Viewer connecting to host: {}", session_id);
+            let host_stream = {
+                let mut map = hosts.lock().unwrap();
+                map.remove(&session_id)
             };
 
-            if action == 1 {
-                // Agent Registration
-                println!("[Relay] Agent registered Session ID: {}", peer_id);
-                let (viewer_tx, viewer_rx): (Sender<TcpStream>, Receiver<TcpStream>) = channel();
+            if let Some(mut host) = host_stream {
+                // Forward viewer connect request + auth hash to host
+                let mut req_pkt = Vec::with_capacity(33);
+                req_pkt.push(3u8);
+                req_pkt.extend_from_slice(&auth_hash);
 
-                {
-                    let mut map = reg.lock().unwrap();
-                    map.insert(peer_id.clone(), AgentSession { viewer_tx });
+                if host.write_all(&req_pkt).is_err() {
+                    let _ = stream.write_all(&[3u8]); // Offline
+                    return;
                 }
 
-                if let Ok(mut viewer_stream) = viewer_rx.recv() {
-                    // Send Connection Request Flag (Type 3) to Agent
-                    if stream.write_all(&[3u8]).is_err() {
-                        let _ = viewer_stream.write_all(&[0u8]);
-                        return;
-                    }
-
-                    // Read Agent Decision: 1 = Accept, 0 = Reject
-                    let mut decision = [0u8; 1];
-                    if stream.read_exact(&mut decision).is_err() || decision[0] != 1 {
-                        println!("[Relay] Session {} rejected by host.", peer_id);
-                        let _ = viewer_stream.write_all(&[2u8]);
-                        return;
-                    }
-
-                    // Acknowledge connection to Viewer (1 = Approved)
-                    let _ = viewer_stream.write_all(&[1u8]);
-                    println!("[Relay] Session {} approved! Bridging streams...", peer_id);
-
-                    let v_read = match viewer_stream.try_clone() {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    let v_write = viewer_stream;
-
-                    let a_read = match stream.try_clone() {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    let a_write = stream;
-
-                    let h1 = thread::spawn(move || pipe_stream(a_read, v_write));
-                    let h2 = thread::spawn(move || pipe_stream(v_read, a_write));
-
-                    let _ = h1.join();
-                    let _ = h2.join();
-                    println!("[Relay] Session {} closed.", peer_id);
+                // Read authorization response from host
+                let mut host_resp = [0u8; 1];
+                if host.read_exact(&mut host_resp).is_err() {
+                    let _ = stream.write_all(&[3u8]);
+                    return;
                 }
 
-                let mut map = reg.lock().unwrap();
-                map.remove(&peer_id);
-            } else if action == 2 {
-                // Viewer Route Request
-                println!("[Relay] Viewer connecting to ID: {}", peer_id);
-                let target_tx = {
-                    let map = reg.lock().unwrap();
-                    map.get(&peer_id).map(|s| s.viewer_tx.clone())
-                };
+                if host_resp[0] == 1 {
+                    let _ = stream.write_all(&[1u8]); // Approved
 
-                if let Some(tx) = target_tx {
-                    let _ = tx.send(stream);
+                    let host_read = host.try_clone().unwrap();
+                    let host_write = host;
+                    let viewer_read = stream.try_clone().unwrap();
+                    let viewer_write = stream;
+
+                    // Host -> Viewer (Screen, Audio, Clipboard, Chat, Ping)
+                    thread::spawn(move || {
+                        proxy_stream(host_read, viewer_write);
+                    });
+
+                    // Viewer -> Host (Input, Scroll, File, Chat, Pong)
+                    thread::spawn(move || {
+                        proxy_stream(viewer_read, host_write);
+                    });
+
+                    println!("[Relay] Live session bridge active for ID: {}", session_id);
                 } else {
-                    let _ = stream.write_all(&[0u8]);
-                    println!("[Relay] Session {} not online.", peer_id);
+                    let _ = stream.write_all(&[2u8]); // Rejected / Invalid PIN
                 }
+            } else {
+                let _ = stream.write_all(&[3u8]); // Host not found
             }
-        });
+        }
+        _ => {}
+    }
+}
+
+fn main() {
+    let listener = TcpListener::bind("0.0.0.0:9001").expect("Failed to bind relay server to port 9001");
+    println!("========================================");
+    println!("  Screen Share TCP Relay Server Active");
+    println!("  Listening on port 9001");
+    println!("========================================");
+
+    let hosts: ClientMap = Arc::new(Mutex::new(HashMap::new()));
+
+    for stream in listener.incoming() {
+        if let Ok(s) = stream {
+            let _ = s.set_nodelay(true);
+            let hosts_clone = Arc::clone(&hosts);
+            thread::spawn(move || {
+                handle_connection(s, hosts_clone);
+            });
+        }
     }
 }
