@@ -95,14 +95,17 @@ fn handle_websocket_client(mut websocket: tungstenite::WebSocket<TcpStream>, hos
                             }
                         }
                         1 => {
-                            let mut hdr = [0u8; 28];
+                            let mut hdr = [0u8; 12];
                             if !read_exact_bytes(&mut host_read, &mut hdr) { break; }
-                            let payload_size = u32::from_be_bytes(hdr[24..28].try_into().unwrap()) as usize;
+                            let payload_size = u32::from_be_bytes(hdr[8..12].try_into().unwrap()) as usize;
+                            
+                            // Prevent OOM allocation on corrupted frames
+                            if payload_size > 50_000_000 { break; }
 
                             let mut payload = vec![0u8; payload_size];
                             if !read_exact_bytes(&mut host_read, &mut payload) { break; }
 
-                            let mut full_pkt = Vec::with_capacity(1 + 28 + payload_size);
+                            let mut full_pkt = Vec::with_capacity(1 + 12 + payload_size);
                             full_pkt.push(1u8);
                             full_pkt.extend_from_slice(&hdr);
                             full_pkt.extend_from_slice(&payload);

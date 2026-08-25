@@ -5,7 +5,7 @@ pub mod registration {
 use arboard::Clipboard;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use enigo::{Axis, Direction, Enigo, Key, Keyboard, Mouse, Settings};
-use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::codecs::png::PngEncoder;
 use image::ImageEncoder;
 use rand::Rng;
 use screenshots::Screen;
@@ -17,7 +17,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,9 +29,6 @@ fn set_process_dpi_aware() {
         );
     }
 }
-
-#[cfg(not(windows))]
-fn set_process_dpi_aware() {}
 
 #[cfg(windows)]
 fn set_native_cursor_pos(x: i32, y: i32) {
@@ -46,12 +43,6 @@ fn send_native_mouse_click(flags: u32) {
         windows_sys::Win32::UI::Input::KeyboardAndMouse::mouse_event(flags, 0, 0, 0, 0);
     }
 }
-
-#[cfg(not(windows))]
-fn set_native_cursor_pos(_x: i32, _y: i32) {}
-
-#[cfg(not(windows))]
-fn send_native_mouse_click(_flags: u32) {}
 
 #[cfg(windows)]
 fn enable_autostart(app_name: &str) -> Result<(), String> {
@@ -92,11 +83,6 @@ fn enable_autostart(app_name: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
-fn enable_autostart(_app_name: &str) -> Result<(), String> {
-    Ok(())
-}
-
 #[cfg(windows)]
 fn prompt_connection_dialog(id_str: &str) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -120,11 +106,6 @@ fn prompt_connection_dialog(id_str: &str) -> bool {
         );
         result == IDYES
     }
-}
-
-#[cfg(not(windows))]
-fn prompt_connection_dialog(_id_str: &str) -> bool {
-    true
 }
 
 fn compute_sha256(input: &str) -> [u8; 32] {
@@ -233,11 +214,12 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
         let mut stream = match TcpStream::connect(&relay_addr) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
+                let _ = s.set_write_timeout(Some(Duration::from_millis(150)));
                 s
             }
             Err(e) => {
                 eprintln!("[Agent] Relay error: {:?}. Retrying in 5s...", e);
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(8));
                 continue;
             }
         };
@@ -301,15 +283,14 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
         let write_stream_ping = Arc::clone(&write_stream);
 
         let current_rtt_ms = Arc::new(AtomicU64::new(10));
-        let target_interval_ms = Arc::new(AtomicU64::new(16));
         let current_rtt_in = Arc::clone(&current_rtt_ms);
-        let target_interval_cap = Arc::clone(&target_interval_ms);
 
         let active_screen_idx = Arc::new(AtomicUsize::new(0));
         let active_idx_input = Arc::clone(&active_screen_idx);
         let active_idx_capture = Arc::clone(&active_screen_idx);
 
-        let (tx, rx) = sync_channel::<FrameData>(1);
+        let shared_frame = Arc::new((Mutex::new(None::<FrameData>), Condvar::new()));
+        let shared_frame_cap = Arc::clone(&shared_frame);
         let last_clipboard_text = Arc::new(Mutex::new(String::new()));
         let last_clip_recv = Arc::clone(&last_clipboard_text);
         let last_clip_send = Arc::clone(&last_clipboard_text);
@@ -372,10 +353,8 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                             (0, 0, 1920.0, 1080.0)
                         };
 
-                        let target_x =
-                            sx + ((norm_x as f32 / 65535.0) * (sw - 1.0)).round() as i32;
-                        let target_y =
-                            sy + ((norm_y as f32 / 65535.0) * (sh - 1.0)).round() as i32;
+                        let target_x = sx + ((norm_x as f32 / 65535.0) * (sw - 1.0)).round() as i32;
+                        let target_y = sy + ((norm_y as f32 / 65535.0) * (sh - 1.0)).round() as i32;
 
                         #[cfg(windows)]
                         {
@@ -470,10 +449,8 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                             break;
                         }
 
-                        let name_len =
-                            u16::from_be_bytes(meta_hdr[0..2].try_into().unwrap()) as usize;
-                        total_file_size =
-                            u64::from_be_bytes(meta_hdr[2..10].try_into().unwrap());
+                        let name_len = u16::from_be_bytes(meta_hdr[0..2].try_into().unwrap()) as usize;
+                        total_file_size = u64::from_be_bytes(meta_hdr[2..10].try_into().unwrap());
 
                         let mut name_buf = vec![0u8; name_len];
                         if read_stream.read_exact(&mut name_buf).is_err() {
@@ -532,7 +509,7 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                         break;
                     }
                 }
-                thread::sleep(Duration::from_millis(500));
+                thread::sleep(Duration::from_millis(8));
             }
         });
 
@@ -564,7 +541,7 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                         }
                     }
                 }
-                thread::sleep(Duration::from_millis(300));
+                thread::sleep(Duration::from_millis(8));
             }
         });
 
@@ -572,23 +549,20 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
 
         // Screen Capture Worker
         let capture_handle = thread::spawn(move || {
+            let mut screens = Screen::all().unwrap_or_default();
+            let mut last_idx = active_idx_capture.load(Ordering::SeqCst);
+
             while is_conn_capture.load(Ordering::SeqCst) {
                 let start = Instant::now();
 
-                let rtt = current_rtt_ms.load(Ordering::SeqCst);
-                let frame_delay_ms = if rtt < 35 {
-                    16
-                } else if rtt < 80 {
-                    33
-                } else {
-                    66
-                };
-                target_interval_cap.store(frame_delay_ms, Ordering::SeqCst);
-
                 let current_idx = active_idx_capture.load(Ordering::SeqCst);
-                let screens = Screen::all().unwrap_or_default();
+                if current_idx != last_idx || screens.is_empty() {
+                    screens = Screen::all().unwrap_or_default();
+                    last_idx = current_idx;
+                }
+
                 if screens.is_empty() {
-                    thread::sleep(Duration::from_millis(50));
+                    thread::sleep(Duration::from_millis(8));
                     continue;
                 }
 
@@ -603,10 +577,13 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                         height: img.height() as usize,
                         raw_pixels: img.into_raw(),
                     };
-                    let _ = tx.try_send(frame);
+                    let (lock, cvar) = &*shared_frame_cap;
+                    let mut shared = lock.lock().unwrap();
+                    *shared = Some(frame);
+                    cvar.notify_one();
                 }
 
-                let target_interval = Duration::from_millis(frame_delay_ms);
+                let target_interval = Duration::from_millis(16);
                 let elapsed = start.elapsed();
                 if elapsed < target_interval {
                     thread::sleep(target_interval - elapsed);
@@ -615,78 +592,52 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
         });
 
         let mut network_batch_buffer = Vec::with_capacity(1024 * 1024);
-        let mut prev_frame_data: Vec<u8> = Vec::new();
 
-        // PNG Streaming Loop
+        // PNG Streaming Loop - FIXED
         while is_conn_write.load(Ordering::SeqCst) {
-            if let Ok(frame) = rx.recv_timeout(Duration::from_millis(50)) {
+            let frame_opt = {
+                let (lock, cvar) = &*shared_frame;
+                let mut shared = lock.lock().unwrap();
+                if shared.is_none() {
+                    let result = cvar.wait_timeout(shared, Duration::from_millis(50)).unwrap();
+                    shared = result.0;
+                }
+                shared.take()
+            };
+
+            if let Some(frame) = frame_opt {
                 let (w, h) = (frame.width, frame.height);
+                let raw_pixels = frame.raw_pixels;
 
-                let dirty_rect = if prev_frame_data.len() == frame.raw_pixels.len() {
-                    let mut min_x = w;
-                    let mut min_y = h;
-                    let mut max_x = 0;
-                    let mut max_y = 0;
-                    let mut diff = false;
+                if raw_pixels.is_empty() {
+                    continue;
+                }
 
-                    for y in 0..h {
-                        let row_start = y * w * 4;
-                        let row_end = row_start + w * 4;
-                        if prev_frame_data[row_start..row_end] != frame.raw_pixels[row_start..row_end] {
-                            if y < min_y { min_y = y; }
-                            if y > max_y { max_y = y; }
-                            for x in 0..w {
-                                let p = row_start + x * 4;
-                                if prev_frame_data[p..p+4] != frame.raw_pixels[p..p+4] {
-                                    if x < min_x { min_x = x; }
-                                    if x > max_x { max_x = x; }
-                                    diff = true;
-                                }
-                            }
-                        }
+                let mut png_bytes = Vec::with_capacity(256 * 1024);
+                {
+                    let encoder = PngEncoder::new(&mut png_bytes);
+                    if encoder.write_image(
+                        &raw_pixels,
+                        w as u32,
+                        h as u32,
+                        image::ColorType::Rgba8,
+                    ).is_err() {
+                        continue;
                     }
-                    if !diff {
-                        None
-                    } else {
-                        Some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+                }
+
+                network_batch_buffer.clear();
+                network_batch_buffer.push(1u8);
+                network_batch_buffer.extend_from_slice(&(w as u32).to_be_bytes());
+                network_batch_buffer.extend_from_slice(&(h as u32).to_be_bytes());
+                network_batch_buffer.extend_from_slice(&(png_bytes.len() as u32).to_be_bytes());
+                network_batch_buffer.extend_from_slice(&png_bytes);
+
+                if let Ok(mut s) = write_stream_frames.lock() {
+                    if s.write_all(&network_batch_buffer).is_err() {
+                        is_conn_write.store(false, Ordering::SeqCst);
+                        break;
                     }
-                } else {
-                    Some((0, 0, w, h))
-                };
-
-                if let Some((crop_x, crop_y, crop_w, crop_h)) = dirty_rect {
-                    let sub_img_res = image::RgbaImage::from_raw(w as u32, h as u32, frame.raw_pixels.clone());
-                    if let Some(sub_img) = sub_img_res {
-                        let cropped = image::imageops::crop_imm(&sub_img, crop_x as u32, crop_y as u32, crop_w as u32, crop_h as u32).to_image();
-                        
-                        let mut png_bytes: Vec<u8> = Vec::with_capacity(256 * 1024);
-                        let encoder = PngEncoder::new_with_quality(
-                            &mut png_bytes,
-                            CompressionType::Fast,
-                            FilterType::NoFilter,
-                        );
-
-                        if encoder.write_image(&cropped.into_raw(), crop_w as u32, crop_h as u32, image::ColorType::Rgba8).is_ok() {
-                            network_batch_buffer.clear();
-                            network_batch_buffer.push(1u8); // Type 1: Frame Payload
-                            network_batch_buffer.extend_from_slice(&(crop_x as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&(crop_y as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&(crop_w as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&(crop_h as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&(w as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&(h as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&(png_bytes.len() as u32).to_be_bytes());
-                            network_batch_buffer.extend_from_slice(&png_bytes);
-
-                            if let Ok(mut s) = write_stream_frames.lock() {
-                                if s.write_all(&network_batch_buffer).is_err() {
-                                    is_conn_write.store(false, Ordering::SeqCst);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    prev_frame_data = frame.raw_pixels;
                 }
             }
         }

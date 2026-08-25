@@ -105,7 +105,7 @@ if (!$device) {
             min-height: 500px;
         }
 
-        canvas { width: 100%; height: auto; aspect-ratio: 16/9; display: block; cursor: crosshair; outline: none; }
+        canvas { width: 100%; height: 100%; object-fit: contain; display: block; cursor: crosshair; outline: none; }
 
         .hud-badge {
             position: absolute; top: 12px; right: 12px;
@@ -378,32 +378,30 @@ if (!$device) {
                     return;
                 }
 
-                if (type === 1 && buffer.byteLength >= 29) {
-                    const x = view.getUint32(1);
-                    const y = view.getUint32(5);
-                    const crop_w = view.getUint32(9);
-                    const crop_h = view.getUint32(13);
-                    const full_w = view.getUint32(17);
-                    const full_h = view.getUint32(21);
-                    const compSize = view.getUint32(25);
+                if (type === 1 && buffer.byteLength >= 13) {
+                    const frameW = view.getUint32(1);
+                    const frameH = view.getUint32(5);
+                    const compSize = view.getUint32(9);
 
-                    if (canvas.width !== full_w || canvas.height !== full_h) {
-                        canvas.width = full_w;
-                        canvas.height = full_h;
-                        frameW = full_w;
-                        frameH = full_h;
+                    if (13 + compSize > buffer.byteLength) {
+                        console.warn("Incomplete frame buffer received");
+                        return;
                     }
 
-                    const pngSlice = new Uint8Array(buffer, 29, compSize);
+                    if (canvas.width !== frameW || canvas.height !== frameH) {
+                        canvas.width = frameW;
+                        canvas.height = frameH;
+                    }
+
+                    const pngSlice = new Uint8Array(buffer, 13, compSize);
                     const blob = new Blob([pngSlice], { type: 'image/png' });
 
-                    try {
-                        const bmp = await createImageBitmap(blob);
-                        ctx.drawImage(bmp, x, y, crop_w, crop_h);
+                    createImageBitmap(blob).then(bmp => {
+                        ctx.drawImage(bmp, 0, 0, frameW, frameH);
                         bmp.close();
-                    } catch (err) {
+                    }).catch(err => {
                         console.error("Frame render error:", err);
-                    }
+                    });
                     return;
                 }
 

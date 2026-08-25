@@ -1,0 +1,11 @@
+C:\xampp\htdocs\Screen Share\desktop-agent\target_alt\debug\deps\enigo-206c4ef60ab8cf1d.d: C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\lib.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\agent.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\mod.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\win_impl.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\keycodes.rs
+
+C:\xampp\htdocs\Screen Share\desktop-agent\target_alt\debug\deps\libenigo-206c4ef60ab8cf1d.rlib: C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\lib.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\agent.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\mod.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\win_impl.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\keycodes.rs
+
+C:\xampp\htdocs\Screen Share\desktop-agent\target_alt\debug\deps\libenigo-206c4ef60ab8cf1d.rmeta: C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\lib.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\agent.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\mod.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\win_impl.rs C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\keycodes.rs
+
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\lib.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\agent.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\mod.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\win\win_impl.rs:
+C:\Users\X1\ CORBON\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\enigo-0.2.1\src\keycodes.rs:
