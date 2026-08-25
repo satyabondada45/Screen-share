@@ -74,7 +74,7 @@ if (!$device) {
 
         .btn {
             display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 18px; border-radius: 8px;
-            font-weight: 600; text-decoration: none; cursor: pointer; border: none;
+            font-weight: 600; text-decoration: none; cursor: default; border: none;
             transition: 0.2s; text-align: center; font-size: 0.9rem;
         }
         .btn-primary { background: var(--accent); color: white; }
@@ -95,7 +95,7 @@ if (!$device) {
 
         select.monitor-select {
             padding: 10px 12px; border-radius: 8px; background: var(--card-bg); color: white;
-            border: 1px solid var(--border); font-size: 0.9rem; outline: none; cursor: pointer;
+            border: 1px solid var(--border); font-size: 0.9rem; outline: none; cursor: default;
         }
 
         .canvas-container {
@@ -105,7 +105,7 @@ if (!$device) {
             min-height: 500px;
         }
 
-        canvas { width: 100%; height: 100%; object-fit: contain; display: block; cursor: crosshair; outline: none; }
+        canvas { width: 100%; height: 100%; object-fit: contain; display: block; cursor: default; outline: none; }
 
         .hud-badge {
             position: absolute; top: 12px; right: 12px;

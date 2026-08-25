@@ -1,1 +1,0 @@
-C:\xampp\htdocs\Screen\ Share\desktop-agent\target_alt\debug\desktop-agent.exe: C:\xampp\htdocs\Screen\ Share\desktop-agent\src\main.rs C:\xampp\htdocs\Screen\ Share\desktop-agent\src\registration\backend_client.rs
