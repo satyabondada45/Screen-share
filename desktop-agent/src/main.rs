@@ -301,21 +301,25 @@ fn start_audio_capture(
 // ============================================================
 
 fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
+    let host_ip = relay_addr.split(':').next().unwrap_or("127.0.0.1");
+    let backend_url = format!("http://{}/Screen%20Share/backend/api", host_ip);
+
     let backend = registration::backend_client::BackendClient::new(
-        "http://127.0.0.1/Screen%20Share/backend/api",
+        &backend_url,
         &session_id.to_string(),
     );
 
+    println!("[DISCOVERY] Registering with backend: {}", backend_url);
     if backend.register() {
-        println!("[Backend Sync] Registered successfully with PHP Web Dashboard!");
+        println!("[DISCOVERY] Registered successfully with Web Dashboard / Device Registry!");
     } else {
-        println!("[Backend Sync] Running standalone mode.");
+        println!("[DISCOVERY] Running in standalone relay mode.");
     }
 
     backend.start_heartbeat_thread();
 
     loop {
-        println!("[Agent] Connecting to relay {}...", relay_addr);
+        println!("[DISCOVERY] Connecting to relay {}...", relay_addr);
 
         let mut stream = match TcpStream::connect(&relay_addr) {
             Ok(s) => {
@@ -324,22 +328,28 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                 s
             }
             Err(e) => {
-                eprintln!("[Agent] Relay error: {:?}", e);
+                eprintln!("[DISCOVERY] Relay error: {:?}", e);
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
 
-        // Registration
+        println!("[DISCOVERY] Relay connection established");
+        println!("[DISCOVERY] Sending device registration");
+        println!("[DISCOVERY] Device ID: {}", id_str);
+
+        // Registration (Type 1 + 6-digit session ID)
         let mut register_pkt = Vec::with_capacity(7);
         register_pkt.push(1u8);
         register_pkt.extend_from_slice(session_id.to_string().as_bytes());
 
         if stream.write_all(&register_pkt).is_err() {
+            eprintln!("[DISCOVERY] Failed to send registration packet");
             thread::sleep(Duration::from_secs(1));
             continue;
         }
 
+        println!("[DISCOVERY] Device registration sent");
         println!("[Agent] Registered on relay. Waiting for incoming session request...");
 
         // Authentication request

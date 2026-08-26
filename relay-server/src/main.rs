@@ -364,10 +364,9 @@ fn handle_host(
 
     let _ = stream.set_nodelay(true);
 
-    println!(
-        "[Relay] Host registered: {}",
-        session_id
-    );
+    println!("[RELAY] Client connected");
+    println!("[RELAY] Registration received: {}", session_id);
+    println!("[RELAY] Device ID: {}", session_id);
 
     /*
         Replace any stale host with this connection.
@@ -378,6 +377,8 @@ fn handle_host(
             session_id.clone(),
             stream,
         );
+        println!("[RELAY] Device added to device registry");
+        println!("[RELAY] Broadcasting device list/update");
     } else {
         eprintln!(
             "[Relay] Failed to lock host registry."

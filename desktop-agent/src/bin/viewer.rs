@@ -560,8 +560,8 @@ fn main() {
     connect_packet.extend_from_slice(target_id.as_bytes());
     connect_packet.extend_from_slice(&auth_hash);
 
-    println!("[Handshake] Connecting to relay: {}", relay_addr);
-    println!("[Handshake] Target ID: {}", target_id);
+    println!("[VIEWER] Connected to relay: {}", relay_addr);
+    println!("[VIEWER] Device: {}", target_id);
     println!("[Handshake] Sending connection request...");
 
     if let Err(e) = stream.write_all(&connect_packet) {
@@ -579,7 +579,10 @@ fn main() {
 
     println!("[Handshake] ACK received: {}", ack[0]);
     match ack[0] {
-        1 => println!("[Viewer] CONNECTION APPROVED"),
+        1 => {
+            println!("[Viewer] CONNECTION APPROVED");
+            println!("[VIEWER] Adding device to UI");
+        }
         2 => {
             eprintln!("[Viewer] CONNECTION REJECTED");
             return;
