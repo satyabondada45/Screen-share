@@ -1603,6 +1603,12 @@ $sessionCode = strlen($deviceUid) > 3
 
 let videoCodecConfigured = false;
 let hasReceivedFirstKeyframe = false;
+let browserPerf = {
+    rxPackets: 0,
+    decodedFrames: 0,
+    renderedFrames: 0,
+    lastLog: performance.now()
+};
 
 function parseH264Nals(dataBytes) {
     let nalTypes = [];
@@ -1688,6 +1694,7 @@ async function handleVideoPacket(buffer) {
 
     const actualPayloadSize = (payloadSize > 0 && payloadSize <= available) ? payloadSize : available;
     const h264Payload = bytes.slice(13, 13 + actualPayloadSize);
+    browserPerf.rxPackets++;
 
     // ========================================================
     // 5. Capability Detection BEFORE using VideoDecoder
@@ -1756,13 +1763,7 @@ async function handleVideoPacket(buffer) {
         try {
             videoDecoder = new VideoDecoder({
                 output(frame) {
-                    console.log(
-                        "[BROWSER DECODE OUTPUT]",
-                        frame.codedWidth,
-                        frame.codedHeight,
-                        frame.displayWidth,
-                        frame.displayHeight
-                    );
+                    browserPerf.decodedFrames++;
 
                     if (canvas && ctx) {
                         if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
@@ -1770,20 +1771,20 @@ async function handleVideoPacket(buffer) {
                             canvas.height = frame.displayHeight;
                         }
 
-                        console.log(
-                            "[VIDEO DEBUG][CANVAS]",
-                            {
-                                width: canvas.width,
-                                height: canvas.height
-                            }
-                        );
-
                         ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                        browserPerf.renderedFrames++;
 
-                        console.log(
-                            "[VIDEO DEBUG][CANVAS]",
-                            "FRAME RENDERED"
-                        );
+                        // Periodically print browser performance stats every 100 frames
+                        if (browserPerf.renderedFrames % 100 === 0) {
+                            const now = performance.now();
+                            const elapsedSec = (now - browserPerf.lastLog) / 1000.0;
+                            const renderFps = elapsedSec > 0 ? (100 / elapsedSec).toFixed(1) : "0.0";
+                            browserPerf.lastLog = now;
+
+                            console.log(
+                                `[VIDEO PERFORMANCE] Received: ${browserPerf.rxPackets}, Decoded: ${browserPerf.decodedFrames}, Rendered: ${browserPerf.renderedFrames}, Render FPS: ${renderFps}, Decoder Queue: ${videoDecoder.decodeQueueSize}`
+                            );
+                        }
                     }
                     frame.close();
                 },

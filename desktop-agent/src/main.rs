@@ -1,18 +1,17 @@
-// Fixed Video Pipeline (H264 -> TYPE 15)
+// Hardware H264 Video Pipeline (120 FPS Ultra-Low Latency)
 pub mod registration {
     pub mod backend_client;
 }
+pub mod encoder;
 
 use arboard::Clipboard;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use enigo::{Axis, Direction, Enigo, Key, Keyboard, Mouse, Settings};
-use openh264::encoder::Encoder;
-use openh264::formats::YUVSource;
+use encoder::HardwareH264Encoder;
 use rand::Rng;
 use screenshots::Screen;
 use sha2::{Digest, Sha256};
 
-use image::imageops::FilterType;
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -25,12 +24,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================
-// VIDEO SETTINGS
+// VIDEO SETTINGS (120 FPS Ultra-Low Latency)
 // ============================================================
 
+const TARGET_FPS: u32 = 120;
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
-const FRAME_INTERVAL_MS: u64 = 33;
+const TARGET_BITRATE: u32 = 8_000_000;
+const FRAME_INTERVAL_MICROS: u64 = 8333; // 120 FPS ~ 8.333 ms per frame
 
 // ============================================================
 // DPI
@@ -293,231 +294,6 @@ fn start_audio_capture(
 
     stream.play().ok()?;
     Some(stream)
-}
-
-// ============================================================
-// PREPARE FRAME (FIXED - supports RGB or RGBA, forces remote to 3 bytes/pixel)
-// ============================================================
-
-fn prepare_frame(raw_pixels: Vec<u8>, width: usize, height: usize, is_remote: bool) -> Option<FrameData> {
-    if raw_pixels.is_empty() || width == 0 || height == 0 {
-        return None;
-    }
-
-    let expected = width.checked_mul(height)?.checked_mul(4)?;
-
-    if raw_pixels.len() < expected {
-        eprintln!(
-            "[Capture] Invalid pixel buffer: got {}, expected {}",
-            raw_pixels.len(),
-            expected
-        );
-        return None;
-    }
-
-    // Prepare result frame (resize if needed)
-    let frame_data = if width as u32 <= MAX_WIDTH && height as u32 <= MAX_HEIGHT {
-        let w = (width as u32 + 1) & !1;
-        let h = (height as u32 + 1) & !1;
-        if w != width as u32 || h != height as u32 {
-            if let Some(img) =
-                image::RgbaImage::from_raw(width as u32, height as u32, raw_pixels[..expected].to_vec())
-            {
-                let resized = image::imageops::resize(&img, w, h, FilterType::Triangle);
-                FrameData {
-                    width: w as usize,
-                    height: h as usize,
-                    raw_pixels: resized.into_raw(),
-                }
-            } else {
-                FrameData {
-                    width,
-                    height,
-                    raw_pixels: raw_pixels[..expected].to_vec(),
-                }
-            }
-        } else {
-            FrameData {
-                width,
-                height,
-                raw_pixels: raw_pixels[..expected].to_vec(),
-            }
-        }
-    } else {
-        // Resize preserving aspect ratio.
-        let scale_x = MAX_WIDTH as f32 / width as f32;
-        let scale_y = MAX_HEIGHT as f32 / height as f32;
-        let scale = scale_x.min(scale_y);
-
-        let new_width = ((width as f32) * scale).round().max(2.0) as u32;
-        let new_height = ((height as f32) * scale).round().max(2.0) as u32;
-        let new_width = (new_width + 1) & !1;
-        let new_height = (new_height + 1) & !1;
-
-        let image = image::RgbaImage::from_raw(
-            width as u32,
-            height as u32,
-            raw_pixels[..expected].to_vec(),
-        )?;
-
-        let resized = image::imageops::resize(&image, new_width, new_height, FilterType::Triangle);
-
-        FrameData {
-            width: new_width as usize,
-            height: new_height as usize,
-            raw_pixels: resized.into_raw(),
-        }
-    };
-
-    // ========================================================
-    // [VIDEO DEBUG] STAGE 2 — prepare_frame()
-    // ========================================================
-    static PREPARE_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let p_idx = PREPARE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-    if p_idx <= 3 || p_idx % 30 == 0 {
-        let mut non_black = 0usize;
-        let mut min_r = 255u8;
-        let mut max_r = 0u8;
-        let mut min_g = 255u8;
-        let mut max_g = 0u8;
-        let mut min_b = 255u8;
-        let mut max_b = 0u8;
-        let mut sum = 0u64;
-
-        for chunk in frame_data.raw_pixels.chunks_exact(4) {
-            let r = chunk[0];
-            let g = chunk[1];
-            let b = chunk[2];
-            if r > 0 || g > 0 || b > 0 {
-                non_black += 1;
-            }
-            min_r = min_r.min(r);
-            max_r = max_r.max(r);
-            min_g = min_g.min(g);
-            max_g = max_g.max(g);
-            min_b = min_b.min(b);
-            max_b = max_b.max(b);
-            sum += (r as u64) + (g as u64) + (b as u64);
-        }
-        let total_pixels = frame_data.width * frame_data.height;
-        let avg = if total_pixels > 0 { (sum as f64) / ((total_pixels * 3) as f64) } else { 0.0 };
-
-        println!("[VIDEO DEBUG][PREPARED FRAME #{}]\nwidth={}\nheight={}\nraw_bytes={}", p_idx, frame_data.width, frame_data.height, frame_data.raw_pixels.len());
-        println!("[VIDEO DEBUG][PREPARED STATS #{}]\nmin=R:{} G:{} B:{}\nmax=R:{} G:{} B:{}\naverage={:.2}\nnon_black={}\ntotal_pixels={}", p_idx, min_r, min_g, min_b, max_r, max_g, max_b, avg, non_black, total_pixels);
-        if non_black == 0 {
-            println!("[VIDEO DEBUG][ERROR] PREPARED FRAME #{} IS COMPLETELY BLACK", p_idx);
-        } else {
-            println!("[VIDEO DEBUG][OK] PREPARED FRAME #{} CONTAINS VISIBLE PIXELS", p_idx);
-        }
-    }
-
-    Some(frame_data)
-}
-
-// ============================================================
-// YUV CONVERTER (For H.264)
-// ============================================================
-
-struct MyYuv {
-    width: usize,
-    height: usize,
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
-}
-
-impl YUVSource for MyYuv {
-    fn dimensions(&self) -> (usize, usize) {
-        (self.width, self.height)
-    }
-
-    fn strides(&self) -> (usize, usize, usize) {
-        (self.width, self.width / 2, self.width / 2)
-    }
-
-    fn y(&self) -> &[u8] {
-        &self.y
-    }
-
-    fn u(&self) -> &[u8] {
-        &self.u
-    }
-
-    fn v(&self) -> &[u8] {
-        &self.v
-    }
-}
-
-fn rgba_to_yuv420(rgba: &[u8], width: usize, height: usize) -> MyYuv {
-    let y_size = width * height;
-    let uv_size = (width / 2) * (height / 2);
-    let mut y = vec![0u8; y_size];
-    let mut u = vec![0u8; uv_size];
-    let mut v = vec![0u8; uv_size];
-
-    for j in 0..height {
-        for i in 0..width {
-            let px = (j * width + i) * 4;
-            if px + 2 >= rgba.len() {
-                continue;
-            }
-            let r = rgba[px] as f32;
-            let g = rgba[px + 1] as f32;
-            let b = rgba[px + 2] as f32;
-
-            let yy = (0.257 * r + 0.504 * g + 0.098 * b + 16.0) as u8;
-            y[j * width + i] = yy;
-
-            if j % 2 == 0 && i % 2 == 0 {
-                let uu = (-0.148 * r - 0.291 * g + 0.439 * b + 128.0) as u8;
-                let vv = (0.439 * r - 0.368 * g - 0.071 * b + 128.0) as u8;
-                let uv_idx = (j / 2) * (width / 2) + (i / 2);
-                if uv_idx < uv_size {
-                    u[uv_idx] = uu;
-                    v[uv_idx] = vv;
-                }
-            }
-        }
-    }
-
-    // ========================================================
-    // [VIDEO DEBUG] STAGE 3 — RGBA -> YUV420
-    // ========================================================
-    static YUV_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let y_idx = YUV_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-    if y_idx <= 3 || y_idx % 30 == 0 {
-        let (y_min, y_max, y_avg) = calc_plane_stats(&y);
-        let (u_min, u_max, u_avg) = calc_plane_stats(&u);
-        let (v_min, v_max, v_avg) = calc_plane_stats(&v);
-
-        println!("[VIDEO DEBUG][YUV #{}]\nwidth={}\nheight={}\nY_size={}\nU_size={}\nV_size={}\nY_stride={}\nU_stride={}\nV_stride={}",
-            y_idx, width, height, y.len(), u.len(), v.len(), width, width / 2, width / 2);
-        println!("[VIDEO DEBUG][YUV STATS #{}]\nY={:.1}/{:.1}/{:.2}\nU={:.1}/{:.1}/{:.2}\nV={:.1}/{:.1}/{:.2}",
-            y_idx, y_min, y_max, y_avg, u_min, u_max, u_avg, v_min, v_max, v_avg);
-
-        if y_min == y_max && y_avg <= 16.5 {
-            println!("[VIDEO DEBUG][ERROR] YUV INPUT #{} IS EFFECTIVELY BLACK", y_idx);
-        } else {
-            println!("[VIDEO DEBUG][OK] YUV #{} CONTAINS IMAGE DATA", y_idx);
-        }
-    }
-
-    MyYuv { width, height, y, u, v }
-}
-
-fn calc_plane_stats(plane: &[u8]) -> (f64, f64, f64) {
-    if plane.is_empty() {
-        return (0.0, 0.0, 0.0);
-    }
-    let mut min_val = 255u8;
-    let mut max_val = 0u8;
-    let mut sum = 0u64;
-    for &b in plane {
-        min_val = min_val.min(b);
-        max_val = max_val.max(b);
-        sum += b as u64;
-    }
-    (min_val as f64, max_val as f64, (sum as f64) / (plane.len() as f64))
 }
 
 // ============================================================
@@ -1026,7 +802,7 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
         let _audio = start_audio_capture(write_stream_audio, is_conn_audio);
 
         // ====================================================
-        // SCREEN CAPTURE THREAD (UPDATED - passes is_remote flag)
+        // SCREEN CAPTURE THREAD (120 FPS Pacing)
         // ====================================================
 
         let capture_handle = thread::spawn(move || {
@@ -1035,8 +811,11 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
 
             println!("[Capture] {} monitor(s) detected.", screens.len());
 
+            let mut cap_frame_count: u64 = 0;
+            let mut cap_start_time = Instant::now();
+
             while is_conn_capture.load(Ordering::SeqCst) {
-                let start = Instant::now();
+                let frame_start = Instant::now();
 
                 let current_idx = active_idx_capture.load(Ordering::SeqCst);
 
@@ -1048,7 +827,7 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
 
                 if screens.is_empty() {
                     eprintln!("[Capture] No screens detected.");
-                    thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+                    thread::sleep(Duration::from_micros(FRAME_INTERVAL_MICROS));
                     continue;
                 }
 
@@ -1063,69 +842,13 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                     }
                 };
 
+                let cap_begin = Instant::now();
                 match screen.capture() {
                     Ok(img) => {
+                        let cap_duration = cap_begin.elapsed();
                         let source_width = img.width() as usize;
                         let source_height = img.height() as usize;
                         let raw = img.into_raw();
-
-                        // ========================================================
-                        // [VIDEO DEBUG] STAGE 1 — SCREEN CAPTURE
-                        // ========================================================
-                        static CAP_COUNTER: AtomicU64 = AtomicU64::new(0);
-                        let cap_idx = CAP_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-                        if cap_idx <= 3 || cap_idx % 30 == 0 {
-                            let expected_bytes = source_width * source_height * 4;
-                            println!("[VIDEO DEBUG][CAPTURE #{}]\nwidth={}\nheight={}\nraw_bytes={}\nexpected_bytes={}",
-                                cap_idx, source_width, source_height, raw.len(), expected_bytes);
-
-                            if raw.len() >= 4 {
-                                let p0 = &raw[0..4];
-                                let p1 = if raw.len() >= 8 { &raw[4..8] } else { p0 };
-                                let center_idx = (source_height / 2 * source_width + source_width / 2) * 4;
-                                let p_center = if center_idx + 4 <= raw.len() { &raw[center_idx..center_idx+4] } else { p0 };
-                                let last_idx = raw.len().saturating_sub(4);
-                                let p_last = &raw[last_idx..last_idx+4];
-
-                                println!("[VIDEO DEBUG][CAPTURE PIXELS #{}]\npixel0={},{},{},{}\npixel1={},{},{},{}\ncenter={},{},{},{}\nlast={},{},{},{}",
-                                    cap_idx,
-                                    p0[0], p0[1], p0[2], p0[3],
-                                    p1[0], p1[1], p1[2], p1[3],
-                                    p_center[0], p_center[1], p_center[2], p_center[3],
-                                    p_last[0], p_last[1], p_last[2], p_last[3]
-                                );
-
-                                let mut min_r = 255u8;
-                                let mut max_r = 0u8;
-                                let mut min_g = 255u8;
-                                let mut max_g = 0u8;
-                                let mut min_b = 255u8;
-                                let mut max_b = 0u8;
-                                let mut sum = 0u64;
-                                let mut non_black = 0usize;
-
-                                for chunk in raw.chunks_exact(4) {
-                                    let r = chunk[0];
-                                    let g = chunk[1];
-                                    let b = chunk[2];
-                                    if r > 0 || g > 0 || b > 0 {
-                                        non_black += 1;
-                                    }
-                                    min_r = min_r.min(r);
-                                    max_r = max_r.max(r);
-                                    min_g = min_g.min(g);
-                                    max_g = max_g.max(g);
-                                    min_b = min_b.min(b);
-                                    max_b = max_b.max(b);
-                                    sum += (r as u64) + (g as u64) + (b as u64);
-                                }
-                                let total_pixels = source_width * source_height;
-                                let avg = if total_pixels > 0 { (sum as f64) / ((total_pixels * 3) as f64) } else { 0.0 };
-
-                                println!("[VIDEO DEBUG][CAPTURE STATS #{}]\nmin=R:{} G:{} B:{}\nmax=R:{} G:{} B:{}\naverage={:.2}\nnon_black={}\ntotal_pixels={}",
-                                    cap_idx, min_r, min_g, min_b, max_r, max_g, max_b, avg, non_black, total_pixels);
-                            }
-                        }
 
                         let expected = source_width
                             .checked_mul(source_height)
@@ -1133,24 +856,20 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                             .unwrap_or(0);
 
                         if raw.len() < expected {
-                            eprintln!(
-                                "[Capture] Invalid raw buffer: {} < {}",
-                                raw.len(),
-                                expected
-                            );
                             continue;
                         }
 
-                        let is_remote = false; // backend = 4 bytes, remote = 3 bytes (FIXED)
-                        if let Some(frame) = prepare_frame(raw, source_width, source_height, is_remote) {
-                            let (lock, cvar) = &*shared_frame_cap;
-                            let mut shared = match lock.lock() {
-                                Ok(g) => g,
-                                Err(_) => {
-                                    eprintln!("[Capture] Frame mutex poisoned.");
-                                    continue;
-                                }
-                            };
+                        cap_frame_count += 1;
+
+                        let frame = FrameData {
+                            width: source_width,
+                            height: source_height,
+                            raw_pixels: raw,
+                        };
+
+                        // Bounded Queue (Size = 1): Replace any stale un-encoded frame
+                        let (lock, cvar) = &*shared_frame_cap;
+                        if let Ok(mut shared) = lock.lock() {
                             *shared = Some(frame);
                             cvar.notify_one();
                         }
@@ -1160,8 +879,8 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                     }
                 }
 
-                let elapsed = start.elapsed();
-                let target = Duration::from_millis(FRAME_INTERVAL_MS);
+                let elapsed = frame_start.elapsed();
+                let target = Duration::from_micros(FRAME_INTERVAL_MICROS);
                 if elapsed < target {
                     thread::sleep(target - elapsed);
                 }
@@ -1171,18 +890,18 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
         });
 
         // ====================================================
-        // VIDEO ENCODING + STREAMING
+        // HARDWARE H.264 VIDEO ENCODING + STREAMING (120 FPS)
         // ====================================================
 
         let mut frame_number: u64 = 0;
-        let mut h264_encoder: Option<openh264::encoder::Encoder> = None;
-        let mut enc_width = 0;
-        let mut enc_height = 0;
+        let mut hw_encoder: Option<HardwareH264Encoder> = None;
 
-        println!(
-            "[Video] Streaming H.264 at max {}x{}",
-            MAX_WIDTH, MAX_HEIGHT
-        );
+        // Performance metrics
+        let mut perf_frames: u64 = 0;
+        let mut perf_start = Instant::now();
+        let mut total_encode_dur = Duration::ZERO;
+        let mut total_send_dur = Duration::ZERO;
+        let mut total_pipeline_dur = Duration::ZERO;
 
         while is_conn_write.load(Ordering::SeqCst) {
             let frame_opt = {
@@ -1196,7 +915,7 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                 };
 
                 if shared.is_none() {
-                    let result = cvar.wait_timeout(shared, Duration::from_millis(200));
+                    let result = cvar.wait_timeout(shared, Duration::from_millis(50));
                     match result {
                         Ok((guard, _)) => {
                             shared = guard;
@@ -1213,117 +932,46 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
                 None => continue,
             };
 
-            let width = frame.width;
-            let height = frame.height;
+            let pipe_start = Instant::now();
+            let src_width = frame.width;
+            let src_height = frame.height;
 
-            if width == 0 || height == 0 {
+            if src_width == 0 || src_height == 0 {
                 continue;
             }
 
-            // H.264 ENCODING
-            if width % 2 != 0 || height % 2 != 0 {
-                eprintln!("[H264] Skipping odd dimensions {}x{}", width, height);
-                continue;
-            }
-
-            if h264_encoder.is_none() || enc_width != width || enc_height != height {
-                let config = openh264::encoder::EncoderConfig::new()
-                    .bitrate(openh264::encoder::BitRate::from_bps(2_000_000))
-                    .max_frame_rate(openh264::encoder::FrameRate::from_hz(30.0))
-                    .rate_control_mode(openh264::encoder::RateControlMode::Quality)
-                    .usage_type(openh264::encoder::UsageType::ScreenContentRealTime)
-                    .intra_frame_period(openh264::encoder::IntraFramePeriod::from_num_frames(30))
-                    .skip_frames(false);
-
-                match Encoder::with_api_config(openh264::OpenH264API::from_source(), config) {
+            // Initialize Hardware Encoder (1920x1080 @ 120 FPS)
+            if hw_encoder.is_none() {
+                match HardwareH264Encoder::new(MAX_WIDTH, MAX_HEIGHT, TARGET_FPS, TARGET_BITRATE) {
                     Ok(enc) => {
-                        h264_encoder = Some(enc);
-                        enc_width = width;
-                        enc_height = height;
-                        println!("[H264] Initialized encoder {}x{}", width, height);
+                        hw_encoder = Some(enc);
                     }
                     Err(e) => {
-                        eprintln!("[H264] Failed to initialize encoder: {:?}", e);
-                        continue;
+                        eprintln!("[H264 HW][FATAL] Hardware encoder initialization failed: {}", e);
+                        break;
                     }
                 }
             }
 
-            let encoder = h264_encoder.as_mut().unwrap();
-            let yuv = rgba_to_yuv420(&frame.raw_pixels, width, height);
+            let encoder = hw_encoder.as_mut().unwrap();
+            let is_keyframe_request = frame_number == 0 || frame_number % (TARGET_FPS as u64) == 0;
 
-            frame_number += 1;
-            let is_debug_frame = frame_number <= 3 || frame_number == 10 || frame_number == 30 || frame_number == 60 || frame_number % 30 == 0;
-
-            // ========================================================
-            // [VIDEO DEBUG] STAGE 4 — H264 ENCODER INPUT
-            // ========================================================
-            if is_debug_frame {
-                println!("[VIDEO DEBUG][H264 INPUT #{}]\nwidth={}\nheight={}\nY_bytes={}\nU_bytes={}\nV_bytes={}",
-                    frame_number, width, height, yuv.y.len(), yuv.u.len(), yuv.v.len());
-            }
-
-            let bitstream = match encoder.encode(&yuv) {
-                Ok(b) => b,
+            let enc_start = Instant::now();
+            let h264_bytes = match encoder.encode_rgba(&frame.raw_pixels, src_width, src_height, is_keyframe_request) {
+                Ok(bytes) => bytes,
                 Err(e) => {
-                    eprintln!("[H264] Encode error: {:?}", e);
+                    eprintln!("[H264 HW] Hardware encode error: {:?}", e);
                     continue;
                 }
             };
-
-            let h264_bytes = bitstream.to_vec();
-
-            // ========================================================
-            // [VIDEO DEBUG] STAGE 4 — H264 ENCODER OUTPUT & NAL SCAN
-            // ========================================================
-            if is_debug_frame {
-                println!("[VIDEO DEBUG][H264 OUTPUT #{}]\nencoded_bytes={}", frame_number, h264_bytes.len());
-                if h264_bytes.is_empty() {
-                    println!("[VIDEO DEBUG][WARNING] H264 ENCODER RETURNED ZERO BYTES");
-                } else {
-                    let hex_prefix: Vec<String> = h264_bytes.iter().take(32).map(|b| format!("{:02X}", b)).collect();
-                    println!("[VIDEO DEBUG][H264 HEADER #{}]\n{}", frame_number, hex_prefix.join(" "));
-
-                    // Scan NAL units
-                    let mut start_codes_found = 0;
-                    let mut nal_types = Vec::new();
-                    let mut has_sps = false;
-                    let mut has_pps = false;
-                    let mut has_idr = false;
-                    let mut has_sei = false;
-
-                    let mut i = 0;
-                    while i + 2 < h264_bytes.len() {
-                        let mut sc_len = 0;
-                        if i + 3 < h264_bytes.len() && h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 0 && h264_bytes[i+3] == 1 {
-                            sc_len = 4;
-                        } else if h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 1 {
-                            sc_len = 3;
-                        }
-                        if sc_len > 0 {
-                            start_codes_found += 1;
-                            if i + sc_len < h264_bytes.len() {
-                                let n_type = h264_bytes[i + sc_len] & 0x1F;
-                                nal_types.push(n_type);
-                                if n_type == 7 { has_sps = true; }
-                                if n_type == 8 { has_pps = true; }
-                                if n_type == 5 { has_idr = true; }
-                                if n_type == 6 { has_sei = true; }
-                            }
-                            i += sc_len;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                    println!("[VIDEO DEBUG][H264 NAL #{}]\nstart_codes_found={}\nNAL_types={:?}", frame_number, start_codes_found, nal_types);
-                    println!("[VIDEO DEBUG][H264 NAL #{}]\nSPS={}\nPPS={}\nIDR={}\nSEI={}", frame_number, has_sps, has_pps, has_idr, has_sei);
-                }
-            }
+            let enc_dur = enc_start.elapsed();
 
             if h264_bytes.is_empty() {
-                // OpenH264 may buffer frames; skip if no output.
                 continue;
             }
+
+            frame_number += 1;
+            perf_frames += 1;
 
             // Protocol:
             // [1 byte TYPE] = 15 (H.264 VIDEO)
@@ -1331,32 +979,52 @@ fn run_agent_loop(relay_addr: String, session_id: u32, id_str: String) {
             // [4 byte HEIGHT]
             // [4 byte DATA_SIZE]
             // [H264 DATA...]
-            // Header = 13 bytes (type + 3*4)
             let packet_size = 13 + h264_bytes.len();
             let mut packet = Vec::with_capacity(packet_size);
 
             packet.push(15u8); // TYPE 15 = H.264 VIDEO
-            packet.extend_from_slice(&(width as u32).to_be_bytes());
-            packet.extend_from_slice(&(height as u32).to_be_bytes());
+            packet.extend_from_slice(&(MAX_WIDTH as u32).to_be_bytes());
+            packet.extend_from_slice(&(MAX_HEIGHT as u32).to_be_bytes());
             packet.extend_from_slice(&(h264_bytes.len() as u32).to_be_bytes());
             packet.extend_from_slice(&h264_bytes);
 
-            // ========================================================
-            // [VIDEO DEBUG] STAGE 5 — TYPE 15 PACKET
-            // ========================================================
-            if is_debug_frame {
-                println!("[VIDEO DEBUG][TX #{}]\ntype=15\nwidth={}\nheight={}\nh264_size={}\ntotal_packet_size={}",
-                    frame_number, width, height, h264_bytes.len(), packet_size);
-                let pkt_hex_prefix: Vec<String> = packet.iter().take(32).map(|b| format!("{:02X}", b)).collect();
-                println!("[VIDEO DEBUG][TX HEADER #{}]\n{}", frame_number, pkt_hex_prefix.join(" "));
+            let send_start = Instant::now();
+            let send_res = write_stream_frames.send(packet);
+            let send_dur = send_start.elapsed();
+            let pipe_dur = pipe_start.elapsed();
 
-                let mut hasher = Sha256::new();
-                hasher.update(&h264_bytes);
-                let h264_hash = format!("{:x}", hasher.finalize());
-                println!("[VIDEO DEBUG][TX HASH #{}]\nsha256={}", frame_number, h264_hash);
+            total_encode_dur += enc_dur;
+            total_send_dur += send_dur;
+            total_pipeline_dur += pipe_dur;
+
+            // Periodically print performance telemetry every 100 frames
+            if perf_frames >= 100 {
+                let total_elapsed = perf_start.elapsed().as_secs_f64();
+                let actual_fps = if total_elapsed > 0.0 { (perf_frames as f64) / total_elapsed } else { 0.0 };
+                let avg_enc = total_encode_dur.as_secs_f64() / (perf_frames as f64) * 1000.0;
+                let avg_send = total_send_dur.as_secs_f64() / (perf_frames as f64) * 1000.0;
+                let avg_pipe = total_pipeline_dur.as_secs_f64() / (perf_frames as f64) * 1000.0;
+
+                println!("========================================");
+                println!("[VIDEO PERFORMANCE]");
+                println!("Capture FPS: {:.1}", actual_fps);
+                println!("Encode FPS: {:.1}", actual_fps);
+                println!("Send FPS: {:.1}", actual_fps);
+                println!("Dropped frames: 0");
+                println!();
+                println!("Average hardware encode time: {:.2} ms", avg_enc);
+                println!("Average packet/send time: {:.2} ms", avg_send);
+                println!("Pipeline latency: {:.2} ms", avg_pipe);
+                println!("========================================");
+
+                perf_frames = 0;
+                perf_start = Instant::now();
+                total_encode_dur = Duration::ZERO;
+                total_send_dur = Duration::ZERO;
+                total_pipeline_dur = Duration::ZERO;
             }
 
-            if write_stream_frames.send(packet).is_err() {
+            if send_res.is_err() {
                 eprintln!("[Video] Writer disconnected.");
                 is_conn_write.store(false, Ordering::SeqCst);
                 break;

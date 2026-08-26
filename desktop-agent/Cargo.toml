@@ -28,5 +28,14 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Registry"
-] } 
+] }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant"
+] }
 openh264 = "0.9.8"
