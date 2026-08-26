@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tungstenite::Message;
 
 type ClientMap = Arc<Mutex<HashMap<String, TcpStream>>>;
@@ -418,6 +419,15 @@ fn handle_viewer(
         return;
     }
 
+    println!(
+        "[Relay] Viewer connected"
+    );
+
+    println!(
+        "[Relay] Received packet type: {}",
+        header[0]
+    );
+
     if header[0] != 2 {
         eprintln!(
             "[Relay] Invalid viewer packet type: {}",
@@ -456,7 +466,7 @@ fn handle_viewer(
     }
 
     println!(
-        "[Relay] Viewer requesting host {}",
+        "[Relay] Target ID: {}",
         session_id
     );
 
@@ -478,12 +488,17 @@ fn handle_viewer(
     };
 
     let mut host = match host {
-        Some(host) => host,
+        Some(host) => {
+            println!(
+                "[Relay] Target host found"
+            );
+
+            host
+        }
 
         None => {
             println!(
-                "[Relay] Host {} not found.",
-                session_id
+                "[Relay] Target host not found"
             );
 
             let _ = viewer.write_all(&[3u8]);
@@ -498,6 +513,7 @@ fn handle_viewer(
     // --------------------------------------------------------
     // Send authentication request to host
     //
+    // Host receives:
     // Host receives:
     //
     // [3][32-byte SHA256]
@@ -525,6 +541,10 @@ fn handle_viewer(
         return;
     }
 
+    println!(
+        "[Relay] Forwarding approval request..."
+    );
+
     // --------------------------------------------------------
     // Host authentication response
     //
@@ -533,6 +553,10 @@ fn handle_viewer(
     // --------------------------------------------------------
 
     let mut response = [0u8; 1];
+
+    println!(
+        "[Relay] Waiting for host response..."
+    );
 
     if !read_exact_logged(
         &mut host,
@@ -545,8 +569,11 @@ fn handle_viewer(
 
     if response[0] != 1 {
         println!(
-            "[Relay] Host rejected viewer {}",
-            session_id
+            "[Relay] Host rejected/timed out"
+        );
+
+        println!(
+            "[Relay] Sending ACK to viewer"
         );
 
         let _ = viewer.write_all(&[2u8]);
@@ -567,22 +594,24 @@ fn handle_viewer(
     // --------------------------------------------------------
 
     println!(
-        "[Relay] Session approved: {}",
-        session_id
+        "[Relay] Host approved"
     );
 
     println!(
-        "[Relay] TCP session fully established: {}",
-        session_id
+        "[Relay] Sending ACK to viewer"
     );
 
     // Tell viewer connection is approved.
     if !send_all(
         &mut viewer,
-        &[1u8],
+        &[2u8],
     ) {
         return;
     }
+
+    println!(
+        "[Relay] Approval ACK sent successfully"
+    );
 
     // --------------------------------------------------------
     // Clone streams
@@ -716,22 +745,7 @@ fn handle_viewer(
 }
 
 // ============================================================
-// WEBSOCKET VIEWER
-// ============================================================
-//
-// WebSocket viewers cannot simply receive arbitrary TCP chunks
-// because WebSocket itself requires message boundaries.
-//
-// Therefore the relay parses the application protocol here
-// and creates one WebSocket binary message per application
-// packet.
-//
-// Supported host -> viewer packets:
-//
-// 1  = video
-// 13 = some data packet
-// 16 = chat
-// 12 = clipboard
+// WEBSOCKET VIEWER (FIXED - now parses TYPE 13 correctly)
 // ============================================================
 
 fn handle_websocket_viewer(
@@ -932,7 +946,7 @@ fn handle_websocket_viewer(
     );
 
     if ws.send(
-        Message::Binary(vec![1u8])
+        Message::Binary(vec![2u8])
     ).is_err() {
         return;
     }
@@ -992,7 +1006,7 @@ fn handle_websocket_viewer(
         Arc::clone(&ws_arc);
 
     // --------------------------------------------------------
-    // HOST -> WEBSOCKET VIEWER
+    // HOST -> WEBSOCKET VIEWER (FIXED)
     // --------------------------------------------------------
 
     let _host_to_viewer_thread =
@@ -1016,188 +1030,200 @@ fn handle_websocket_viewer(
 
                 match packet_type {
                     // ====================================================
-                    // VIDEO
+                    // TYPE 13 / 15 (H.264 VIDEO)
                     //
-                    // Type:
-                    //
-                    // 1 byte  = type
-                    // 12 bytes = video header
-                    // N bytes = JPEG
-                    //
-                    // JPEG size is bytes 8..12 of the 12-byte header.
+                    // 1 byte  = type (13 or 15)
+                    // 12 bytes = video header (WIDTH:u32, HEIGHT:u32, H264_SIZE:u32)
+                    // N bytes = H264 DATA
                     // ====================================================
-
-                    1 => {
-                        let mut header =
-                            [0u8; 12];
-
-                        if host_reader
-                            .read_exact(&mut header)
-                            .is_err()
-                        {
+                    13 | 15 => {
+                        let mut header = [0u8; 12];
+                        if host_reader.read_exact(&mut header).is_err() {
                             break;
                         }
 
-                        let mut size_buf =
-                            [0u8; 4];
+                        let mut width_buf = [0u8; 4];
+                        width_buf.copy_from_slice(&header[0..4]);
+                        let width = u32::from_be_bytes(width_buf);
 
-                        size_buf.copy_from_slice(
-                            &header[8..12]
-                        );
+                        let mut height_buf = [0u8; 4];
+                        height_buf.copy_from_slice(&header[4..8]);
+                        let height = u32::from_be_bytes(height_buf);
 
-                        let payload_size =
-                            u32::from_be_bytes(
-                                size_buf
-                            ) as usize;
+                        let mut size_buf = [0u8; 4];
+                        size_buf.copy_from_slice(&header[8..12]);
+                        let payload_size = u32::from_be_bytes(size_buf) as usize;
 
-                        println!(
-                            "[Relay Video] Packet type: 1"
-                        );
-
-                        println!(
-                            "[Relay Video] Header size: 12"
-                        );
-
-                        println!(
-                            "[Relay Video] Payload size: {}",
-                            payload_size
-                        );
-
-                        // Basic sanity check.
-                        if payload_size >
-                            50 * 1024 * 1024
-                        {
+                        if width == 0 || width > 7680 || height == 0 || height > 4320 {
                             eprintln!(
-                                "[Relay Video] PARSE ERROR: Invalid payload size: {}",
+                                "[Relay H264] PARSE ERROR: Invalid dimensions: {}x{}",
+                                width, height
+                            );
+                            break;
+                        }
+
+                        if payload_size == 0 || payload_size > 50 * 1024 * 1024 {
+                            eprintln!(
+                                "[Relay H264] PARSE ERROR: Invalid payload size: {}",
                                 payload_size
                             );
-
                             break;
                         }
 
-                        let mut payload =
-                            vec![0u8; payload_size];
-
+                        let mut payload = vec![0u8; payload_size];
                         if let Err(e) = host_reader.read_exact(&mut payload) {
-                            eprintln!("[Relay Video] PARSE ERROR: failed to read payload: {:?}", e);
+                            eprintln!("[Relay H264] PARSE ERROR: failed to read payload: {:?}", e);
                             break;
                         }
 
                         let total_size = 1 + 12 + payload_size;
-                        println!("[Relay Video] Total packet size: {}", total_size);
 
-                        let mut msg =
-                            Vec::with_capacity(
-                                total_size
-                            );
+                        // ========================================================
+                        // [VIDEO DEBUG] STAGE 7 — RELAY RX
+                        // ========================================================
+                        println!("[VIDEO DEBUG][RELAY RX]\ntype={}\npacket_size={}", packet_type, total_size);
+                        println!("[VIDEO DEBUG][RELAY RX PARSE]\nwidth={}\nheight={}\ndeclared_size={}\nactual_size={}\nvalid={}",
+                            width, height, payload_size, payload.len(), payload_size == payload.len());
 
-                        msg.push(1u8);
-                        msg.extend_from_slice(&header);
-                        msg.extend_from_slice(&payload);
-                        
-                        println!("[Video Debug] First 32 bytes: {:02X?}", &msg[..std::cmp::min(msg.len(), 32)]);
-                        println!("[Relay Video] Sending WebSocket binary frame: {} bytes", msg.len());
+                        let mut rx_hasher = Sha256::new();
+                        rx_hasher.update(&payload);
+                        let rx_hash = format!("{:x}", rx_hasher.finalize());
+                        println!("[VIDEO DEBUG][RELAY RX HASH]\nsha256={}", rx_hash);
 
-                        let mut lock =
-                            match ws_arc_clone.lock() {
-                                Ok(lock) => lock,
+                        // ------------------------------------------------
+                        // RGBA -> RGB conversion
+                        //
+                        // If raw RGBA pixels are sent instead of encoded
+                        // bitstream, convert 4-byte RGBA to 3-byte RGB.
+                        // ------------------------------------------------
 
-                                Err(_) => {
-                                    break;
-                                }
-                            };
+                        let pixel_count = payload.len() / 4;
+                        let is_rgba = payload.len() % 4 == 0
+                            && pixel_count == (width as usize) * (height as usize);
 
-                        if lock
-                            .send(
-                                Message::Binary(msg)
-                            )
-                            .is_err()
-                        {
+                        let (rgb_payload, rgb_size) = if is_rgba {
+                            let mut rgb = Vec::with_capacity(pixel_count * 3);
+                            for chunk in payload.chunks_exact(4) {
+                                rgb.push(chunk[0]); // R
+                                rgb.push(chunk[1]); // G
+                                rgb.push(chunk[2]); // B
+                                // chunk[3] = A (dropped)
+                            }
+                            let sz = rgb.len();
+                            (rgb, sz)
+                        } else {
+                            // Encoded H.264 bitstream data. Forward unchanged.
+                            let sz = payload.len();
+                            (payload, sz)
+                        };
+
+                        // Rebuild header with the (possibly new) payload size
+                        let mut new_header = [0u8; 12];
+                        new_header[0..4].copy_from_slice(&width.to_be_bytes());
+                        new_header[4..8].copy_from_slice(&height.to_be_bytes());
+                        new_header[8..12].copy_from_slice(&(rgb_size as u32).to_be_bytes());
+
+                        let new_total_size = 1 + 12 + rgb_size;
+
+                        let mut full_msg = Vec::with_capacity(new_total_size);
+                        full_msg.push(packet_type);
+                        full_msg.extend_from_slice(&new_header);
+                        full_msg.extend_from_slice(&rgb_payload);
+
+                        // ========================================================
+                        // [VIDEO DEBUG] STAGE 7 — RELAY TX
+                        // ========================================================
+                        println!("[VIDEO DEBUG][RELAY TX]\ntype={}\npacket_size={}\nh264_size={}", packet_type, new_total_size, rgb_size);
+                        let mut tx_hasher = Sha256::new();
+                        tx_hasher.update(&rgb_payload);
+                        let tx_hash = format!("{:x}", tx_hasher.finalize());
+                        println!("[VIDEO DEBUG][RELAY TX HASH]\nsha256={}", tx_hash);
+
+                        let mut lock = match ws_arc_clone.lock() {
+                            Ok(lock) => lock,
+                            Err(_) => {
+                                break;
+                            }
+                        };
+
+                        if lock.send(Message::Binary(full_msg)).is_err() {
                             break;
                         }
                     }
 
                     // ====================================================
-                    // TYPE 13
+                    // TYPE 17 (AUDIO)
                     //
-                    // 1 byte type
-                    // 10 byte header
-                    // payload size = first 4 bytes
+                    // 1 byte  = type
+                    // 4 bytes = audio data size (u32 BE)
+                    // 4 bytes = sample rate (u32 BE)
+                    // 2 bytes = channels (u16 BE)
+                    // N bytes = audio data
                     // ====================================================
-
-                    13 => {
-                        let mut header =
-                            [0u8; 10];
-
-                        if host_reader
-                            .read_exact(&mut header)
-                            .is_err()
-                        {
+                    17 => {
+                        let mut header = [0u8; 10];
+                        if host_reader.read_exact(&mut header).is_err() {
                             break;
                         }
 
-                        let mut size_buf =
-                            [0u8; 4];
+                        let mut size_buf = [0u8; 4];
+                        size_buf.copy_from_slice(&header[0..4]);
+                        let payload_size = u32::from_be_bytes(size_buf) as usize;
 
-                        size_buf.copy_from_slice(
-                            &header[0..4]
-                        );
-
-                        let payload_size =
-                            u32::from_be_bytes(
-                                size_buf
-                            ) as usize;
-
-                        if payload_size >
-                            50 * 1024 * 1024
-                        {
-                            eprintln!(
-                                "[Relay] Invalid type 13 payload size: {}",
-                                payload_size
-                            );
-
+                        if payload_size == 0 || payload_size > 10 * 1024 * 1024 {
+                            eprintln!("[Relay Audio] PARSE ERROR: Invalid payload size: {}", payload_size);
                             break;
                         }
 
-                        let mut payload =
-                            vec![0u8; payload_size];
-
-                        if host_reader
-                            .read_exact(&mut payload)
-                            .is_err()
-                        {
+                        let mut payload = vec![0u8; payload_size];
+                        if let Err(e) = host_reader.read_exact(&mut payload) {
+                            eprintln!("[Relay Audio] PARSE ERROR: failed to read payload: {:?}", e);
                             break;
                         }
 
-                        let mut msg =
-                            Vec::with_capacity(
-                                1 +
-                                10 +
-                                payload_size
-                            );
+                        let total_size = 1 + header.len() + payload_size;
 
-                        msg.push(13u8);
+                        let mut msg = Vec::with_capacity(total_size);
+                        msg.push(17u8);
+                        msg.extend_from_slice(&header);
+                        msg.extend_from_slice(&payload);
 
-                        msg.extend_from_slice(
-                            &header
-                        );
+                        let mut lock = match ws_arc_clone.lock() {
+                            Ok(lock) => lock,
+                            Err(_) => {
+                                break;
+                            }
+                        };
 
-                        msg.extend_from_slice(
-                            &payload
-                        );
+                        println!("[AUDIO RELAY TX] type=17 packet_size={}", total_size);
 
-                        let mut lock =
-                            match ws_arc_clone.lock() {
-                                Ok(lock) => lock,
-                                Err(_) => break,
-                            };
+                        if lock.send(Message::Binary(msg)).is_err() {
+                            break;
+                        }
+                    }
 
-                        if lock
-                            .send(
-                                Message::Binary(msg)
-                            )
-                            .is_err()
-                        {
+                    // ====================================================
+                    // TYPE 14 (PING / STATUS)
+                    //
+                    // 1 byte  = type
+                    // 8 bytes = u64 timestamp
+                    // ====================================================
+                    14 => {
+                        let mut payload = [0u8; 8];
+                        if host_reader.read_exact(&mut payload).is_err() {
+                            break;
+                        }
+
+                        let mut msg = Vec::with_capacity(9);
+                        msg.push(14u8);
+                        msg.extend_from_slice(&payload);
+
+                        let mut lock = match ws_arc_clone.lock() {
+                            Ok(lock) => lock,
+                            Err(_) => break,
+                        };
+
+                        if lock.send(Message::Binary(msg)).is_err() {
                             break;
                         }
                     }

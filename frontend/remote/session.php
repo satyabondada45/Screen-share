@@ -1,4 +1,5 @@
 <?php
+
 require_once __DIR__ . '/../../backend/config/database.php';
 
 $deviceUid = $_GET['id'] ?? null;
@@ -26,144 +27,191 @@ if (!$device) {
 }
 
 $deviceName = $device['name'] ?? 'Unknown Device';
+
 $isOnline = !empty($device['is_online']);
 
 $sessionCode = strlen($deviceUid) > 3
     ? substr($deviceUid, 0, 3) . '-' . substr($deviceUid, 3)
     : $deviceUid;
 ?>
-
 <!DOCTYPE html>
+
 <html lang="en">
 
 <head>
+
     <meta charset="UTF-8">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <title>
-        Active Remote Session -
-        <?= htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') ?>
+        Active Remote Session - <?= htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') ?>
     </title>
 
     <style>
         :root {
+
             --bg: #0b0f19;
+
             --card-bg: #1e293b;
+
             --border: #334155;
+
             --accent: #3b82f6;
+
             --accent-hover: #2563eb;
+
             --text-main: #f8fafc;
+
             --text-muted: #94a3b8;
+
             --online: #22c55e;
+
             --offline: #64748b;
+
             --danger: #ef4444;
+
             --success: #16a34a;
+
             --warning: #eab308;
+
         }
 
         * {
+
             box-sizing: border-box;
+
             margin: 0;
+
             padding: 0;
+
             font-family:
                 -apple-system,
                 BlinkMacSystemFont,
                 "Segoe UI",
                 Roboto,
                 sans-serif;
+
         }
 
         body {
+
             background: var(--bg);
+
             color: var(--text-main);
+
             min-height: 100vh;
+
             display: flex;
+
             flex-direction: column;
+
         }
 
-        /* =========================
-           TOP BAR
-        ========================= */
-
         .topbar {
+
             height: 60px;
+
             background: #0f172a;
+
             border-bottom: 1px solid var(--border);
 
             display: flex;
+
             justify-content: space-between;
+
             align-items: center;
 
             padding: 0 24px;
+
             flex-shrink: 0;
+
         }
 
         .device-badge {
+
             display: flex;
+
             align-items: center;
+
             gap: 10px;
+
         }
 
         .dot {
+
             width: 10px;
+
             height: 10px;
+
             border-radius: 50%;
 
             background:
                 <?= $isOnline
                     ? 'var(--online)'
-                    : 'var(--offline)' ?>;
+                    : 'var(--offline)' ?>
+            ;
 
             box-shadow:
                 <?= $isOnline
                     ? '0 0 10px var(--online)'
-                    : 'none' ?>;
+                    : 'none' ?>
+            ;
+
         }
 
-        /* =========================
-           MAIN
-        ========================= */
-
         .container {
-            max-width: 1200px;
+
             width: 100%;
 
+            max-width: 1400px;
+
             margin: 24px auto;
+
             padding: 0 20px;
 
             flex: 1;
 
             display: flex;
+
             flex-direction: column;
+
         }
 
         .session-card {
+
             background: var(--card-bg);
+
             border: 1px solid var(--border);
+
             border-radius: 14px;
 
             padding: 24px;
 
             box-shadow:
-                0 10px 25px rgba(0, 0, 0, 0.3);
+                0 10px 25px rgba(0, 0, 0, .3);
 
             display: flex;
+
             flex-direction: column;
 
-            min-height: calc(100vh - 108px);
+            min-height:
+                calc(100vh - 108px);
+
         }
 
         .session-description {
+
             color: var(--text-muted);
-            margin-top: 4px;
+
+            margin-top: 5px;
+
         }
 
-        /* =========================
-           SESSION CODE
-        ========================= */
-
         .code-display {
+
             background: #0f172a;
+
             border: 1px dashed var(--accent);
 
             border-radius: 10px;
@@ -173,25 +221,29 @@ $sessionCode = strlen($deviceUid) > 3
             text-align: center;
 
             margin: 16px 0;
+
         }
 
         .session-code {
+
             font-family: monospace;
+
             font-size: 2rem;
+
             letter-spacing: 4px;
 
             color: #38bdf8;
+
             font-weight: 700;
+
         }
 
-        /* =========================
-           BUTTONS
-        ========================= */
-
         .btn {
+
             display: inline-flex;
 
             align-items: center;
+
             justify-content: center;
 
             gap: 6px;
@@ -208,65 +260,90 @@ $sessionCode = strlen($deviceUid) > 3
 
             border: none;
 
-            transition: 0.2s;
+            transition: .2s;
 
             text-align: center;
 
-            font-size: 0.9rem;
+            font-size: .9rem;
+
         }
 
         .btn-primary {
+
             background: var(--accent);
+
             color: white;
+
         }
 
         .btn-primary:hover {
+
             background: var(--accent-hover);
+
         }
 
         .btn-success {
+
             background: var(--success);
+
             color: white;
+
         }
 
         .btn-success:hover {
+
             background: #15803d;
+
         }
 
         .btn-danger {
-            background: rgba(239, 68, 68, 0.15);
+
+            background: rgba(239, 68, 68, .15);
+
             color: var(--danger);
+
             border: 1px solid var(--danger);
+
         }
 
         .btn-danger:hover {
+
             background: var(--danger);
+
             color: white;
+
         }
 
         .btn-secondary {
+
             background: #475569;
+
             color: white;
+
         }
 
         .btn-secondary:hover {
+
             background: #334155;
+
         }
 
         .btn-warning {
+
             background: var(--warning);
-            color: #fff;
+
+            color: white;
+
         }
 
         .btn-warning:hover {
+
             background: #ca8a04;
+
         }
 
-        /* =========================
-           ACTION BUTTONS
-        ========================= */
-
         .main-actions {
+
             display: grid;
 
             grid-template-columns: 1fr 1fr;
@@ -274,14 +351,12 @@ $sessionCode = strlen($deviceUid) > 3
             gap: 12px;
 
             margin-bottom: 16px;
+
         }
 
-        /* =========================
-           TOOLBAR
-        ========================= */
-
         .toolbar {
-            display: flex;
+
+            display: none;
 
             gap: 10px;
 
@@ -298,9 +373,11 @@ $sessionCode = strlen($deviceUid) > 3
             border-radius: 8px;
 
             border: 1px solid var(--border);
+
         }
 
         select.monitor-select {
+
             padding: 10px 12px;
 
             border-radius: 8px;
@@ -311,22 +388,16 @@ $sessionCode = strlen($deviceUid) > 3
 
             border: 1px solid var(--border);
 
-            font-size: 0.9rem;
+            font-size: .9rem;
 
             outline: none;
 
             cursor: pointer;
-        }
 
-        select.monitor-select:focus {
-            border-color: var(--accent);
         }
-
-        /* =========================
-           STREAM
-        ========================= */
 
         .canvas-container {
+
             display: none;
 
             margin-top: 10px;
@@ -341,16 +412,19 @@ $sessionCode = strlen($deviceUid) > 3
 
             position: relative;
 
-            box-shadow:
-                0 12px 30px rgba(0, 0, 0, 0.5);
-
             flex: 1;
 
             min-height: 500px;
+
+            box-shadow:
+                0 12px 30px rgba(0, 0, 0, .5);
+
         }
 
         canvas {
+
             width: 100%;
+
             height: 100%;
 
             object-fit: contain;
@@ -362,19 +436,19 @@ $sessionCode = strlen($deviceUid) > 3
             outline: none;
 
             background: #000;
+
         }
 
-        /* =========================
-           HUD
-        ========================= */
-
         .hud-badge {
+
             position: absolute;
 
             top: 12px;
+
             right: 12px;
 
-            background: rgba(15, 23, 42, 0.85);
+            background:
+                rgba(15, 23, 42, .9);
 
             border: 1px solid var(--border);
 
@@ -384,29 +458,24 @@ $sessionCode = strlen($deviceUid) > 3
 
             font-family: monospace;
 
-            font-size: 0.8rem;
+            font-size: .8rem;
 
             color: var(--online);
 
             pointer-events: none;
 
             z-index: 10;
+
         }
 
-        /* =========================
-           DROP OVERLAY
-        ========================= */
-
         .drop-overlay {
+
             position: absolute;
 
-            top: 0;
-            left: 0;
+            inset: 0;
 
-            width: 100%;
-            height: 100%;
-
-            background: rgba(59, 130, 246, 0.85);
+            background:
+                rgba(59, 130, 246, .85);
 
             display: flex;
 
@@ -428,22 +497,26 @@ $sessionCode = strlen($deviceUid) > 3
 
             pointer-events: none;
 
-            transition: 0.2s;
+            transition: .2s;
+
+            text-align: center;
+
         }
 
         .drop-overlay.active {
+
             opacity: 1;
+
             pointer-events: auto;
+
         }
 
-        /* =========================
-           CHAT
-        ========================= */
-
         .chat-panel {
+
             position: fixed;
 
             bottom: 20px;
+
             right: 20px;
 
             width: 320px;
@@ -455,7 +528,7 @@ $sessionCode = strlen($deviceUid) > 3
             border-radius: 10px;
 
             box-shadow:
-                0 10px 30px rgba(0, 0, 0, 0.6);
+                0 10px 30px rgba(0, 0, 0, .6);
 
             display: flex;
 
@@ -468,21 +541,23 @@ $sessionCode = strlen($deviceUid) > 3
             transform: translateY(150%);
 
             transition:
-                transform 0.3s ease;
+                transform .3s ease;
+
         }
 
         .chat-panel.open {
+
             transform: translateY(0);
+
         }
 
         .chat-header {
+
             background: #0f172a;
 
             padding: 12px 16px;
 
             font-weight: bold;
-
-            font-size: 0.95rem;
 
             border-bottom: 1px solid var(--border);
 
@@ -491,39 +566,39 @@ $sessionCode = strlen($deviceUid) > 3
             justify-content: space-between;
 
             align-items: center;
+
         }
 
         .chat-close {
+
             cursor: pointer;
 
             color: var(--text-muted);
 
             font-size: 1.2rem;
 
-            line-height: 1;
-        }
-
-        .chat-close:hover {
-            color: white;
         }
 
         .chat-messages {
+
             height: 250px;
 
             overflow-y: auto;
 
             padding: 12px;
 
-            font-size: 0.85rem;
+            font-size: .85rem;
 
             display: flex;
 
             flex-direction: column;
 
             gap: 8px;
+
         }
 
         .msg {
+
             padding: 8px 12px;
 
             border-radius: 8px;
@@ -531,33 +606,37 @@ $sessionCode = strlen($deviceUid) > 3
             max-width: 85%;
 
             word-wrap: break-word;
+
         }
 
         .msg.sent {
+
             background: var(--accent);
 
             align-self: flex-end;
 
-            color: white;
         }
 
         .msg.recv {
+
             background: #334155;
 
             align-self: flex-start;
 
-            color: white;
         }
 
         .chat-input {
+
             display: flex;
 
             border-top: 1px solid var(--border);
 
             background: #0f172a;
+
         }
 
         .chat-input input {
+
             flex: 1;
 
             background: transparent;
@@ -570,10 +649,10 @@ $sessionCode = strlen($deviceUid) > 3
 
             outline: none;
 
-            font-size: 0.9rem;
         }
 
         .chat-input button {
+
             background: var(--accent);
 
             border: none;
@@ -586,59 +665,66 @@ $sessionCode = strlen($deviceUid) > 3
 
             font-weight: bold;
 
-            transition: 0.2s;
         }
 
-        .chat-input button:hover {
-            background: var(--accent-hover);
-        }
-
-        /* =========================
-           RESPONSIVE
-        ========================= */
-
-        @media (max-width: 700px) {
+        @media(max-width:700px) {
 
             .topbar {
+
                 padding: 0 14px;
+
             }
 
             .container {
+
                 padding: 0 10px;
+
                 margin: 10px auto;
+
             }
 
             .session-card {
+
                 padding: 16px;
+
             }
 
             .main-actions {
+
                 grid-template-columns: 1fr;
+
             }
 
             .session-code {
+
                 font-size: 1.4rem;
+
             }
 
             .chat-panel {
-                width: calc(100% - 20px);
+
+                width:
+                    calc(100% - 20px);
 
                 right: 10px;
+
                 bottom: 10px;
+
             }
 
             .canvas-container {
+
                 min-height: 400px;
+
             }
+
         }
     </style>
+
 </head>
 
 <body>
 
-    <!-- =========================
-         TOP BAR
-    ========================= -->
 
     <div class="topbar">
 
@@ -647,26 +733,27 @@ $sessionCode = strlen($deviceUid) > 3
             <div class="dot"></div>
 
             <strong>
+
                 Host:
-                <?= htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') ?>
+                <?= htmlspecialchars(
+                    $deviceName,
+                    ENT_QUOTES,
+                    'UTF-8'
+                ) ?>
+
             </strong>
 
         </div>
 
-        <a
-            href="../devices.php"
-            class="btn btn-danger"
-            style="padding: 6px 14px; font-size: 0.8rem;"
-        >
+        <a href="../devices.php" class="btn btn-danger" style="
+            padding:6px 14px;
+            font-size:.8rem;
+        ">
             Back to Dashboard
         </a>
 
     </div>
 
-
-    <!-- =========================
-         MAIN CONTENT
-    ========================= -->
 
     <div class="container">
 
@@ -677,65 +764,50 @@ $sessionCode = strlen($deviceUid) > 3
             </h2>
 
             <p class="session-description">
-                Launch low-latency browser streaming or open the native desktop client.
+                Browser remote desktop session.
             </p>
 
 
-            <!-- SESSION CODE -->
-
             <div class="code-display">
 
-                <div
-                    style="
-                        font-size: 0.8rem;
-                        color: var(--text-muted);
-                        margin-bottom: 4px;
-                    "
-                >
+                <div style="
+                font-size:.8rem;
+                color:var(--text-muted);
+                margin-bottom:4px;
+            ">
                     REMOTE SESSION ACCESS ID
                 </div>
 
                 <div class="session-code">
-                    <?= htmlspecialchars($sessionCode, ENT_QUOTES, 'UTF-8') ?>
+
+                    <?= htmlspecialchars(
+                        $sessionCode,
+                        ENT_QUOTES,
+                        'UTF-8'
+                    ) ?>
+
                 </div>
 
             </div>
 
 
-            <!-- MAIN ACTIONS -->
-
             <div class="main-actions">
 
-                <button
-                    class="btn btn-success"
-                    id="streamBtn"
-                    type="button"
-                >
+                <button class="btn btn-success" id="streamBtn" type="button">
                     Start Web Canvas Stream
                 </button>
 
-                <a
-                    href="screenshare://<?= rawurlencode($deviceUid) ?>"
-                    class="btn btn-primary"
-                >
+                <a href="screenshare://<?= rawurlencode($deviceUid) ?>" class="btn btn-primary">
                     Launch Native Desktop Viewer
                 </a>
 
             </div>
 
 
-            <!-- ADVANCED TOOLBAR -->
+            <div class="toolbar" id="advToolbar">
 
-            <div
-                class="toolbar"
-                id="advToolbar"
-                style="display: none;"
-            >
+                <select class="monitor-select" id="monitorSelect">
 
-                <select
-                    class="monitor-select"
-                    id="monitorSelect"
-                >
                     <option value="0">
                         Monitor 1 (Primary)
                     </option>
@@ -751,69 +823,48 @@ $sessionCode = strlen($deviceUid) > 3
                     <option value="3">
                         Monitor 4
                     </option>
+
                 </select>
 
 
-                <button
-                    class="btn btn-secondary"
-                    id="audioBtn"
-                    type="button"
-                >
+                <button class="btn btn-secondary" id="audioBtn" type="button">
                     🔈 Listen Audio
                 </button>
 
 
-                <button
-                    class="btn btn-secondary"
-                    id="chatBtn"
-                    type="button"
-                >
+                <button class="btn btn-secondary" id="chatBtn" type="button">
                     💬 Chat
                 </button>
 
 
-                <button
-                    class="btn btn-secondary"
-                    id="recordBtn"
-                    type="button"
-                >
+                <button class="btn btn-secondary" id="recordBtn" type="button">
                     🔴 Record Session
                 </button>
 
             </div>
 
 
-            <!-- STREAM BOX -->
+            <div id="stream-box" class="canvas-container">
 
-            <div
-                id="stream-box"
-                class="canvas-container"
-            >
-
-                <div
-                    id="hud"
-                    class="hud-badge"
-                >
+                <div id="hud" class="hud-badge">
                     DISCONNECTED
                 </div>
 
 
-                <div
-                    id="dropOverlay"
-                    class="drop-overlay"
-                >
+                <div id="dropOverlay" class="drop-overlay">
+
                     📁 Drop files here to send to Remote Host
+
                     <br>
-                    <small style="font-size: 0.9rem;">
+
+                    <small style="font-size:.9rem;">
                         Files will be placed in RemoteDrop/
                     </small>
+
                 </div>
 
 
-                <canvas
-                    id="remoteCanvas"
-                    tabindex="0"
-                ></canvas>
+                <canvas id="remoteCanvas" tabindex="0"></canvas>
 
             </div>
 
@@ -822,14 +873,7 @@ $sessionCode = strlen($deviceUid) > 3
     </div>
 
 
-    <!-- =========================
-         CHAT PANEL
-    ========================= -->
-
-    <div
-        class="chat-panel"
-        id="chatPanel"
-    >
+    <div class="chat-panel" id="chatPanel">
 
         <div class="chat-header">
 
@@ -837,35 +881,21 @@ $sessionCode = strlen($deviceUid) > 3
                 Session Chat
             </span>
 
-            <span
-                class="chat-close"
-                id="chatClose"
-            >
+            <span class="chat-close" id="chatClose">
                 &times;
             </span>
 
         </div>
 
 
-        <div
-            class="chat-messages"
-            id="chatMessages"
-        ></div>
+        <div class="chat-messages" id="chatMessages"></div>
 
 
         <div class="chat-input">
 
-            <input
-                type="text"
-                id="chatInput"
-                placeholder="Type a message..."
-                autocomplete="off"
-            >
+            <input type="text" id="chatInput" placeholder="Type a message..." autocomplete="off">
 
-            <button
-                type="button"
-                id="sendChatBtn"
-            >
+            <button type="button" id="sendChatBtn">
                 Send
             </button>
 
@@ -876,23 +906,31 @@ $sessionCode = strlen($deviceUid) > 3
 
     <script>
 
-        /* =========================================================
-           CONFIGURATION
-        ========================================================= */
+        /* ============================================================
+           CONFIG
+        ============================================================ */
+
+        console.log("[SECURITY] location:", location.href);
+        console.log("[SECURITY] origin:", location.origin);
+        console.log("[SECURITY] secure:", window.isSecureContext);
+        console.log("[SECURITY] VideoDecoder:", ("VideoDecoder" in window));
 
         const DEVICE_ID =
-            <?= json_encode($deviceUid, JSON_UNESCAPED_SLASHES) ?>;
+            <?= json_encode(
+                $deviceUid,
+                JSON_UNESCAPED_SLASHES
+            ) ?>;
 
-        /*
-         * IMPORTANT:
-         * Change this if your WebSocket server is running elsewhere.
-         */
-        const WS_URL = "ws://192.168.29.229:9001";
+        const WS_PORT = "9001";
+        const WS_HOST = location.hostname || "192.168.29.229";
+        const WS_URL = location.protocol === "https:"
+            ? `wss://${location.host}/ws`
+            : `ws://${WS_HOST}:${WS_PORT}`;
 
 
-        /* =========================================================
-           GLOBAL STATE
-        ========================================================= */
+        /* ============================================================
+           STATE
+        ============================================================ */
 
         let ws = null;
 
@@ -910,9 +948,11 @@ $sessionCode = strlen($deviceUid) > 3
 
         let renderHeight = 0;
 
-        let framePending = false;
-
         let videoFrameCount = 0;
+
+        let videoDecodeBusy = false;
+
+        let videoDecoder = null;
 
 
         /* AUDIO */
@@ -931,9 +971,9 @@ $sessionCode = strlen($deviceUid) > 3
         let recordedChunks = [];
 
 
-        /* =========================================================
+        /* ============================================================
            DOM
-        ========================================================= */
+        ============================================================ */
 
         const streamBtn =
             document.getElementById("streamBtn");
@@ -978,9 +1018,9 @@ $sessionCode = strlen($deviceUid) > 3
             document.getElementById("dropOverlay");
 
 
-        /* =========================================================
-           UTILITY
-        ========================================================= */
+        /* ============================================================
+           HUD
+        ============================================================ */
 
         function setHud(text) {
 
@@ -989,45 +1029,60 @@ $sessionCode = strlen($deviceUid) > 3
         }
 
 
+        /* ============================================================
+           SOCKET
+        ============================================================ */
+
         function isSocketOpen() {
 
-            return ws &&
-                   ws.readyState === WebSocket.OPEN;
+            return (
+                ws &&
+                ws.readyState === WebSocket.OPEN
+            );
 
         }
 
+
+        /* ============================================================
+           IMAGE CLEANUP
+        ============================================================ */
 
         function safeCloseImage() {
 
-            if (latestImage) {
+            if (!latestImage) {
 
-                try {
+                return;
 
-                    if (
-                        typeof latestImage.close ===
-                        "function"
-                    ) {
-                        latestImage.close();
-                    }
+            }
 
-                } catch (e) {
+            try {
 
-                    console.warn(
-                        "Image cleanup failed:",
-                        e
-                    );
+                if (
+                    typeof latestImage.close ===
+                    "function"
+                ) {
+
+                    latestImage.close();
 
                 }
 
-                latestImage = null;
+            } catch (e) {
+
+                console.warn(
+                    "[VIDEO] Image cleanup failed",
+                    e
+                );
+
             }
+
+            latestImage = null;
 
         }
 
 
-        /* =========================================================
+        /* ============================================================
            CHAT
-        ========================================================= */
+        ============================================================ */
 
         function toggleChat() {
 
@@ -1037,9 +1092,10 @@ $sessionCode = strlen($deviceUid) > 3
                 chatPanel.classList.contains("open")
             ) {
 
-                setTimeout(() => {
-                    chatInput.focus();
-                }, 100);
+                setTimeout(
+                    () => chatInput.focus(),
+                    100
+                );
 
             }
 
@@ -1060,6 +1116,7 @@ $sessionCode = strlen($deviceUid) > 3
 
             chatMessages.scrollTop =
                 chatMessages.scrollHeight;
+
         }
 
 
@@ -1069,7 +1126,9 @@ $sessionCode = strlen($deviceUid) > 3
                 chatInput.value.trim();
 
             if (!msg) {
+
                 return;
+
             }
 
             if (!isSocketOpen()) {
@@ -1080,33 +1139,19 @@ $sessionCode = strlen($deviceUid) > 3
                 );
 
                 return;
+
             }
 
-
-            const encoder =
-                new TextEncoder();
-
             const msgBytes =
-                encoder.encode(msg);
-
-
-            /*
-             * Packet:
-             *
-             * Byte 0 = 16
-             * Byte 1-2 = message length
-             * Byte 3... = UTF-8 message
-             */
+                new TextEncoder().encode(msg);
 
             if (msgBytes.length > 65535) {
 
-                alert(
-                    "Message is too long."
-                );
+                alert("Message is too long.");
 
                 return;
-            }
 
+            }
 
             const pkt =
                 new Uint8Array(
@@ -1116,16 +1161,15 @@ $sessionCode = strlen($deviceUid) > 3
             pkt[0] = 16;
 
             pkt[1] =
-                (msgBytes.length >> 8) & 0xFF;
+                (msgBytes.length >> 8) & 0xff;
 
             pkt[2] =
-                msgBytes.length & 0xFF;
+                msgBytes.length & 0xff;
 
             pkt.set(
                 msgBytes,
                 3
             );
-
 
             try {
 
@@ -1141,7 +1185,7 @@ $sessionCode = strlen($deviceUid) > 3
             } catch (error) {
 
                 console.error(
-                    "Chat send error:",
+                    "[CHAT] Send failed:",
                     error
                 );
 
@@ -1150,15 +1194,14 @@ $sessionCode = strlen($deviceUid) > 3
         }
 
 
-        /* =========================================================
+        /* ============================================================
            AUDIO
-        ========================================================= */
+        ============================================================ */
 
         async function toggleAudio() {
 
             isAudioEnabled =
                 !isAudioEnabled;
-
 
             if (isAudioEnabled) {
 
@@ -1173,7 +1216,6 @@ $sessionCode = strlen($deviceUid) > 3
                     "btn-warning"
                 );
 
-
                 try {
 
                     if (!audioCtx) {
@@ -1185,7 +1227,6 @@ $sessionCode = strlen($deviceUid) > 3
                             )();
 
                     }
-
 
                     if (
                         audioCtx.state ===
@@ -1199,7 +1240,7 @@ $sessionCode = strlen($deviceUid) > 3
                 } catch (error) {
 
                     console.error(
-                        "Audio initialization error:",
+                        "[AUDIO] Init error:",
                         error
                     );
 
@@ -1218,25 +1259,27 @@ $sessionCode = strlen($deviceUid) > 3
                     "btn-secondary"
                 );
 
+                nextAudioTime = 0;
+
             }
 
         }
 
 
-        /* =========================================================
-           MONITOR SWITCH
-        ========================================================= */
+        /* ============================================================
+           MONITOR
+        ============================================================ */
 
         function switchMonitor(index) {
 
             if (!isSocketOpen()) {
-                return;
-            }
 
+                return;
+
+            }
 
             const monitorIndex =
                 parseInt(index, 10);
-
 
             if (
                 Number.isNaN(monitorIndex) ||
@@ -1245,15 +1288,8 @@ $sessionCode = strlen($deviceUid) > 3
             ) {
 
                 return;
+
             }
-
-
-            /*
-             * Packet:
-             *
-             * Byte 0 = 7
-             * Byte 1 = monitor index
-             */
 
             const pkt =
                 new Uint8Array(9);
@@ -1263,15 +1299,14 @@ $sessionCode = strlen($deviceUid) > 3
             pkt[1] =
                 monitorIndex;
 
-
             ws.send(pkt);
 
         }
 
 
-        /* =========================================================
+        /* ============================================================
            RECORDING
-        ========================================================= */
+        ============================================================ */
 
         function toggleRecording() {
 
@@ -1282,12 +1317,8 @@ $sessionCode = strlen($deviceUid) > 3
                 );
 
                 return;
+
             }
-
-
-            /*
-             * STOP RECORDING
-             */
 
             if (
                 mediaRecorder &&
@@ -1298,12 +1329,8 @@ $sessionCode = strlen($deviceUid) > 3
                 mediaRecorder.stop();
 
                 return;
+
             }
-
-
-            /*
-             * CHECK SUPPORT
-             */
 
             if (
                 !window.MediaRecorder ||
@@ -1311,20 +1338,18 @@ $sessionCode = strlen($deviceUid) > 3
             ) {
 
                 alert(
-                    "Session recording is not supported by this browser."
+                    "Session recording is not supported."
                 );
 
                 return;
-            }
 
+            }
 
             const stream =
                 canvas.captureStream(30);
 
-
             let mimeType =
                 "video/webm;codecs=vp9";
-
 
             if (
                 !MediaRecorder.isTypeSupported(
@@ -1337,7 +1362,6 @@ $sessionCode = strlen($deviceUid) > 3
 
             }
 
-
             if (
                 !MediaRecorder.isTypeSupported(
                     mimeType
@@ -1348,7 +1372,6 @@ $sessionCode = strlen($deviceUid) > 3
                     "video/webm";
 
             }
-
 
             try {
 
@@ -1363,23 +1386,22 @@ $sessionCode = strlen($deviceUid) > 3
             } catch (error) {
 
                 console.error(
-                    "MediaRecorder error:",
+                    "[RECORDER]",
                     error
                 );
 
                 alert(
-                    "Unable to start session recording."
+                    "Unable to start recording."
                 );
 
                 return;
-            }
 
+            }
 
             recordedChunks = [];
 
-
             mediaRecorder.ondataavailable =
-                function (event) {
+                event => {
 
                     if (
                         event.data &&
@@ -1394,60 +1416,32 @@ $sessionCode = strlen($deviceUid) > 3
 
                 };
 
-
-            mediaRecorder.onerror =
-                function (event) {
-
-                    console.error(
-                        "Recorder error:",
-                        event
-                    );
-
-                };
-
-
             mediaRecorder.onstop =
-                function () {
+                () => {
 
                     if (
                         recordedChunks.length === 0
                     ) {
 
-                        recordBtn.textContent =
-                            "🔴 Record Session";
-
-                        recordBtn.classList.remove(
-                            "btn-danger"
-                        );
-
-                        recordBtn.classList.add(
-                            "btn-secondary"
-                        );
+                        resetRecordButton();
 
                         return;
-                    }
 
+                    }
 
                     const blob =
                         new Blob(
                             recordedChunks,
                             {
-                                type:
-                                    mimeType
+                                type: mimeType
                             }
                         );
 
-
                     const url =
-                        URL.createObjectURL(
-                            blob
-                        );
-
+                        URL.createObjectURL(blob);
 
                     const a =
-                        document.createElement(
-                            "a"
-                        );
+                        document.createElement("a");
 
                     a.href = url;
 
@@ -1458,44 +1452,25 @@ $sessionCode = strlen($deviceUid) > 3
                         Date.now() +
                         ".webm";
 
-
                     document.body.appendChild(a);
 
                     a.click();
 
                     a.remove();
 
-
                     setTimeout(
-                        () => {
-                            URL.revokeObjectURL(
-                                url
-                            );
-                        },
+                        () =>
+                            URL.revokeObjectURL(url),
                         1000
                     );
 
-
                     recordedChunks = [];
 
-                    recordBtn.textContent =
-                        "🔴 Record Session";
-
-                    recordBtn.classList.remove(
-                        "btn-danger"
-                    );
-
-                    recordBtn.classList.add(
-                        "btn-secondary"
-                    );
+                    resetRecordButton();
 
                 };
 
-
-            mediaRecorder.start(
-                1000
-            );
-
+            mediaRecorder.start(1000);
 
             recordBtn.textContent =
                 "⏹ Stop Recording";
@@ -1511,21 +1486,37 @@ $sessionCode = strlen($deviceUid) > 3
         }
 
 
-        /* =========================================================
+        function resetRecordButton() {
+
+            recordBtn.textContent =
+                "🔴 Record Session";
+
+            recordBtn.classList.remove(
+                "btn-danger"
+            );
+
+            recordBtn.classList.add(
+                "btn-secondary"
+            );
+
+        }
+
+
+        /* ============================================================
            RENDER LOOP
-        ========================================================= */
+        ============================================================ */
 
         function startRenderLoop() {
 
             stopRenderLoop();
 
-
             function render() {
 
                 if (!isStreaming) {
-                    return;
-                }
 
+                    return;
+
+                }
 
                 if (
                     latestImage &&
@@ -1549,7 +1540,6 @@ $sessionCode = strlen($deviceUid) > 3
 
                     }
 
-
                     try {
 
                         ctx.drawImage(
@@ -1563,7 +1553,7 @@ $sessionCode = strlen($deviceUid) > 3
                     } catch (error) {
 
                         console.warn(
-                            "Canvas draw error:",
+                            "[VIDEO] drawImage error:",
                             error
                         );
 
@@ -1571,19 +1561,13 @@ $sessionCode = strlen($deviceUid) > 3
 
                 }
 
-
                 animationFrameId =
-                    requestAnimationFrame(
-                        render
-                    );
+                    requestAnimationFrame(render);
 
             }
 
-
             animationFrameId =
-                requestAnimationFrame(
-                    render
-                );
+                requestAnimationFrame(render);
 
         }
 
@@ -1603,1110 +1587,1670 @@ $sessionCode = strlen($deviceUid) > 3
         }
 
 
-        /* =========================================================
-           VIDEO FRAME
-        ========================================================= */
-
-        async function handleVideoFrame(buffer) {
-
-            const bytes =
-                new Uint8Array(buffer);
-
-
-            /*
-             * Packet structure:
-             *
-             * Byte 0     = packet type (1)
-             * Byte 1-4   = width
-             * Byte 5-8   = height
-             * Byte 9-12  = JPEG payload size
-             * Byte 13... = JPEG
-             *
-             * Total header = 13 bytes
-             */
-
-
-            if (buffer.byteLength < 13) {
-
-                console.error(
-                    "[VIDEO] Packet too small:",
-                    buffer.byteLength
-                );
-
-                return;
-            }
-
-
-            const view =
-                new DataView(buffer);
-
-
-            const frameW =
-                view.getUint32(
-                    1,
-                    false
-                );
-
-
-            const frameH =
-                view.getUint32(
-                    5,
-                    false
-                );
-
-
-            const payloadSize =
-                view.getUint32(
-                    9,
-                    false
-                );
-
-
-            if (
-                frameW === 0 ||
-                frameH === 0
-            ) {
-
-                console.error(
-                    "[VIDEO] Invalid dimensions:",
-                    frameW,
-                    frameH
-                );
-
-                return;
-            }
-
-
-            const expectedLength =
-                13 + payloadSize;
-
-
-            if (
-                bytes.length !==
-                expectedLength
-            ) {
-
-                console.error(
-                    "[VIDEO] Packet length mismatch:",
-                    {
-                        actual:
-                            bytes.length,
-
-                        payloadSize:
-                            payloadSize,
-
-                        expected:
-                            expectedLength
-                    }
-                );
-
-                return;
-            }
-
-
-            if (
-                payloadSize < 2
-            ) {
-
-                console.error(
-                    "[VIDEO] Empty JPEG payload."
-                );
-
-                return;
-            }
-
-
-            const jpeg =
-                bytes.slice(
-                    13,
-                    13 + payloadSize
-                );
-
-
-            /*
-             * JPEG validation
-             */
-
-            const soi =
-                jpeg[0] === 0xFF &&
-                jpeg[1] === 0xD8;
-
-
-            const eoi =
-                jpeg[jpeg.length - 2] === 0xFF &&
-                jpeg[jpeg.length - 1] === 0xD9;
-
-
-            if (!soi) {
-
-                console.error(
-                    "[VIDEO] Invalid JPEG SOI."
-                );
-
-                return;
-            }
-
-
-            if (!eoi) {
-
-                console.warn(
-                    "[VIDEO] JPEG does not contain EOI."
-                );
-
-            }
-
-
-            videoFrameCount++;
-
-
-            setHud(
-                "LIVE • FRAME " +
-                videoFrameCount
-            );
-
-
-            /*
-             * Decode JPEG.
-             */
-
-            const blob =
-                new Blob(
-                    [jpeg],
-                    {
-                        type:
-                            "image/jpeg"
-                    }
-                );
-
-
-            const url =
-                URL.createObjectURL(
-                    blob
-                );
-
-
-            try {
-
-                const img =
-                    new Image();
-
-
-                await new Promise(
-                    (resolve, reject) => {
-
-                        img.onload =
-                            resolve;
-
-                        img.onerror =
-                            reject;
-
-                        img.src =
-                            url;
-
-                    }
-                );
-
-
-                /*
-                 * Ignore frames if stream
-                 * has already been stopped.
-                 */
-
-                if (!isStreaming) {
-
-                    return;
+        /* ============================================================
+           VIDEO PACKET PARSER (FIXED FOR RGB vs RGBA)
+        
+           Protocol:
+           [1 byte TYPE] = 15
+           [4 bytes WIDTH (u32 BE)]
+           [4 bytes HEIGHT (u32 BE)]
+           [4 bytes H264_SIZE (u32 BE)]
+           [H264 DATA...]
+        
+           The agent now sends RGB data (3 bytes per pixel) to the remote
+           viewer. This fixes the black-screen issue on the web viewer.
+============================================================ */
+
+let videoCodecConfigured = false;
+let hasReceivedFirstKeyframe = false;
+
+function parseH264Nals(dataBytes) {
+    let nalTypes = [];
+    let hasSPS = false;
+    let hasPPS = false;
+    let hasIDR = false;
+    let spsUnit = null;
+    let ppsUnit = null;
+    let i = 0;
+
+    while (i + 2 < dataBytes.length) {
+        let scLen = 0;
+        if (i + 3 < dataBytes.length && dataBytes[i] === 0 && dataBytes[i+1] === 0 && dataBytes[i+2] === 0 && dataBytes[i+3] === 1) {
+            scLen = 4;
+        } else if (dataBytes[i] === 0 && dataBytes[i+1] === 0 && dataBytes[i+2] === 1) {
+            scLen = 3;
+        }
+
+        if (scLen > 0) {
+            const nalStart = i + scLen;
+            let nextStart = dataBytes.length;
+            let j = nalStart;
+            while (j + 2 < dataBytes.length) {
+                if ((j + 3 < dataBytes.length && dataBytes[j] === 0 && dataBytes[j+1] === 0 && dataBytes[j+2] === 0 && dataBytes[j+3] === 1) ||
+                    (dataBytes[j] === 0 && dataBytes[j+1] === 0 && dataBytes[j+2] === 1)) {
+                    nextStart = j;
+                    break;
                 }
+                j++;
+            }
 
-
-                /*
-                 * Replace old frame.
-                 */
-
-                if (latestImage) {
-
-                    try {
-
-                        latestImage.src = "";
-
-                    } catch (e) {}
-
+            if (nalStart < dataBytes.length) {
+                const nType = dataBytes[nalStart] & 0x1F;
+                nalTypes.push(nType);
+                if (nType === 7) {
+                    hasSPS = true;
+                    spsUnit = dataBytes.slice(nalStart, nextStart);
+                } else if (nType === 8) {
+                    hasPPS = true;
+                    ppsUnit = dataBytes.slice(nalStart, nextStart);
+                } else if (nType === 5) {
+                    hasIDR = true;
                 }
+            }
+            i = nextStart;
+        } else {
+            i++;
+        }
+    }
 
+    return { nalTypes, hasSPS, hasPPS, hasIDR, spsUnit, ppsUnit };
+}
 
-                latestImage =
-                    img;
+async function handleVideoPacket(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const length = bytes.length;
 
+    if (length < 13) {
+        console.warn("[VIDEO] Packet too small:", length);
+        return;
+    }
 
-                renderWidth =
-                    frameW;
+    const view = new DataView(buffer);
+    const packetType = view.getUint8(0);
 
-                renderHeight =
-                    frameH;
+    if (packetType !== 13 && packetType !== 15) {
+        console.warn("[VIDEO] Not a video packet:", packetType);
+        return;
+    }
 
+    const width = view.getUint32(1, false);
+    const height = view.getUint32(5, false);
+    const payloadSize = view.getUint32(9, false);
 
-                /*
-                 * If rendering loop is not running,
-                 * draw immediately.
-                 */
+    const available = length - 13;
+    if (payloadSize <= 0 || payloadSize > available) {
+        console.error(
+            "[VIDEO] Invalid H.264 payload size.",
+            { payloadSize, available, packetSize: length }
+        );
+        return;
+    }
 
-                if (!animationFrameId) {
+    const actualPayloadSize = (payloadSize > 0 && payloadSize <= available) ? payloadSize : available;
+    const h264Payload = bytes.slice(13, 13 + actualPayloadSize);
 
-                    if (
-                        canvas.width !==
-                        frameW ||
-                        canvas.height !==
-                        frameH
-                    ) {
+    // ========================================================
+    // 5. Capability Detection BEFORE using VideoDecoder
+    // ========================================================
+    if (!("VideoDecoder" in window)) {
+        console.error("[VIDEO FATAL] WebCodecs VideoDecoder is NOT available");
+        console.error("[VIDEO FATAL] Browser:", navigator.userAgent);
+        console.error("[VIDEO FATAL] isSecureContext:", window.isSecureContext);
+        console.error("[VIDEO FATAL] WebCodecs:", ("VideoDecoder" in window));
+        if (!window.isSecureContext) {
+            console.error("[VIDEO FATAL] Reason: WebCodecs is ONLY enabled in Secure Contexts (HTTPS or http://localhost). Accessing via LAN IP (e.g. http://192.168.x.x) disables WebCodecs unless HTTPS is used or 'chrome://flags/#unsafely-treat-insecure-origin-as-secure' is enabled for this origin.");
+            setHud("FATAL: WebCodecs unavailable (Non-Secure Context). Open via https:// or localhost, or enable browser flag.");
+        }
+        return;
+    }
 
-                        canvas.width =
-                            frameW;
+    // ========================================================
+    // 6. Detailed Browser Logging
+    // ========================================================
+    console.log(
+        "[BROWSER VIDEO RX]",
+        {
+            type: packetType,
+            packetLength: length,
+            width,
+            height,
+            h264ByteLength: actualPayloadSize
+        }
+    );
 
-                        canvas.height =
-                            frameH;
+    const nals = parseH264Nals(h264Payload);
 
-                    }
+    console.log(
+        "[BROWSER H264]",
+        {
+            firstBytes: Array.from(h264Payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '),
+            nalTypes: nals.nalTypes,
+            spsPresent: nals.hasSPS,
+            ppsPresent: nals.hasPPS,
+            idrPresent: nals.hasIDR
+        }
+    );
 
+    // ========================================================
+    // 7. H.264 Codec string derivation from SPS
+    // ========================================================
+    let codecString = 'avc1.42c028';
+    if (nals.spsUnit && nals.spsUnit.length >= 4) {
+        const p = nals.spsUnit[1].toString(16).padStart(2, '0');
+        const c = nals.spsUnit[2].toString(16).padStart(2, '0');
+        const l = nals.spsUnit[3].toString(16).padStart(2, '0');
+        codecString = `avc1.${p}${c}${l}`;
+    }
 
-                    ctx.drawImage(
-                        img,
-                        0,
-                        0,
-                        frameW,
-                        frameH
+    // ========================================================
+    // 6 & 11. WebCodecs Decoder Initialization & Reuse
+    // ========================================================
+    if (!videoDecoder || videoDecoder.state === 'closed') {
+        videoCodecConfigured = false;
+        hasReceivedFirstKeyframe = false;
+
+        console.log("[BROWSER DECODER]", {
+            videoDecoderAvailable: ("VideoDecoder" in window)
+        });
+
+        try {
+            videoDecoder = new VideoDecoder({
+                output(frame) {
+                    console.log(
+                        "[BROWSER DECODE OUTPUT]",
+                        frame.codedWidth,
+                        frame.codedHeight,
+                        frame.displayWidth,
+                        frame.displayHeight
                     );
 
+                    if (canvas && ctx) {
+                        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+                            canvas.width = frame.displayWidth;
+                            canvas.height = frame.displayHeight;
+                        }
+
+                        console.log(
+                            "[VIDEO DEBUG][CANVAS]",
+                            {
+                                width: canvas.width,
+                                height: canvas.height
+                            }
+                        );
+
+                        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+
+                        console.log(
+                            "[VIDEO DEBUG][CANVAS]",
+                            "FRAME RENDERED"
+                        );
+                    }
+                    frame.close();
+                },
+                error(error) {
+                    console.error("[BROWSER DECODE ERROR]", error);
+                    videoCodecConfigured = false;
                 }
+            });
+        } catch (err) {
+            console.error("[VIDEO FATAL] Failed to construct VideoDecoder:", err);
+            return;
+        }
+    }
 
-            } catch (error) {
+    // Configure decoder with derived codec string
+    if (!videoCodecConfigured) {
+        try {
+            console.log("[BROWSER DECODER CONFIG]", {
+                codec: codecString,
+                codedWidth: width,
+                codedHeight: height,
+                descriptionPresence: false,
+                state: videoDecoder.state
+            });
 
-                console.error(
-                    "[VIDEO] JPEG decode failed:",
-                    error
-                );
+            videoDecoder.configure({
+                codec: codecString,
+                codedWidth: width,
+                codedHeight: height,
+                optimizeForLatency: true
+            });
+            videoCodecConfigured = true;
+            console.log("[H264] Decoder configured successfully:", codecString, width, "x", height);
+        } catch (e) {
+            console.error("[BROWSER DECODER CONFIG ERROR]", e);
+            return;
+        }
+    }
 
-            } finally {
+    // ========================================================
+    // 9. Critical Keyframe Rule
+    // ========================================================
+    const isKey = nals.hasIDR || nals.hasSPS;
+    if (isKey) {
+        hasReceivedFirstKeyframe = true;
+    }
 
-                URL.revokeObjectURL(
-                    url
-                );
+    if (!hasReceivedFirstKeyframe) {
+        console.warn("[BROWSER VIDEO] Waiting for first keyframe (SPS/PPS/IDR) before decoding P-frames.");
+        return;
+    }
 
+    // ========================================================
+    // 10. Handle Decoder State Before Decode
+    // ========================================================
+    console.log("[BROWSER DECODER STATE]", videoDecoder.state);
+    if (videoDecoder.state === "closed") {
+        console.warn("[BROWSER DECODER] Decoder is closed. Resetting for next keyframe.");
+        videoDecoder = null;
+        videoCodecConfigured = false;
+        return;
+    }
+
+    const timestamp = videoFrameCount * 33333;
+
+    try {
+        const chunk = new EncodedVideoChunk({
+            type: isKey ? 'key' : 'delta',
+            timestamp: timestamp,
+            data: h264Payload
+        });
+
+        console.log(
+            "[BROWSER DECODE]",
+            {
+                chunkType: chunk.type,
+                timestamp: chunk.timestamp,
+                byteLength: chunk.byteLength
             }
+        );
+
+        videoDecoder.decode(chunk);
+        videoFrameCount++;
+
+        setHud(
+            "LIVE • FRAME " +
+            videoFrameCount +
+            " • " +
+            width +
+            "×" +
+            height
+        );
+    } catch (e) {
+        console.error("[BROWSER DECODER ERROR] decode() exception:", e);
+    }
+}
+
+
+/* ============================================================
+   AUDIO PACKET
+============================================================ */
+
+function handleAudioPacket(buffer) {
+
+    /*
+        TYPE 17 = AUDIO
+
+        [1 byte type]
+        [4 bytes data size (u32 BE)]
+        [4 bytes sample rate (u32 BE)]
+        [2 bytes channels (u16 BE)]
+        [N bytes audio data]
+    */
+
+    const type = new Uint8Array(buffer)[0];
+
+    if (type !== 17) {
+        console.warn("[AUDIO] Not an audio packet:", type);
+        return;
+    }
+
+    if (!isAudioEnabled) {
+
+        return;
+
+    }
+
+    if (buffer.byteLength < 11) {
+
+        console.warn(
+            "[AUDIO] Packet too small."
+        );
+
+        return;
+
+    }
+
+    const view =
+        new DataView(buffer);
+
+    const byteLen =
+        view.getUint32(
+            1,
+            false
+        );
+
+    const sampleRate =
+        view.getUint32(
+            5,
+            false
+        );
+
+    const channels =
+        view.getUint16(
+            9,
+            false
+        );
+
+    if (
+        byteLen <= 0 ||
+        sampleRate <= 0 ||
+        channels <= 0
+    ) {
+
+        return;
+
+    }
+
+    const start = 11;
+
+    const end =
+        start + byteLen;
+
+    if (
+        end > buffer.byteLength
+    ) {
+
+        console.error(
+            "[AUDIO] Invalid audio length."
+        );
+
+        return;
+
+    }
+
+    const audioBytes =
+        buffer.slice(
+            start,
+            end
+        );
+
+    const floatArray =
+        new Float32Array(
+            audioBytes
+        );
+
+    if (!floatArray.length) {
+
+        return;
+
+    }
+
+    if (!audioCtx) {
+
+        audioCtx =
+            new (
+                window.AudioContext ||
+                window.webkitAudioContext
+            )();
+
+    }
+
+    if (
+        audioCtx.state ===
+        "suspended"
+    ) {
+
+        audioCtx.resume()
+            .catch(console.error);
+
+    }
+
+    const frames =
+        Math.floor(
+            floatArray.length /
+            channels
+        );
+
+    if (frames <= 0) {
+
+        return;
+
+    }
+
+    const audioBuffer =
+        audioCtx.createBuffer(
+            channels,
+            frames,
+            sampleRate
+        );
+
+    for (
+        let c = 0;
+        c < channels;
+        c++
+    ) {
+
+        const channelData =
+            audioBuffer.getChannelData(c);
+
+        for (
+            let i = 0;
+            i < frames;
+            i++
+        ) {
+
+            channelData[i] =
+                floatArray[
+                    i * channels + c
+                ];
 
         }
 
+    }
 
-        /* =========================================================
-           AUDIO PACKET
-        ========================================================= */
+    const source =
+        audioCtx.createBufferSource();
 
-        function handleAudioPacket(buffer) {
+    source.buffer =
+        audioBuffer;
 
-            if (!isAudioEnabled) {
-                return;
-            }
+    source.connect(
+        audioCtx.destination
+    );
 
+    if (
+        nextAudioTime <
+        audioCtx.currentTime
+    ) {
 
-            if (buffer.byteLength < 11) {
+        nextAudioTime =
+            audioCtx.currentTime + .05;
 
-                console.error(
-                    "[AUDIO] Packet too small."
-                );
+    }
 
-                return;
-            }
+    source.start(
+        nextAudioTime
+    );
 
+    nextAudioTime +=
+        audioBuffer.duration;
 
-            const view =
-                new DataView(buffer);
+}
 
 
-            const byteLen =
-                view.getUint32(
-                    1,
-                    false
-                );
+/* ============================================================
+   CHAT PACKET
+============================================================ */
 
+function handleChatPacket(buffer) {
 
-            const sampleRate =
-                view.getUint32(
-                    5,
-                    false
-                );
+    if (buffer.byteLength < 3) {
 
+        return;
 
-            const channels =
-                view.getUint16(
-                    9,
-                    false
-                );
+    }
 
+    const view =
+        new DataView(buffer);
 
-            if (
-                byteLen <= 0 ||
-                channels <= 0 ||
-                sampleRate <= 0
-            ) {
+    const len =
+        (
+            view.getUint8(1) << 8
+        ) |
+        view.getUint8(2);
 
-                return;
-            }
+    if (
+        3 + len >
+        buffer.byteLength
+    ) {
 
+        return;
 
-            const audioStart =
-                11;
+    }
 
+    const msgBytes =
+        new Uint8Array(
+            buffer,
+            3,
+            len
+        );
 
-            const audioEnd =
-                audioStart +
-                byteLen;
+    const text =
+        new TextDecoder().decode(
+            msgBytes
+        );
 
+    appendMessage(
+        "recv",
+        text
+    );
 
-            if (
-                audioEnd >
-                buffer.byteLength
-            ) {
+    if (
+        !chatPanel.classList.contains(
+            "open"
+        )
+    ) {
 
-                console.error(
-                    "[AUDIO] Invalid audio size."
-                );
+        toggleChat();
 
-                return;
-            }
+    }
 
+}
 
-            /*
-             * Float32 audio.
-             */
 
-            const audioBytes =
-                buffer.slice(
-                    audioStart,
-                    audioEnd
-                );
+/* ============================================================
+   WEBSOCKET MESSAGE
+============================================================ */
 
-
-            const floatArray =
-                new Float32Array(
-                    audioBytes
-                );
-
-
-            if (
-                floatArray.length === 0
-            ) {
-
-                return;
-            }
-
-
-            if (!audioCtx) {
-
-                audioCtx =
-                    new (
-                        window.AudioContext ||
-                        window.webkitAudioContext
-                    )();
-
-            }
-
-
-            if (
-                audioCtx.state ===
-                "suspended"
-            ) {
-
-                audioCtx.resume()
-                    .catch(
-                        console.error
-                    );
-
-            }
-
-
-            const frames =
-                Math.floor(
-                    floatArray.length /
-                    channels
-                );
-
-
-            if (frames <= 0) {
-                return;
-            }
-
-
-            const audioBuffer =
-                audioCtx.createBuffer(
-                    channels,
-                    frames,
-                    sampleRate
-                );
-
-
-            /*
-             * Convert interleaved PCM
-             * into Web Audio channels.
-             */
-
-            for (
-                let c = 0;
-                c < channels;
-                c++
-            ) {
-
-                const channelData =
-                    audioBuffer
-                        .getChannelData(c);
-
-
-                for (
-                    let i = 0;
-                    i < frames;
-                    i++
-                ) {
-
-                    channelData[i] =
-                        floatArray[
-                            i * channels + c
-                        ];
-
-                }
-
-            }
-
-
-            const source =
-                audioCtx.createBufferSource();
-
-
-            source.buffer =
-                audioBuffer;
-
-
-            source.connect(
-                audioCtx.destination
-            );
-
-
-            if (
-                nextAudioTime <
-                audioCtx.currentTime
-            ) {
-
-                nextAudioTime =
-                    audioCtx.currentTime +
-                    0.05;
-
-            }
-
-
-            source.start(
-                nextAudioTime
-            );
-
-
-            nextAudioTime +=
-                audioBuffer.duration;
-
+async function handleMessage(event) {
+    let buffer;
+    if (event.data instanceof ArrayBuffer) {
+        buffer = event.data;
+    } else if (event.data instanceof Blob) {
+        buffer = await event.data.arrayBuffer();
+    } else {
+        console.warn("[WS] Non-binary message:", event.data);
+        return;
+    }
+
+    if (!buffer || buffer.byteLength === 0) {
+        return;
+    }
+
+    const type =
+        new Uint8Array(buffer)[0];
+
+
+    console.log(
+        "[WS] Packet:",
+        {
+            type,
+            size: buffer.byteLength
         }
+    );
 
 
-        /* =========================================================
-           CHAT PACKET
-        ========================================================= */
+    /*
+     * TYPE 99
+     * STREAM STATUS
+     */
 
-        function handleChatPacket(buffer) {
+    if (type === 2) {
 
-            if (
-                buffer.byteLength <
-                3
-            ) {
+        console.log("[VIDEO] Stream-active packet received.");
 
-                return;
+        setHud(
+            "STREAM ACTIVE • WAITING FOR FRAME"
+        );
+
+        return;
+
+    }
+
+
+    /*
+     * TYPE 13 or TYPE 15
+     * H.264 VIDEO FRAME
+     *
+     * Header: 1 byte type + 12 bytes (width:u32, height:u32, size:u32)
+     */
+
+    if (type === 13 || type === 15) {
+
+        await handleVideoPacket(
+            buffer
+        );
+
+        return;
+
+    }
+
+
+    /*
+     * TYPE 17
+     * AUDIO
+     */
+
+    if (type === 17) {
+
+        handleAudioPacket(
+            buffer
+        );
+
+        return;
+
+    }
+
+
+    /*
+     * TYPE 16
+     * CHAT
+     */
+
+    if (type === 16) {
+
+        handleChatPacket(
+            buffer
+        );
+
+        return;
+
+    }
+
+
+    console.debug(
+        "[WS] Unknown packet:",
+        type,
+        buffer.byteLength
+    );
+
+}
+
+
+/* ============================================================
+   INITIALIZATION PACKET
+============================================================ */
+
+function sendInitializationPacket() {
+
+    if (!isSocketOpen()) {
+
+        return;
+
+    }
+
+    /*
+     * 39 bytes total
+     *
+     * Byte 0:
+     *     2
+     *
+     * Byte 1..38:
+     *     device UID
+     */
+
+    const pkt =
+        new Uint8Array(39);
+
+    pkt[0] = 2;
+
+    const deviceBytes =
+        new TextEncoder().encode(
+            DEVICE_ID
+        );
+
+    const copyLength =
+        Math.min(
+            deviceBytes.length,
+            38
+        );
+
+    pkt.set(
+        deviceBytes.slice(
+            0,
+            copyLength
+        ),
+        1
+    );
+
+    ws.send(pkt);
+
+    console.log(
+        "[WS] Initialization sent:",
+        DEVICE_ID
+    );
+
+}
+
+
+/* ============================================================
+   START STREAM
+============================================================ */
+
+function startWebStream() {
+
+    if (isStreaming) {
+
+        return;
+
+    }
+
+
+    canvas =
+        document.getElementById(
+            "remoteCanvas"
+        );
+
+
+    ctx =
+        canvas.getContext(
+            "2d",
+            {
+                alpha: false
             }
+        );
 
 
-            const view =
-                new DataView(buffer);
+    if (!ctx) {
+
+        alert(
+            "Unable to create canvas."
+        );
+
+        return;
+
+    }
 
 
-            const len =
-                (
-                    view.getUint8(1) << 8
-                ) |
-                view.getUint8(2);
+    videoFrameCount = 0;
+
+    renderWidth = 0;
+
+    renderHeight = 0;
+
+    videoDecodeBusy = false;
+
+    safeCloseImage();
 
 
-            if (
-                3 + len >
-                buffer.byteLength
-            ) {
+    canvas.width = 1280;
 
-                console.error(
-                    "[CHAT] Invalid packet length."
-                );
-
-                return;
-            }
+    canvas.height = 720;
 
 
-            const msgBytes =
-                new Uint8Array(
-                    buffer,
-                    3,
-                    len
-                );
+    /*
+     * Clear the canvas explicitly.
+     */
+
+    ctx.fillStyle = "#000000";
+
+    ctx.fillRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
 
 
-            const text =
-                new TextDecoder().decode(
-                    msgBytes
-                );
+    isStreaming = true;
 
 
-            appendMessage(
-                "recv",
-                text
+    streamBox.style.display =
+        "block";
+
+
+    advToolbar.style.display =
+        "flex";
+
+
+    streamBtn.textContent =
+        "Disconnect Web Stream";
+
+
+    streamBtn.className =
+        "btn btn-danger";
+
+
+    setHud(
+        "CONNECTING..."
+    );
+
+
+    canvas.focus();
+
+
+    startRenderLoop();
+
+
+    try {
+
+        ws =
+            new WebSocket(
+                WS_URL
             );
 
+    } catch (error) {
 
-            if (
-                !chatPanel.classList.contains(
-                    "open"
-                )
-            ) {
+        console.error(
+            "[WS] Creation failed:",
+            error
+        );
 
-                toggleChat();
+        stopWebStream();
 
-            }
+        alert(
+            "Could not create WebSocket."
+        );
 
-        }
+        return;
 
+    }
 
-        /* =========================================================
-           WEBSOCKET MESSAGE
-        ========================================================= */
 
-        async function handleWebSocketMessage(event) {
+    ws.binaryType =
+        "arraybuffer";
 
-            if (
-                !(event.data instanceof ArrayBuffer)
-            ) {
 
-                console.warn(
-                    "[WS] Non-binary message received."
-                );
-
-                return;
-            }
-
-
-            const buffer =
-                event.data;
-
-
-            if (
-                buffer.byteLength === 0
-            ) {
-
-                return;
-            }
-
-
-            const view =
-                new DataView(buffer);
-
-
-            const type =
-                view.getUint8(0);
-
-
-            /*
-             * TYPE 1
-             * VIDEO FRAME
-             */
-
-            if (type === 1) {
-
-                /*
-                 * Some servers may send a
-                 * one-byte "stream active"
-                 * message.
-                 */
-
-                if (
-                    buffer.byteLength === 1
-                ) {
-
-                    setHud(
-                        "LIVE STREAM ACTIVE"
-                    );
-
-                    return;
-                }
-
-
-                await handleVideoFrame(
-                    buffer
-                );
-
-                return;
-            }
-
-
-            /*
-             * TYPE 13
-             * AUDIO
-             */
-
-            if (type === 13) {
-
-                handleAudioPacket(
-                    buffer
-                );
-
-                return;
-            }
-
-
-            /*
-             * TYPE 16
-             * CHAT
-             */
-
-            if (type === 16) {
-
-                handleChatPacket(
-                    buffer
-                );
-
-                return;
-            }
-
-
-            console.debug(
-                "[WS] Unknown packet type:",
-                type,
-                "size:",
-                buffer.byteLength
-            );
-
-        }
-
-
-        /* =========================================================
-           DEVICE ID INITIALIZATION
-        ========================================================= */
-
-        function sendInitializationPacket() {
-
-            if (!isSocketOpen()) {
-                return;
-            }
-
-
-            /*
-             * Your existing protocol uses:
-             *
-             * 39-byte initialization packet
-             * Byte 0 = 2
-             * Device ID starts at byte 1
-             *
-             * We preserve the 39-byte packet.
-             */
-
-
-            const initPkt =
-                new Uint8Array(39);
-
-
-            initPkt[0] = 2;
-
-
-            const encoder =
-                new TextEncoder();
-
-
-            const deviceBytes =
-                encoder.encode(
-                    DEVICE_ID
-                );
-
-
-            /*
-             * Maximum available ID
-             * area is 38 bytes.
-             */
-
-            const copyLength =
-                Math.min(
-                    deviceBytes.length,
-                    38
-                );
-
-
-            initPkt.set(
-                deviceBytes.slice(
-                    0,
-                    copyLength
-                ),
-                1
-            );
-
-
-            ws.send(
-                initPkt
-            );
-
+    ws.onopen =
+        function () {
 
             console.log(
-                "[WS] Initialization packet sent.",
-                {
-                    deviceId:
-                        DEVICE_ID,
-                    bytes:
-                        copyLength
-                }
+                "[WS] Connected:",
+                WS_URL
+            );
+
+            setHud(
+                "AUTHENTICATING..."
+            );
+
+            sendInitializationPacket();
+
+        };
+
+
+    ws.onmessage =
+        handleMessage;
+
+
+    ws.onerror =
+        function (error) {
+
+            console.error(
+                "[WS] Error:",
+                error
+            );
+
+            setHud(
+                "CONNECTION ERROR"
+            );
+
+        };
+
+
+    ws.onclose =
+        function (event) {
+
+            console.log(
+                "[WS] Closed:",
+                event.code,
+                event.reason
+            );
+
+            if (isStreaming) {
+
+                setHud(
+                    "DISCONNECTED"
+                );
+
+            }
+
+        };
+
+}
+
+
+/* ============================================================
+   STOP STREAM
+============================================================ */
+
+function stopWebStream() {
+
+    isStreaming = false;
+
+    stopRenderLoop();
+
+    videoDecodeBusy = false;
+
+    safeCloseImage();
+
+    renderWidth = 0;
+
+    renderHeight = 0;
+
+
+    if (
+        mediaRecorder &&
+        mediaRecorder.state ===
+        "recording"
+    ) {
+
+        try {
+
+            mediaRecorder.stop();
+
+        } catch (e) {}
+
+    }
+
+
+    if (ws) {
+
+        try {
+
+            ws.onopen = null;
+
+            ws.onmessage = null;
+
+            ws.onerror = null;
+
+            ws.onclose = null;
+
+            ws.close();
+
+        } catch (e) {}
+
+        ws = null;
+
+    }
+
+
+    if (canvas && ctx) {
+
+        ctx.clearRect(
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+    }
+
+
+    streamBox.style.display =
+        "none";
+
+
+    advToolbar.style.display =
+        "none";
+
+
+    streamBtn.textContent =
+        "Start Web Canvas Stream";
+
+
+    streamBtn.className =
+        "btn btn-success";
+
+
+    setHud(
+        "DISCONNECTED"
+    );
+
+
+    chatPanel.classList.remove(
+        "open"
+    );
+
+}
+
+
+/* ============================================================
+   STREAM TOGGLE
+============================================================ */
+
+function toggleWebStream() {
+
+    if (isStreaming) {
+
+        stopWebStream();
+
+    } else {
+
+        startWebStream();
+
+    }
+
+}
+
+
+/* ============================================================
+   FILE TRANSFER
+============================================================ */
+
+async function sendFiles(files) {
+
+    if (!isSocketOpen()) {
+
+        alert(
+            "WebSocket not connected."
+        );
+
+        return;
+
+    }
+
+    if (!files || !files.length) {
+
+        return;
+
+    }
+
+    for (
+        const file of files
+    ) {
+
+        try {
+
+            await sendSingleFile(file);
+
+        } catch (error) {
+
+            console.error(
+                "[FILE]",
+                error
+            );
+
+            alert(
+                `Failed to send "${file.name}".`
+            );
+
+            return;
+
+        }
+
+    }
+
+}
+
+
+async function sendSingleFile(file) {
+
+    const nameBytes =
+        new TextEncoder().encode(
+            file.name
+        );
+
+    if (
+        nameBytes.length > 65535
+    ) {
+
+        throw new Error(
+            "Filename too long."
+        );
+
+    }
+
+
+    /*
+     * TYPE 20
+     */
+
+    const metaPkt =
+        new Uint8Array(
+            11 + nameBytes.length
+        );
+
+    metaPkt[0] = 20;
+
+    metaPkt[1] =
+        (nameBytes.length >> 8) & 0xff;
+
+    metaPkt[2] =
+        nameBytes.length & 0xff;
+
+    const metaView =
+        new DataView(
+            metaPkt.buffer
+        );
+
+    metaView.setBigUint64(
+        3,
+        BigInt(file.size),
+        false
+    );
+
+    metaPkt.set(
+        nameBytes,
+        11
+    );
+
+    ws.send(metaPkt);
+
+
+    /*
+     * TYPE 21
+     */
+
+    const chunkSize =
+        32768;
+
+    let offset = 0;
+
+    while (
+        offset < file.size
+    ) {
+
+        if (!isSocketOpen()) {
+
+            throw new Error(
+                "WebSocket disconnected."
             );
 
         }
 
-
-        /* =========================================================
-           START STREAM
-        ========================================================= */
-
-        function startWebStream() {
-
-            if (isStreaming) {
-                return;
-            }
-
-
-            canvas =
-                document.getElementById(
-                    "remoteCanvas"
-                );
-
-
-            ctx =
-                canvas.getContext(
-                    "2d",
-                    {
-                        alpha: false
-                    }
-                );
-
-
-            if (!ctx) {
-
-                alert(
-                    "Your browser could not create a canvas."
-                );
-
-                return;
-            }
-
-
-            /*
-             * Reset state.
-             */
-
-            videoFrameCount = 0;
-
-            renderWidth = 0;
-
-            renderHeight = 0;
-
-            safeCloseImage();
-
-
-            canvas.width = 1280;
-
-            canvas.height = 720;
-
-
-            isStreaming = true;
-
-
-            streamBox.style.display =
-                "block";
-
-
-            advToolbar.style.display =
-                "flex";
-
-
-            streamBtn.textContent =
-                "Disconnect Web Stream";
-
-
-            streamBtn.className =
-                "btn btn-danger";
-
-
-            setHud(
-                "CONNECTING..."
+        const end =
+            Math.min(
+                offset + chunkSize,
+                file.size
             );
 
+        const slice =
+            file.slice(
+                offset,
+                end
+            );
+
+        const arrayBuffer =
+            await slice.arrayBuffer();
+
+        const chunkBytes =
+            new Uint8Array(
+                arrayBuffer
+            );
+
+        const pkt =
+            new Uint8Array(
+                5 + chunkBytes.length
+            );
+
+        pkt[0] = 21;
+
+        const view =
+            new DataView(
+                pkt.buffer
+            );
+
+        view.setUint32(
+            1,
+            chunkBytes.length,
+            false
+        );
+
+        pkt.set(
+            chunkBytes,
+            5
+        );
+
+        ws.send(pkt);
+
+        offset = end;
+
+    }
+
+    alert(
+        `File "${file.name}" sent successfully.`
+    );
+
+}
+
+
+/* ============================================================
+   MOUSE COORDINATES
+============================================================ */
+
+function getCoordinates(event) {
+
+    if (
+        !canvas ||
+        !canvas.width ||
+        !canvas.height
+    ) {
+
+        return null;
+
+    }
+
+    const rect =
+        canvas.getBoundingClientRect();
+
+    if (
+        rect.width <= 0 ||
+        rect.height <= 0
+    ) {
+
+        return null;
+
+    }
+
+
+    /*
+     * Canvas uses object-fit: contain.
+     *
+     * Therefore the visible image may have
+     * letterboxing.
+     *
+     * We calculate the actual displayed
+     * image rectangle.
+     */
+
+    const scale =
+        Math.min(
+            rect.width / canvas.width,
+            rect.height / canvas.height
+        );
+
+
+    const displayedWidth =
+        canvas.width * scale;
+
+    const displayedHeight =
+        canvas.height * scale;
+
+
+    const offsetX =
+        (rect.width -
+            displayedWidth) / 2;
+
+
+    const offsetY =
+        (rect.height -
+            displayedHeight) / 2;
+
+
+    let x =
+        event.clientX -
+        rect.left -
+        offsetX;
+
+
+    let y =
+        event.clientY -
+        rect.top -
+        offsetY;
+
+
+    x =
+        Math.max(
+            0,
+            Math.min(
+                displayedWidth,
+                x
+            )
+        );
+
+
+    y =
+        Math.max(
+            0,
+            Math.min(
+                displayedHeight,
+                y
+            )
+        );
+
+
+    const canvasX =
+        x / scale;
+
+
+    const canvasY =
+        y / scale;
+
+
+    const normalizedX =
+        Math.max(
+            0,
+            Math.min(
+                65535,
+                Math.floor(
+                    canvasX /
+                    canvas.width *
+                    65535
+                )
+            )
+        );
+
+
+    const normalizedY =
+        Math.max(
+            0,
+            Math.min(
+                65535,
+                Math.floor(
+                    canvasY /
+                    canvas.height *
+                    65535
+                )
+            )
+        );
+
+
+    return {
+
+        x: normalizedX,
+
+        y: normalizedY
+
+    };
+
+}
+
+
+/* ============================================================
+   MOUSE MOVE
+============================================================ */
+
+function sendMouseMove(event) {
+
+    if (!isSocketOpen()) {
+
+        return;
+
+    }
+
+    const coords =
+        getCoordinates(event);
+
+    if (!coords) {
+
+        return;
+
+    }
+
+    const pkt =
+        new Uint8Array(9);
+
+    pkt[0] = 0;
+
+    pkt[1] =
+        (coords.x >> 8) & 0xff;
+
+    pkt[2] =
+        coords.x & 0xff;
+
+    pkt[3] =
+        (coords.y >> 8) & 0xff;
+
+    pkt[4] =
+        coords.y & 0xff;
+
+    ws.send(pkt);
+
+}
+
+
+/* ============================================================
+   MOUSE DOWN
+============================================================ */
+
+function sendMouseDown(event) {
+
+    if (!isSocketOpen()) {
+
+        return;
+
+    }
+
+    const coords =
+        getCoordinates(event);
+
+    if (!coords) {
+
+        return;
+
+    }
+
+    const type =
+        event.button === 2
+            ? 3
+            : 1;
+
+    const pkt =
+        new Uint8Array(9);
+
+    pkt[0] = type;
+
+    pkt[1] =
+        (coords.x >> 8) & 0xff;
+
+    pkt[2] =
+        coords.x & 0xff;
+
+    pkt[3] =
+        (coords.y >> 8) & 0xff;
+
+    pkt[4] =
+        coords.y & 0xff;
+
+    ws.send(pkt);
+
+}
+
+
+/* ============================================================
+   MOUSE UP
+============================================================ */
+
+function sendMouseUp(event) {
+
+    if (!isSocketOpen()) {
+
+        return;
+
+    }
+
+    const type =
+        event.button === 2
+            ? 4
+            : 2;
+
+    const pkt =
+        new Uint8Array(9);
+
+    pkt[0] = type;
+
+    ws.send(pkt);
+
+}
+
+
+/* ============================================================
+   MOUSE WHEEL
+============================================================ */
+
+function sendMouseWheel(event) {
+
+    if (!isSocketOpen()) {
+
+        return;
+
+    }
+
+    event.preventDefault();
+
+    const scroll =
+        event.deltaY > 0
+            ? -120
+            : 120;
+
+    const pkt =
+        new Uint8Array(9);
+
+    pkt[0] = 8;
+
+    pkt[1] = 0;
+
+    pkt[2] = 0;
+
+    pkt[3] =
+        (scroll >> 8) & 0xff;
+
+    pkt[4] =
+        scroll & 0xff;
+
+    ws.send(pkt);
+
+}
+
+
+/* ============================================================
+   KEYBOARD
+============================================================ */
+
+function sendKeyboard(event, type) {
+
+    if (!isSocketOpen()) {
+
+        return;
+
+    }
+
+    event.preventDefault();
+
+    const keyCode =
+        event.keyCode ||
+        event.which;
+
+    const pkt =
+        new Uint8Array(5);
+
+    pkt[0] = type;
+
+    pkt[1] =
+        (keyCode >> 24) & 0xff;
+
+    pkt[2] =
+        (keyCode >> 16) & 0xff;
+
+    pkt[3] =
+        (keyCode >> 8) & 0xff;
+
+    pkt[4] =
+        keyCode & 0xff;
+
+    ws.send(pkt);
+
+}
+
+
+/* ============================================================
+   CANVAS EVENTS
+============================================================ */
+
+function attachCanvasEvents() {
+
+    if (!canvas) {
+
+        return;
+
+    }
+
+
+    canvas.addEventListener(
+        "mousemove",
+        sendMouseMove
+    );
+
+
+    canvas.addEventListener(
+        "mousedown",
+        event => {
 
             canvas.focus();
 
-
-            startRenderLoop();
-
-
-            /*
-             * Create WebSocket.
-             */
-
-            try {
-
-                ws =
-                    new WebSocket(
-                        WS_URL
-                    );
-
-            } catch (error) {
-
-                console.error(
-                    "[WS] Creation failed:",
-                    error
-                );
-
-                stopWebStream();
-
-                alert(
-                    "Could not create WebSocket connection."
-                );
-
-                return;
-            }
-
-
-            ws.binaryType =
-                "arraybuffer";
-
-
-            /* =========================
-               OPEN
-            ========================= */
-
-            ws.onopen =
-                function () {
-
-                    console.log(
-                        "[WS] Connected:",
-                        WS_URL
-                    );
-
-
-                    setHud(
-                        "AUTHENTICATING..."
-                    );
-
-
-                    sendInitializationPacket();
-
-                };
-
-
-            /* =========================
-               MESSAGE
-            ========================= */
-
-            ws.onmessage =
-                handleWebSocketMessage;
-
-
-            /* =========================
-               ERROR
-            ========================= */
-
-            ws.onerror =
-                function (error) {
-
-                    console.error(
-                        "[WS] Error:",
-                        error
-                    );
-
-
-                    setHud(
-                        "CONNECTION ERROR"
-                    );
-
-                };
-
-
-            /* =========================
-               CLOSE
-            ========================= */
-
-            ws.onclose =
-                function (event) {
-
-                    console.log(
-                        "[WS] Closed:",
-                        event.code,
-                        event.reason
-                    );
-
-
-                    if (isStreaming) {
-
-                        setHud(
-                            "DISCONNECTED"
-                        );
-
-                    }
-
-                };
+            sendMouseDown(event);
 
         }
+    );
 
 
-        /* =========================================================
-           STOP STREAM
-        ========================================================= */
-
-        function stopWebStream() {
-
-            isStreaming = false;
+    canvas.addEventListener(
+        "mouseup",
+        sendMouseUp
+    );
 
 
-            stopRenderLoop();
+    canvas.addEventListener(
+        "contextmenu",
+        event => {
+
+            event.preventDefault();
+
+        }
+    );
 
 
-            safeCloseImage();
+    canvas.addEventListener(
+        "wheel",
+        sendMouseWheel,
+        {
+            passive: false
+        }
+    );
 
 
-            renderWidth = 0;
+    canvas.addEventListener(
+        "keydown",
+        event => {
 
-            renderHeight = 0;
-
-
-            if (
-                mediaRecorder &&
-                mediaRecorder.state ===
-                "recording"
-            ) {
-
-                try {
-
-                    mediaRecorder.stop();
-
-                } catch (e) {
-
-                    console.warn(
-                        "Recorder stop error:",
-                        e
-                    );
-
-                }
-
-            }
-
-
-            if (ws) {
-
-                try {
-
-                    ws.onopen = null;
-
-                    ws.onmessage = null;
-
-                    ws.onerror = null;
-
-                    ws.onclose = null;
-
-                    ws.close();
-
-                } catch (e) {
-
-                    console.warn(
-                        "WebSocket close error:",
-                        e
-                    );
-
-                }
-
-                ws = null;
-
-            }
-
-
-            if (canvas && ctx) {
-
-                ctx.clearRect(
-                    0,
-                    0,
-                    canvas.width,
-                    canvas.height
-                );
-
-            }
-
-
-            streamBox.style.display =
-                "none";
-
-
-            advToolbar.style.display =
-                "none";
-
-
-            streamBtn.textContent =
-                "Start Web Canvas Stream";
-
-
-            streamBtn.className =
-                "btn btn-success";
-
-
-            setHud(
-                "DISCONNECTED"
+            sendKeyboard(
+                event,
+                5
             );
 
+        }
+    );
 
-            if (
-                chatPanel.classList.contains(
-                    "open"
-                )
-            ) {
 
-                chatPanel.classList.remove(
-                    "open"
-                );
+    canvas.addEventListener(
+        "keyup",
+        event => {
 
-            }
+            sendKeyboard(
+                event,
+                6
+            );
 
         }
+    );
+
+}
 
 
-        /* =========================================================
-           TOGGLE STREAM
-        ========================================================= */
+/* ============================================================
+   DRAG & DROP
+============================================================ */
 
-        function toggleWebStream() {
+function attachDropEvents() {
 
-            if (isStreaming) {
+    streamBox.addEventListener(
+        "dragover",
+        event => {
 
-                stopWebStream();
+            event.preventDefault();
 
-            } else {
-
-                startWebStream();
-
-            }
+            dropOverlay.classList.add(
+                "active"
+            );
 
         }
+    );
 
 
-        /* =========================================================
-           FILE TRANSFER
-        ========================================================= */
+    streamBox.addEventListener(
+        "dragleave",
+        event => {
 
-        async function sendFiles(files) {
+            event.preventDefault();
+
+            dropOverlay.classList.remove(
+                "active"
+            );
+
+        }
+    );
+
+
+    streamBox.addEventListener(
+        "drop",
+        async event => {
+
+            event.preventDefault();
+
+            dropOverlay.classList.remove(
+                "active"
+            );
 
             if (!isSocketOpen()) {
 
@@ -2715,860 +3259,139 @@ $sessionCode = strlen($deviceUid) > 3
                 );
 
                 return;
-            }
-
-
-            if (!files || files.length === 0) {
-                return;
-            }
-
-
-            for (
-                const file of files
-            ) {
-
-                try {
-
-                    await sendSingleFile(
-                        file
-                    );
-
-                } catch (error) {
-
-                    console.error(
-                        "File transfer failed:",
-                        error
-                    );
-
-                    alert(
-                        `Failed to send "${file.name}".`
-                    );
-
-                    return;
-                }
 
             }
 
-        }
-
-
-        async function sendSingleFile(file) {
-
-            const nameBytes =
-                new TextEncoder().encode(
-                    file.name
-                );
-
-
-            if (
-                nameBytes.length >
-                65535
-            ) {
-
-                throw new Error(
-                    "File name is too long."
-                );
-
-            }
-
-
-            /*
-             * TYPE 20
-             *
-             * Byte 0 = 20
-             * Byte 1-2 = filename length
-             * Byte 3-10 = file size
-             * Byte 11... = filename
-             */
-
-            const metaPkt =
-                new Uint8Array(
-                    1 +
-                    2 +
-                    8 +
-                    nameBytes.length
-                );
-
-
-            metaPkt[0] = 20;
-
-
-            metaPkt[1] =
-                (nameBytes.length >> 8) &
-                0xFF;
-
-
-            metaPkt[2] =
-                nameBytes.length &
-                0xFF;
-
-
-            const metaView =
-                new DataView(
-                    metaPkt.buffer
-                );
-
-
-            metaView.setBigUint64(
-                3,
-                BigInt(file.size),
-                false
-            );
-
-
-            metaPkt.set(
-                nameBytes,
-                11
-            );
-
-
-            ws.send(
-                metaPkt
-            );
-
-
-            /*
-             * TYPE 21
-             *
-             * Byte 0 = 21
-             * Byte 1-4 = chunk length
-             * Byte 5... = data
-             */
-
-            const chunkSize =
-                32768;
-
-
-            let offset = 0;
-
-
-            while (
-                offset < file.size
-            ) {
-
-                if (!isSocketOpen()) {
-
-                    throw new Error(
-                        "WebSocket disconnected."
-                    );
-
-                }
-
-
-                const end =
-                    Math.min(
-                        offset +
-                        chunkSize,
-                        file.size
-                    );
-
-
-                const slice =
-                    file.slice(
-                        offset,
-                        end
-                    );
-
-
-                const arrayBuffer =
-                    await slice.arrayBuffer();
-
-
-                const chunkBytes =
-                    new Uint8Array(
-                        arrayBuffer
-                    );
-
-
-                const chunkPkt =
-                    new Uint8Array(
-                        1 +
-                        4 +
-                        chunkBytes.length
-                    );
-
-
-                chunkPkt[0] = 21;
-
-
-                const chunkView =
-                    new DataView(
-                        chunkPkt.buffer
-                    );
-
-
-                chunkView.setUint32(
-                    1,
-                    chunkBytes.length,
-                    false
-                );
-
-
-                chunkPkt.set(
-                    chunkBytes,
-                    5
-                );
-
-
-                ws.send(
-                    chunkPkt
-                );
-
-
-                offset = end;
-
-            }
-
-
-            alert(
-                `File "${file.name}" sent successfully to Host's RemoteDrop folder!`
+            await sendFiles(
+                event.dataTransfer.files
             );
 
         }
+    );
+
+}
 
 
-        /* =========================================================
-           MOUSE COORDINATES
-        ========================================================= */
+/* ============================================================
+   BUTTON EVENTS
+============================================================ */
 
-        function getNormalizedCoordinates(event) {
+streamBtn.addEventListener(
+    "click",
+    toggleWebStream
+);
 
-            if (
-                !canvas ||
-                !canvas.width ||
-                !canvas.height
-            ) {
+audioBtn.addEventListener(
+    "click",
+    toggleAudio
+);
 
-                return null;
-            }
+chatBtn.addEventListener(
+    "click",
+    toggleChat
+);
 
+chatClose.addEventListener(
+    "click",
+    toggleChat
+);
 
-            const rect =
-                canvas.getBoundingClientRect();
+sendChatBtn.addEventListener(
+    "click",
+    sendChat
+);
 
+chatInput.addEventListener(
+    "keydown",
+    event => {
 
-            if (
-                rect.width <= 0 ||
-                rect.height <= 0
-            ) {
+        if (event.key === "Enter") {
 
-                return null;
-            }
-
-
-            const x =
-                event.clientX -
-                rect.left;
-
-
-            const y =
-                event.clientY -
-                rect.top;
-
-
-            /*
-             * Convert displayed canvas
-             * coordinates to actual canvas
-             * coordinates.
-             */
-
-            const canvasX =
-                x *
-                (canvas.width /
-                    rect.width);
-
-
-            const canvasY =
-                y *
-                (canvas.height /
-                    rect.height);
-
-
-            const normalizedX =
-                Math.max(
-                    0,
-                    Math.min(
-                        65535,
-                        Math.floor(
-                            (
-                                canvasX /
-                                canvas.width
-                            ) *
-                            65535
-                        )
-                    )
-                );
-
-
-            const normalizedY =
-                Math.max(
-                    0,
-                    Math.min(
-                        65535,
-                        Math.floor(
-                            (
-                                canvasY /
-                                canvas.height
-                            ) *
-                            65535
-                        )
-                    )
-                );
-
-
-            return {
-                x:
-                    normalizedX,
-
-                y:
-                    normalizedY
-            };
+            sendChat();
 
         }
 
-
-        /* =========================================================
-           SEND MOUSE MOVE
-        ========================================================= */
-
-        function sendMouseMove(event) {
-
-            if (!isSocketOpen()) {
-                return;
-            }
-
-
-            const coords =
-                getNormalizedCoordinates(
-                    event
-                );
-
-
-            if (!coords) {
-                return;
-            }
-
-
-            /*
-             * TYPE 0
-             *
-             * Byte 0 = 0
-             * Byte 1-2 = X
-             * Byte 3-4 = Y
-             */
-
-            const pkt =
-                new Uint8Array(9);
-
-
-            pkt[0] = 0;
-
-
-            pkt[1] =
-                (coords.x >> 8) &
-                0xFF;
-
-            pkt[2] =
-                coords.x &
-                0xFF;
-
-
-            pkt[3] =
-                (coords.y >> 8) &
-                0xFF;
-
-            pkt[4] =
-                coords.y &
-                0xFF;
-
-
-            ws.send(pkt);
-
-        }
-
-
-        /* =========================================================
-           MOUSE DOWN
-        ========================================================= */
-
-        function sendMouseDown(event) {
-
-            if (!isSocketOpen()) {
-                return;
-            }
-
-
-            const coords =
-                getNormalizedCoordinates(
-                    event
-                );
-
-
-            if (!coords) {
-                return;
-            }
-
-
-            /*
-             * Left = 1
-             * Right = 3
-             */
-
-            const packetType =
-                event.button === 2
-                    ? 3
-                    : 1;
-
-
-            const pkt =
-                new Uint8Array(9);
-
-
-            pkt[0] =
-                packetType;
-
-
-            pkt[1] =
-                (coords.x >> 8) &
-                0xFF;
-
-            pkt[2] =
-                coords.x &
-                0xFF;
-
-
-            pkt[3] =
-                (coords.y >> 8) &
-                0xFF;
-
-            pkt[4] =
-                coords.y &
-                0xFF;
-
-
-            ws.send(pkt);
-
-        }
-
-
-        /* =========================================================
-           MOUSE UP
-        ========================================================= */
-
-        function sendMouseUp(event) {
-
-            if (!isSocketOpen()) {
-                return;
-            }
-
-
-            /*
-             * Left = 2
-             * Right = 4
-             */
-
-            const packetType =
-                event.button === 2
-                    ? 4
-                    : 2;
-
-
-            const pkt =
-                new Uint8Array(9);
-
-
-            pkt[0] =
-                packetType;
-
-
-            ws.send(pkt);
-
-        }
-
-
-        /* =========================================================
-           MOUSE WHEEL
-        ========================================================= */
-
-        function sendMouseWheel(event) {
-
-            if (!isSocketOpen()) {
-                return;
-            }
-
-
-            event.preventDefault();
-
-
-            const scroll =
-                event.deltaY > 0
-                    ? -120
-                    : 120;
-
-
-            /*
-             * TYPE 8
-             */
-
-            const pkt =
-                new Uint8Array(9);
-
-
-            pkt[0] = 8;
-
-
-            pkt[1] = 0;
-            pkt[2] = 0;
-
-
-            pkt[3] =
-                (scroll >> 8) &
-                0xFF;
-
-
-            pkt[4] =
-                scroll &
-                0xFF;
-
-
-            ws.send(pkt);
-
-        }
-
-
-        /* =========================================================
-           KEYBOARD
-        ========================================================= */
-
-        function sendKeyboard(event, type) {
-
-            if (!isSocketOpen()) {
-                return;
-            }
-
-
-            event.preventDefault();
-
-
-            const keyCode =
-                event.keyCode ||
-                event.which;
-
-
-            /*
-             * TYPE 5 = key down
-             * TYPE 6 = key up
-             */
-
-            const pkt =
-                new Uint8Array(5);
-
-
-            pkt[0] =
-                type;
-
-
-            pkt[1] =
-                (keyCode >> 24) &
-                0xFF;
-
-
-            pkt[2] =
-                (keyCode >> 16) &
-                0xFF;
-
-
-            pkt[3] =
-                (keyCode >> 8) &
-                0xFF;
-
-
-            pkt[4] =
-                keyCode &
-                0xFF;
-
-
-            ws.send(pkt);
-
-        }
-
-
-        /* =========================================================
-           ATTACH CANVAS EVENTS
-        ========================================================= */
-
-        function attachCanvasEvents() {
-
-            if (!canvas) {
-                return;
-            }
-
-
-            canvas.addEventListener(
-                "mousemove",
-                sendMouseMove
-            );
-
-
-            canvas.addEventListener(
-                "mousedown",
-                function (event) {
-
-                    canvas.focus();
-
-                    sendMouseDown(
-                        event
-                    );
-
-                }
-            );
-
-
-            canvas.addEventListener(
-                "mouseup",
-                sendMouseUp
-            );
-
-
-            canvas.addEventListener(
-                "contextmenu",
-                function (event) {
-
-                    event.preventDefault();
-
-                }
-            );
-
-
-            canvas.addEventListener(
-                "wheel",
-                sendMouseWheel,
-                {
-                    passive: false
-                }
-            );
-
-
-            canvas.addEventListener(
-                "keydown",
-                function (event) {
-
-                    sendKeyboard(
-                        event,
-                        5
-                    );
-
-                }
-            );
-
-
-            canvas.addEventListener(
-                "keyup",
-                function (event) {
-
-                    sendKeyboard(
-                        event,
-                        6
-                    );
-
-                }
-            );
-
-        }
-
-
-        /* =========================================================
-           DRAG & DROP
-        ========================================================= */
-
-        function attachDropEvents() {
-
-            streamBox.addEventListener(
-                "dragover",
-                function (event) {
-
-                    event.preventDefault();
-
-                    dropOverlay.classList.add(
-                        "active"
-                    );
-
-                }
-            );
-
-
-            streamBox.addEventListener(
-                "dragleave",
-                function (event) {
-
-                    event.preventDefault();
-
-                    dropOverlay.classList.remove(
-                        "active"
-                    );
-
-                }
-            );
-
-
-            streamBox.addEventListener(
-                "drop",
-                async function (event) {
-
-                    event.preventDefault();
-
-
-                    dropOverlay.classList.remove(
-                        "active"
-                    );
-
-
-                    if (!isSocketOpen()) {
-
-                        alert(
-                            "WebSocket not connected!"
-                        );
-
-                        return;
-                    }
-
-
-                    const files =
-                        event.dataTransfer.files;
-
-
-                    await sendFiles(
-                        files
-                    );
-
-                }
-            );
-
-        }
-
-
-        /* =========================================================
-           BUTTON EVENTS
-        ========================================================= */
-
-        streamBtn.addEventListener(
-            "click",
-            toggleWebStream
+    }
+);
+
+recordBtn.addEventListener(
+    "click",
+    toggleRecording
+);
+
+monitorSelect.addEventListener(
+    "change",
+    function () {
+
+        switchMonitor(
+            this.value
         );
 
-
-        audioBtn.addEventListener(
-            "click",
-            toggleAudio
-        );
+    }
+);
 
 
-        chatBtn.addEventListener(
-            "click",
-            toggleChat
-        );
+/* ============================================================
+   INITIALIZE
+============================================================ */
+
+canvas =
+    document.getElementById(
+        "remoteCanvas"
+    );
+
+attachCanvasEvents();
+
+attachDropEvents();
 
 
-        chatClose.addEventListener(
-            "click",
-            toggleChat
-        );
+/* ============================================================
+   CLEANUP
+============================================================ */
+
+window.addEventListener(
+    "beforeunload",
+    () => {
+
+        stopWebStream();
+
+    }
+);
 
 
-        sendChatBtn.addEventListener(
-            "click",
-            sendChat
-        );
+/* ============================================================
+   DEBUG
+============================================================ */
+
+console.log(
+    "================================="
+);
+
+console.log(
+    "REMOTE VIEWER INITIALIZED"
+);
+
+console.log(
+    "Device ID:",
+    DEVICE_ID
+);
+
+console.log(
+    "WebSocket:",
+    WS_URL
+);
+
+console.log(
+     "Video protocol:\nTYPE 13 + WIDTH + HEIGHT + H264 SIZE + H264\nDecoder: WebCodecs H.264 (Annex-B->AVCC converted)"
+);
 
 
-        chatInput.addEventListener(
-            "keydown",
-            function (event) {
 
-                if (
-                    event.key ===
-                    "Enter"
-                ) {
+console.log(
+    "================================="
+);
 
-                    sendChat();
-
-                }
-
-            }
-        );
-
-
-        recordBtn.addEventListener(
-            "click",
-            toggleRecording
-        );
-
-
-        monitorSelect.addEventListener(
-            "change",
-            function () {
-
-                switchMonitor(
-                    this.value
-                );
-
-            }
-        );
-
-
-        /* =========================================================
-           INITIALIZE
-        ========================================================= */
-
-        attachDropEvents();
-
-        /*
-         * Canvas exists in DOM from the beginning,
-         * so attach its events once.
-         */
-
-        canvas =
-            document.getElementById(
-                "remoteCanvas"
-            );
-
-
-        attachCanvasEvents();
-
-
-        /* =========================================================
-           PAGE CLEANUP
-        ========================================================= */
-
-        window.addEventListener(
-            "beforeunload",
-            function () {
-
-                stopWebStream();
-
-            }
-        );
-
-
-        /* =========================================================
-           DEBUG
-        ========================================================= */
-
-        console.log(
-            "Remote Viewer initialized."
-        );
-
-        console.log(
-            "Device ID:",
-            DEVICE_ID
-        );
-
-        console.log(
-            "WebSocket:",
-            WS_URL
-        );
-
-    </script>
+</script>
 
 </body>
 

@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 tungstenite = "0.20"
+sha2 = "0.10"
