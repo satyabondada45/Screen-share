@@ -1537,23 +1537,24 @@ fn main() {
     println!("========================================");
     println!("       REMOTE DESKTOP RELAY SERVER");
     println!("========================================");
-
-    println!(
-        "  Listening on {}",
-        RELAY_ADDR
-    );
-
-    println!("========================================");
+    println!("[RELAY] Starting relay server...");
+    println!("[RELAY] Binding to {}...", RELAY_ADDR);
 
     // --------------------------------------------------------
     // Bind TCP listener
     // --------------------------------------------------------
 
-    let listener =
-        TcpListener::bind(RELAY_ADDR)
-            .expect(
-                "Failed to bind relay server to port 9001"
-            );
+    let listener = match TcpListener::bind(RELAY_ADDR) {
+        Ok(l) => {
+            println!("[RELAY] Relay listening on {}", RELAY_ADDR);
+            println!("========================================");
+            l
+        }
+        Err(e) => {
+            eprintln!("[RELAY][FATAL] Failed to bind to {}: {:?}", RELAY_ADDR, e);
+            panic!("Failed to bind relay server to port 9001: {:?}", e);
+        }
+    };
 
     // --------------------------------------------------------
     // Host registry
@@ -1592,7 +1593,7 @@ fn main() {
                 );
 
         println!(
-            "[Relay] New connection from {}",
+            "[RELAY] Client connected: {}",
             peer
         );
 
