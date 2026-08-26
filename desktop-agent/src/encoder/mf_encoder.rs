@@ -30,7 +30,8 @@ pub struct HardwareH264Encoder {
     fps: u32,
     frame_index: u64,
     nv12_buffer: Vec<u8>,
-    is_async: bool,
+    pub is_async: bool,
+    has_logged_first_keyframe: bool,
 }
 
 impl HardwareH264Encoder {
@@ -180,7 +181,6 @@ impl HardwareH264Encoder {
                 println!("[H264 HW] MFT attributes: MF_TRANSFORM_ASYNC: {}", is_async);
 
                 if is_async {
-                    // Unlock the Asynchronous MFT (Required to avoid MF_E_TRANSFORM_ASYNC_LOCKED 0xC00D6D77)
                     let hr_unlock = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
                     println!("[H264 HW] Async: TRUE");
                     println!("[H264 HW] Unlocked via MF_TRANSFORM_ASYNC_UNLOCK: {:?}", hr_unlock);
@@ -255,8 +255,74 @@ impl HardwareH264Encoder {
                 frame_index: 0,
                 nv12_buffer,
                 is_async,
+                has_logged_first_keyframe: false,
             })
         }
+    }
+
+    // Drain all currently available output samples from the hardware MFT
+    fn drain_all_output(&mut self) -> Result<Vec<u8>, String> {
+        let mut total_output = Vec::new();
+
+        loop {
+            unsafe {
+                let out_buffer: IMFMediaBuffer = MFCreateMemoryBuffer(1024 * 1024)
+                    .map_err(|e| format!("Create output buffer failed: {:?}", e))?;
+                let out_sample: IMFSample = MFCreateSample()
+                    .map_err(|e| format!("Create output sample failed: {:?}", e))?;
+                out_sample.AddBuffer(&out_buffer).map_err(|e| format!("AddBuffer output failed: {:?}", e))?;
+
+                let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+                    dwStreamID: 0,
+                    pSample: std::mem::ManuallyDrop::new(Some(out_sample.clone())),
+                    dwStatus: 0,
+                    pEvents: std::mem::ManuallyDrop::new(None),
+                };
+
+                let mut status: u32 = 0;
+                let hr_out = self.mft.ProcessOutput(0, std::slice::from_mut(&mut output_data_buffer), &mut status);
+
+                if hr_out.is_ok() {
+                    let mut out_data_ptr: *mut u8 = std::ptr::null_mut();
+                    let mut out_max_len: u32 = 0;
+                    let mut out_cur_len: u32 = 0;
+
+                    out_buffer.Lock(&mut out_data_ptr, Some(&mut out_max_len), Some(&mut out_cur_len))
+                        .map_err(|e| format!("Lock out_buffer failed: {:?}", e))?;
+
+                    if !out_data_ptr.is_null() && out_cur_len > 0 {
+                        let encoded_slice = std::slice::from_raw_parts(out_data_ptr, out_cur_len as usize);
+                        let annex_b = convert_to_annex_b(encoded_slice);
+                        if !annex_b.is_empty() {
+                            println!("[H264 HW] Output sample received: {} bytes", annex_b.len());
+
+                            if !self.has_logged_first_keyframe {
+                                self.has_logged_first_keyframe = true;
+                                log_keyframe_diagnostics(&annex_b);
+                            }
+
+                            total_output.extend_from_slice(&annex_b);
+                        }
+                    }
+                    let _ = out_buffer.Unlock();
+                } else if let Err(e) = hr_out {
+                    let code = e.code().0 as u32;
+                    if code == 0xC00D6D72 {
+                        // MF_E_TRANSFORM_NEED_MORE_INPUT: MFT has drained all available output
+                        println!("[H264 HW] Encoder needs more input");
+                        break;
+                    } else if code == 0xC00D6D61 {
+                        // MF_E_TRANSFORM_STREAM_CHANGE: Stream format attributes changed (e.g. SPS/PPS)
+                        println!("[H264 HW] Stream change detected");
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(total_output)
     }
 
     pub fn encode_rgba(&mut self, rgba: &[u8], src_width: usize, src_height: usize, force_keyframe: bool) -> Result<Vec<u8>, String> {
@@ -304,49 +370,42 @@ impl HardwareH264Encoder {
 
             self.frame_index += 1;
 
-            let hr_input = self.mft.ProcessInput(0, &sample, 0);
-            if hr_input.is_err() {
-                // If async transform needs event or buffers
-                eprintln!("[H264 HW] ProcessInput returned: {:?}", hr_input);
+            // Submit input frame with backpressure & drain handling
+            let mut submitted = false;
+            let mut collected_output = Vec::new();
+
+            for attempt in 0..4 {
+                let hr_input = self.mft.ProcessInput(0, &sample, 0);
+
+                if hr_input.is_ok() {
+                    println!("[H264 HW] Input frame submitted");
+                    submitted = true;
+                    break;
+                } else if let Err(e) = hr_input {
+                    let code = e.code().0 as u32;
+                    if code == 0xC00D36B5 {
+                        // MF_E_NOTACCEPTING: MFT has output ready and is blocking further input
+                        println!("[H264 HW] Encoder not accepting input; draining output (attempt {})", attempt + 1);
+                        let drained = self.drain_all_output()?;
+                        if !drained.is_empty() {
+                            collected_output.extend_from_slice(&drained);
+                        }
+                    } else {
+                        eprintln!("[H264 HW] ProcessInput error: {:?}", e);
+                        break;
+                    }
+                }
             }
 
-            let out_buffer: IMFMediaBuffer = MFCreateMemoryBuffer(1024 * 1024)
-                .map_err(|e| format!("Create output buffer failed: {:?}", e))?;
-            let out_sample: IMFSample = MFCreateSample()
-                .map_err(|e| format!("Create output sample failed: {:?}", e))?;
-            out_sample.AddBuffer(&out_buffer).map_err(|e| format!("AddBuffer output failed: {:?}", e))?;
-
-            let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: std::mem::ManuallyDrop::new(Some(out_sample.clone())),
-                dwStatus: 0,
-                pEvents: std::mem::ManuallyDrop::new(None),
-            };
-
-            let mut status: u32 = 0;
-            let hr_out = self.mft.ProcessOutput(0, std::slice::from_mut(&mut output_data_buffer), &mut status);
-
-            if hr_out.is_ok() {
-                let mut out_data_ptr: *mut u8 = std::ptr::null_mut();
-                let mut out_max_len: u32 = 0;
-                let mut out_cur_len: u32 = 0;
-
-                out_buffer.Lock(&mut out_data_ptr, Some(&mut out_max_len), Some(&mut out_cur_len))
-                    .map_err(|e| format!("Lock out_buffer failed: {:?}", e))?;
-
-                let encoded_slice = if !out_data_ptr.is_null() && out_cur_len > 0 {
-                    std::slice::from_raw_parts(out_data_ptr, out_cur_len as usize)
-                } else {
-                    &[]
-                };
-
-                let annex_b_bytes = convert_to_annex_b(encoded_slice);
-                let _ = out_buffer.Unlock();
-
-                Ok(annex_b_bytes)
-            } else {
-                Ok(Vec::new())
+            // Drain any output produced by the newly submitted frame
+            if submitted {
+                let drained = self.drain_all_output()?;
+                if !drained.is_empty() {
+                    collected_output.extend_from_slice(&drained);
+                }
             }
+
+            Ok(collected_output)
         }
     }
 }
@@ -480,4 +539,40 @@ fn convert_to_annex_b(data: &[u8]) -> Vec<u8> {
     } else {
         annex_b
     }
+}
+
+fn log_keyframe_diagnostics(h264_bytes: &[u8]) {
+    let mut nal_types = Vec::new();
+    let mut has_sps = false;
+    let mut has_pps = false;
+    let mut has_idr = false;
+
+    let mut i = 0;
+    while i + 2 < h264_bytes.len() {
+        let mut sc_len = 0;
+        if i + 3 < h264_bytes.len() && h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 0 && h264_bytes[i+3] == 1 {
+            sc_len = 4;
+        } else if h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 1 {
+            sc_len = 3;
+        }
+        if sc_len > 0 {
+            if i + sc_len < h264_bytes.len() {
+                let n_type = h264_bytes[i + sc_len] & 0x1F;
+                nal_types.push(n_type);
+                if n_type == 7 { has_sps = true; }
+                if n_type == 8 { has_pps = true; }
+                if n_type == 5 { has_idr = true; }
+            }
+            i += sc_len;
+        } else {
+            i += 1;
+        }
+    }
+
+    println!("[H264 HW][OUTPUT]");
+    println!("size={}", h264_bytes.len());
+    println!("NAL types={:?}", nal_types);
+    println!("SPS={}", has_sps);
+    println!("PPS={}", has_pps);
+    println!("IDR={}", has_idr);
 }
