@@ -1077,13 +1077,12 @@ fn main() {
     let _ = enable_autostart("ScreenShareAgent");
 
     println!("========================================");
-    println!("       REMOTE DESKTOP AGENT");
+    println!("       REMOTE DESKTOP AGENT (120 FPS)");
     println!("========================================");
     println!("  YOUR REMOTE DESKTOP ID: {}", id_str);
     println!("  Relay: {}", relay_addr);
-    println!("  Video: Maximum 1920x1080");
-    println!("  Codec: H.264");
-    println!("  H.264 Encoder: OpenH264");
+    println!("  Video: 1920x1080 @ 120 FPS");
+    println!("  Codec: Hardware H.264 (Low Latency)");
     println!("========================================");
 
     run_agent_loop(relay_addr, session_id, id_str);

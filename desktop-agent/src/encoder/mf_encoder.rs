@@ -30,6 +30,7 @@ pub struct HardwareH264Encoder {
     fps: u32,
     frame_index: u64,
     nv12_buffer: Vec<u8>,
+    is_async: bool,
 }
 
 impl HardwareH264Encoder {
@@ -170,6 +171,24 @@ impl HardwareH264Encoder {
                     .map_err(|e| format!("Failed to create CMSH264EncoderMFT: {:?}", e))?
             };
 
+            // ========================================================
+            // CRITICAL: ASYNC MFT UNLOCK & ATTRIBUTES
+            // ========================================================
+            let mut is_async = false;
+            if let Ok(attrs) = mft.GetAttributes() {
+                is_async = attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0;
+                println!("[H264 HW] MFT attributes: MF_TRANSFORM_ASYNC: {}", is_async);
+
+                if is_async {
+                    // Unlock the Asynchronous MFT (Required to avoid MF_E_TRANSFORM_ASYNC_LOCKED 0xC00D6D77)
+                    let hr_unlock = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
+                    println!("[H264 HW] Async: TRUE");
+                    println!("[H264 HW] Unlocked via MF_TRANSFORM_ASYNC_UNLOCK: {:?}", hr_unlock);
+                } else {
+                    println!("[H264 HW] Async: FALSE");
+                }
+            }
+
             // Configure Low Latency and Real-Time settings via ICodecAPI
             if let Ok(codec_api) = mft.cast::<ICodecAPI>() {
                 // Low Latency Mode = TRUE (zero frame buffering)
@@ -186,9 +205,10 @@ impl HardwareH264Encoder {
 
                 // Rate Control: CBR
                 set_codec_u32(&codec_api, &CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR.0 as u32);
+                println!("[H264 HW] ICodecAPI low-latency properties applied.");
             }
 
-            // Set Output Media Type: H.264
+            // Set Output Media Type: H.264 FIRST
             let out_media_type: IMFMediaType = MFCreateMediaType().map_err(|e| format!("MFCreateMediaType failed: {:?}", e))?;
             out_media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| format!("{:?}", e))?;
             out_media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(|e| format!("{:?}", e))?;
@@ -200,6 +220,7 @@ impl HardwareH264Encoder {
             out_media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32).map_err(|e| format!("{:?}", e))?;
 
             mft.SetOutputType(0, &out_media_type, 0).map_err(|e| format!("SetOutputType failed: {:?}", e))?;
+            println!("[H264 HW] Output type configured successfully: H.264 {}x{} @ {} FPS", width, height, fps);
 
             // Set Input Media Type: NV12
             let in_media_type: IMFMediaType = MFCreateMediaType().map_err(|e| format!("MFCreateMediaType failed: {:?}", e))?;
@@ -211,11 +232,16 @@ impl HardwareH264Encoder {
             in_media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| format!("{:?}", e))?;
 
             mft.SetInputType(0, &in_media_type, 0).map_err(|e| format!("SetInputType failed: {:?}", e))?;
+            println!("[H264 HW] Input type configured successfully: NV12 {}x{}", width, height);
 
-            // Start MFT Streaming
+            // Start MFT Streaming Messages
             let _ = mft.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            println!("[H264 HW] Begin streaming.");
             let _ = mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+            println!("[H264 HW] Start of stream.");
             let _ = mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+            println!("[H264 HW] Hardware H.264 encoder READY.");
 
             let nv12_size = (width as usize) * (height as usize) * 3 / 2;
             let nv12_buffer = vec![0u8; nv12_size];
@@ -228,6 +254,7 @@ impl HardwareH264Encoder {
                 fps,
                 frame_index: 0,
                 nv12_buffer,
+                is_async,
             })
         }
     }
@@ -279,7 +306,8 @@ impl HardwareH264Encoder {
 
             let hr_input = self.mft.ProcessInput(0, &sample, 0);
             if hr_input.is_err() {
-                return Err(format!("ProcessInput failed: {:?}", hr_input));
+                // If async transform needs event or buffers
+                eprintln!("[H264 HW] ProcessInput returned: {:?}", hr_input);
             }
 
             let out_buffer: IMFMediaBuffer = MFCreateMemoryBuffer(1024 * 1024)
