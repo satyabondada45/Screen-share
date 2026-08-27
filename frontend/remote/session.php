@@ -1,38 +1,56 @@
 <?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
-require_once __DIR__ . '/../../backend/config/database.php';
+// Require authenticated user session
+if (empty($_SESSION['user_id'])) {
+    header("Location: ../login.php");
+    exit();
+}
+
+$dbPath = __DIR__ . '/../../backend/config/database.php';
+if (!isset($pdo) || $pdo === null) {
+    if (file_exists($dbPath)) {
+        require $dbPath;
+    }
+}
 
 $deviceUid = $_GET['id'] ?? null;
+$sessionToken = $_GET['token'] ?? null;
 
 if (!$deviceUid) {
-    header("Location: ../devices.php");
-    exit;
+    header("Location: ../dashboard.php");
+    exit();
 }
+
+// Clean alphanumeric device identifier / system ID
+$cleanId = preg_replace('/[^0-9a-zA-Z_\-]/', '', (string)$deviceUid);
 
 $stmt = $pdo->prepare("
     SELECT *
     FROM devices
-    WHERE device_uid = :device_uid
+    WHERE device_uid = :device_uid OR system_id = :system_id
     LIMIT 1
 ");
 
 $stmt->execute([
-    ':device_uid' => $deviceUid
+    ':device_uid' => $cleanId,
+    ':system_id' => $cleanId
 ]);
 
 $device = $stmt->fetch(PDO::FETCH_ASSOC);
 
 if (!$device) {
-    die("Error: Device not found in database.");
+    die("Error: Target device not found in database.");
 }
 
 $deviceName = $device['name'] ?? 'Unknown Device';
-
 $isOnline = !empty($device['is_online']);
 
-$sessionCode = strlen($deviceUid) > 3
-    ? substr($deviceUid, 0, 3) . '-' . substr($deviceUid, 3)
-    : $deviceUid;
+$sessionCode = strlen($cleanId) === 9
+    ? substr($cleanId, 0, 3) . ' ' . substr($cleanId, 3, 3) . ' ' . substr($cleanId, 6, 3)
+    : (strlen($cleanId) > 3 ? substr($cleanId, 0, 3) . '-' . substr($cleanId, 3) : $cleanId);
 ?>
 <!DOCTYPE html>
 
@@ -727,149 +745,79 @@ $sessionCode = strlen($deviceUid) > 3
 
 
     <div class="topbar">
-
-        <div class="device-badge">
-
-            <div class="dot"></div>
-
-            <strong>
-
-                Host:
-                <?= htmlspecialchars(
-                    $deviceName,
-                    ENT_QUOTES,
-                    'UTF-8'
-                ) ?>
-
-            </strong>
-
+        <div style="display: flex; align-items: center; gap: 16px;">
+            <a href="../dashboard.php" style="display: flex; align-items: center; gap: 8px; text-decoration: none;">
+                <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
+                    <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
+                    <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
+                    <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" opacity="0.8" />
+                </svg>
+                <span style="font-weight: 800; font-size: 1.1rem; color: #fff; letter-spacing: -0.02em;">DeskStream</span>
+            </a>
+            <div class="device-badge" style="margin-left: 12px; background: rgba(255,255,255,0.05); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);">
+                <div class="dot"></div>
+                <span style="font-size: 0.85rem; font-weight: 600; color: var(--text-main);">
+                    <?= htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') ?>
+                </span>
+                <span style="font-size: 0.78rem; font-family: monospace; color: var(--text-muted); margin-left: 4px;">
+                    (<?= htmlspecialchars($sessionCode) ?>)
+                </span>
+            </div>
         </div>
 
-        <a href="../devices.php" class="btn btn-danger" style="
-            padding:6px 14px;
-            font-size:.8rem;
-        ">
-            Back to Dashboard
+        <a href="../dashboard.php" class="btn btn-danger" style="padding:6px 14px; font-size:.85rem; border-radius: 6px;">
+            ✕ End Session
         </a>
-
     </div>
 
 
-    <div class="container">
+    <div class="container" style="max-width: 100%; margin: 8px auto; padding: 0 16px; flex: 1; display: flex; flex-direction: column;">
+        <div class="session-card" style="padding: 10px; min-height: calc(100vh - 78px); display: flex; flex-direction: column; background: #0f172a; border-radius: 10px;">
+            <div class="toolbar" id="advToolbar" style="display: flex; margin-bottom: 8px; justify-content: space-between; align-items: center; background: #1e293b; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);">
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <select class="monitor-select" id="monitorSelect" style="padding: 6px 10px; font-size: 0.85rem;">
+                        <option value="0">Monitor 1 (Primary)</option>
+                        <option value="1">Monitor 2</option>
+                        <option value="2">Monitor 3</option>
+                        <option value="3">Monitor 4</option>
+                    </select>
 
-        <div class="session-card">
+                    <button class="btn btn-secondary" id="audioBtn" type="button" style="padding: 6px 12px; font-size: 0.82rem;">
+                        🔈 Listen Audio
+                    </button>
 
-            <h2>
-                Remote Access Terminal
-            </h2>
+                    <button class="btn btn-secondary" id="chatBtn" type="button" style="padding: 6px 12px; font-size: 0.82rem;">
+                        💬 Chat
+                    </button>
 
-            <p class="session-description">
-                Browser remote desktop session.
-            </p>
-
-
-            <div class="code-display">
-
-                <div style="
-                font-size:.8rem;
-                color:var(--text-muted);
-                margin-bottom:4px;
-            ">
-                    REMOTE SESSION ACCESS ID
+                    <button class="btn btn-secondary" id="recordBtn" type="button" style="padding: 6px 12px; font-size: 0.82rem;">
+                        🔴 Record Session
+                    </button>
                 </div>
 
-                <div class="session-code">
-
-                    <?= htmlspecialchars(
-                        $sessionCode,
-                        ENT_QUOTES,
-                        'UTF-8'
-                    ) ?>
-
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button class="btn btn-secondary" id="fullscreenBtn" type="button" onclick="toggleFullscreen()" style="padding: 6px 12px; font-size: 0.82rem;">
+                        ⛶ Fullscreen
+                    </button>
                 </div>
-
             </div>
 
-
-            <div class="main-actions">
-
-                <button class="btn btn-success" id="streamBtn" type="button">
-                    Start Web Canvas Stream
-                </button>
-
-                <a href="screenshare://<?= rawurlencode($deviceUid) ?>" class="btn btn-primary">
-                    Launch Native Desktop Viewer
-                </a>
-
-            </div>
-
-
-            <div class="toolbar" id="advToolbar">
-
-                <select class="monitor-select" id="monitorSelect">
-
-                    <option value="0">
-                        Monitor 1 (Primary)
-                    </option>
-
-                    <option value="1">
-                        Monitor 2
-                    </option>
-
-                    <option value="2">
-                        Monitor 3
-                    </option>
-
-                    <option value="3">
-                        Monitor 4
-                    </option>
-
-                </select>
-
-
-                <button class="btn btn-secondary" id="audioBtn" type="button">
-                    🔈 Listen Audio
-                </button>
-
-
-                <button class="btn btn-secondary" id="chatBtn" type="button">
-                    💬 Chat
-                </button>
-
-
-                <button class="btn btn-secondary" id="recordBtn" type="button">
-                    🔴 Record Session
-                </button>
-
-            </div>
-
-
-            <div id="stream-box" class="canvas-container">
-
-                <div id="hud" class="hud-badge">
-                    DISCONNECTED
+            <div id="stream-box" class="canvas-container" style="display: flex; flex: 1; min-height: calc(100vh - 140px); position: relative; background: #000; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,0.6);">
+                <div id="hud" class="hud-badge" style="position: absolute; top: 12px; right: 12px; background: rgba(15, 23, 42, 0.85); color: #38bdf8; padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 700; border: 1px solid var(--border); z-index: 10; letter-spacing: 0.5px;">
+                    CONNECTING...
                 </div>
-
 
                 <div id="dropOverlay" class="drop-overlay">
-
                     📁 Drop files here to send to Remote Host
-
                     <br>
-
                     <small style="font-size:.9rem;">
                         Files will be placed in RemoteDrop/
                     </small>
-
                 </div>
 
-
-                <canvas id="remoteCanvas" tabindex="0"></canvas>
-
+                <canvas id="remoteCanvas" tabindex="0" style="width: 100%; height: 100%; object-fit: contain; display: block; outline: none; background: #000;"></canvas>
             </div>
-
         </div>
-
     </div>
 
 
@@ -974,9 +922,6 @@ $sessionCode = strlen($deviceUid) > 3
         /* ============================================================
            DOM
         ============================================================ */
-
-        const streamBtn =
-            document.getElementById("streamBtn");
 
         const streamBox =
             document.getElementById("stream-box");
@@ -1597,12 +1542,27 @@ $sessionCode = strlen($deviceUid) > 3
            [4 bytes H264_SIZE (u32 BE)]
            [H264 DATA...]
         
-           The agent now sends RGB data (3 bytes per pixel) to the remote
-           viewer. This fixes the black-screen issue on the web viewer.
+/* ============================================================
+   STREAM STATE & METRICS
 ============================================================ */
 
-let videoCodecConfigured = false;
-let hasReceivedFirstKeyframe = false;
+const DecoderState = {
+    UNCONFIGURED: "UNCONFIGURED",
+    CONFIGURED_WAITING_FOR_KEYFRAME: "CONFIGURED_WAITING_FOR_KEYFRAME",
+    DECODING: "DECODING",
+    ERROR: "ERROR"
+};
+
+let decoderState = DecoderState.UNCONFIGURED;
+let currentStreamState = "CONNECTING";
+let streamStats = {
+    received_packets: 0,
+    received_bytes: 0,
+    received_sps: 0,
+    received_pps: 0,
+    received_idr: 0,
+    received_non_idr: 0
+};
 let browserPerf = {
     rxPackets: 0,
     decodedFrames: 0,
@@ -1610,18 +1570,57 @@ let browserPerf = {
     lastLog: performance.now()
 };
 
+function setStreamState(newState) {
+    currentStreamState = newState;
+    console.log("[STREAM STATE]", newState);
+    switch (newState) {
+        case "CONNECTING":
+            setHud("CONNECTING...");
+            break;
+        case "AUTHENTICATING":
+            setHud("AUTHENTICATING...");
+            break;
+        case "AUTHENTICATED":
+        case "ONLINE":
+        case "STREAM_REQUESTED":
+            setHud("ONLINE • REQUESTING STREAM");
+            break;
+        case "STREAM_ACTIVE":
+            setHud("STREAM ACTIVE • WAITING FOR KEYFRAME");
+            break;
+        case "WAITING_FOR_KEYFRAME":
+            setHud("WAITING FOR KEYFRAME (SPS/PPS/IDR)...");
+            break;
+        case "DECODING":
+            setHud("DECODING VIDEO...");
+            break;
+        case "DISPLAYING":
+            setHud(`LIVE • FRAME ${videoFrameCount} • ${renderWidth || 1920}×${renderHeight || 1080}`);
+            break;
+        default:
+            setHud(newState);
+            break;
+    }
+}
+
+let cachedSPS = null;
+let cachedPPS = null;
+
 function parseH264Nals(dataBytes) {
     let nalTypes = [];
     let hasSPS = false;
     let hasPPS = false;
     let hasIDR = false;
+    let hasSEI = false;
+    let hasAUD = false;
     let spsUnit = null;
     let ppsUnit = null;
     let i = 0;
+    const len = dataBytes.length;
 
-    while (i + 2 < dataBytes.length) {
+    while (i + 2 < len) {
         let scLen = 0;
-        if (i + 3 < dataBytes.length && dataBytes[i] === 0 && dataBytes[i+1] === 0 && dataBytes[i+2] === 0 && dataBytes[i+3] === 1) {
+        if (i + 3 < len && dataBytes[i] === 0 && dataBytes[i+1] === 0 && dataBytes[i+2] === 0 && dataBytes[i+3] === 1) {
             scLen = 4;
         } else if (dataBytes[i] === 0 && dataBytes[i+1] === 0 && dataBytes[i+2] === 1) {
             scLen = 3;
@@ -1629,10 +1628,10 @@ function parseH264Nals(dataBytes) {
 
         if (scLen > 0) {
             const nalStart = i + scLen;
-            let nextStart = dataBytes.length;
+            let nextStart = len;
             let j = nalStart;
-            while (j + 2 < dataBytes.length) {
-                if ((j + 3 < dataBytes.length && dataBytes[j] === 0 && dataBytes[j+1] === 0 && dataBytes[j+2] === 0 && dataBytes[j+3] === 1) ||
+            while (j + 2 < len) {
+                if ((j + 3 < len && dataBytes[j] === 0 && dataBytes[j+1] === 0 && dataBytes[j+2] === 0 && dataBytes[j+3] === 1) ||
                     (dataBytes[j] === 0 && dataBytes[j+1] === 0 && dataBytes[j+2] === 1)) {
                     nextStart = j;
                     break;
@@ -1640,7 +1639,7 @@ function parseH264Nals(dataBytes) {
                 j++;
             }
 
-            if (nalStart < dataBytes.length) {
+            if (nalStart < len) {
                 const nType = dataBytes[nalStart] & 0x1F;
                 nalTypes.push(nType);
                 if (nType === 7) {
@@ -1651,6 +1650,10 @@ function parseH264Nals(dataBytes) {
                     ppsUnit = dataBytes.slice(nalStart, nextStart);
                 } else if (nType === 5) {
                     hasIDR = true;
+                } else if (nType === 6) {
+                    hasSEI = true;
+                } else if (nType === 9) {
+                    hasAUD = true;
                 }
             }
             i = nextStart;
@@ -1659,7 +1662,130 @@ function parseH264Nals(dataBytes) {
         }
     }
 
-    return { nalTypes, hasSPS, hasPPS, hasIDR, spsUnit, ppsUnit };
+    return { nalTypes, hasSPS, hasPPS, hasIDR, hasSEI, hasAUD, spsUnit, ppsUnit };
+}
+
+function getCodecStringFromSps(sps) {
+    if (sps && sps.length >= 4) {
+        const p = sps[1].toString(16).padStart(2, '0');
+        const c = sps[2].toString(16).padStart(2, '0');
+        const l = sps[3].toString(16).padStart(2, '0');
+        return `avc1.${p}${c}${l}`.toLowerCase();
+    }
+    return 'avc1.42402a';
+}
+
+function prepareAnnexBKeyframe(dataBytes, sps, pps) {
+    const nals = parseH264Nals(dataBytes);
+    if (nals.hasSPS && nals.hasPPS) {
+        return dataBytes;
+    }
+    let extraLen = 0;
+    if (!nals.hasSPS && sps) extraLen += 4 + sps.length;
+    if (!nals.hasPPS && pps) extraLen += 4 + pps.length;
+
+    if (extraLen === 0) return dataBytes;
+
+    const combined = new Uint8Array(extraLen + dataBytes.length);
+    let offset = 0;
+    if (!nals.hasSPS && sps) {
+        combined.set([0, 0, 0, 1], offset);
+        offset += 4;
+        combined.set(sps, offset);
+        offset += sps.length;
+    }
+    if (!nals.hasPPS && pps) {
+        combined.set([0, 0, 0, 1], offset);
+        offset += 4;
+        combined.set(pps, offset);
+        offset += pps.length;
+    }
+    combined.set(dataBytes, offset);
+    return combined;
+}
+
+function initVideoDecoder() {
+    if (videoDecoder && videoDecoder.state !== 'closed') {
+        try {
+            videoDecoder.close();
+        } catch (e) {}
+    }
+    decoderState = DecoderState.UNCONFIGURED;
+
+    try {
+        videoDecoder = new VideoDecoder({
+            output(frame) {
+                if (decoderState === DecoderState.CONFIGURED_WAITING_FOR_KEYFRAME) {
+                    decoderState = DecoderState.DECODING;
+                    console.log("[DECODER STATE] DECODING (Keyframe decoded)");
+                    console.log("[WEBCODECS] KEYFRAME DECODED");
+                }
+                browserPerf.decodedFrames++;
+                videoFrameCount++;
+
+                console.log(`[WEBCODECS OUTPUT]\nwidth=${frame.displayWidth}\nheight=${frame.displayHeight}\ntimestamp=${frame.timestamp}`);
+
+                if (videoFrameCount === 1) {
+                    console.log("[VIDEO RENDER] first visible frame");
+                }
+
+                if (canvas && ctx) {
+                    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+                        canvas.width = frame.displayWidth;
+                        canvas.height = frame.displayHeight;
+                        renderWidth = frame.displayWidth;
+                        renderHeight = frame.displayHeight;
+                    }
+
+                    // Temporary Diagnostic: verify if decoded VideoFrame has non-black content
+                    if (videoFrameCount <= 3) {
+                        try {
+                            const diagCanvas = document.createElement("canvas");
+                            diagCanvas.width = 32;
+                            diagCanvas.height = 32;
+                            const diagCtx = diagCanvas.getContext("2d");
+                            if (diagCtx) {
+                                diagCtx.drawImage(frame, 0, 0, 32, 32);
+                                const pData = diagCtx.getImageData(0, 0, 32, 32).data;
+                                let nonBlack = 0;
+                                for (let i = 0; i < pData.length; i += 4) {
+                                    if (pData[i] > 10 || pData[i+1] > 10 || pData[i+2] > 10) nonBlack++;
+                                }
+                                console.log(`[VIDEO DIAGNOSTIC] Frame #${videoFrameCount} sample pixels: ${nonBlack} / 1024 non-black`);
+                            }
+                        } catch (diagErr) {}
+                    }
+
+                    ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                    browserPerf.renderedFrames++;
+                    console.log(`[VIDEO RENDER]\nframe=${browserPerf.renderedFrames}`);
+                    setStreamState("DISPLAYING");
+
+                    if (browserPerf.renderedFrames % 100 === 0) {
+                        const now = performance.now();
+                        const elapsedSec = (now - browserPerf.lastLog) / 1000.0;
+                        const renderFps = elapsedSec > 0 ? (100 / elapsedSec).toFixed(1) : "0.0";
+                        browserPerf.lastLog = now;
+
+                        console.log(
+                            `[VIDEO PERFORMANCE] Received: ${browserPerf.rxPackets}, Decoded: ${browserPerf.decodedFrames}, Rendered: ${browserPerf.renderedFrames}, Render FPS: ${renderFps}, Decoder Queue: ${videoDecoder.decodeQueueSize}`
+                        );
+                    }
+                }
+                frame.close();
+            },
+            error(error) {
+                console.error("[BROWSER DECODE ERROR]", error);
+                decoderState = DecoderState.ERROR;
+                setStreamState("ERROR");
+            }
+        });
+        return true;
+    } catch (err) {
+        console.error("[VIDEO FATAL] Failed to construct VideoDecoder:", err);
+        decoderState = DecoderState.ERROR;
+        return false;
+    }
 }
 
 async function handleVideoPacket(buffer) {
@@ -1694,11 +1820,14 @@ async function handleVideoPacket(buffer) {
 
     const actualPayloadSize = (payloadSize > 0 && payloadSize <= available) ? payloadSize : available;
     const h264Payload = bytes.slice(13, 13 + actualPayloadSize);
+    
+    streamStats.received_packets++;
+    streamStats.received_bytes += actualPayloadSize;
     browserPerf.rxPackets++;
 
-    // ========================================================
-    // 5. Capability Detection BEFORE using VideoDecoder
-    // ========================================================
+    console.log(`[BROWSER VIDEO] width=${width} height=${height} h264_size=${actualPayloadSize}`);
+
+    // Capability Detection BEFORE using VideoDecoder
     if (!("VideoDecoder" in window)) {
         console.error("[VIDEO FATAL] WebCodecs VideoDecoder is NOT available");
         console.error("[VIDEO FATAL] Browser:", navigator.userAgent);
@@ -1711,174 +1840,111 @@ async function handleVideoPacket(buffer) {
         return;
     }
 
-    // ========================================================
-    // 6. Detailed Browser Logging
-    // ========================================================
-    console.log(
-        "[BROWSER VIDEO RX]",
-        {
-            type: packetType,
-            packetLength: length,
-            width,
-            height,
-            h264ByteLength: actualPayloadSize
-        }
-    );
-
+    // STEP 2: NAL Parsing & Parameter Set Caching
     const nals = parseH264Nals(h264Payload);
-
-    console.log(
-        "[BROWSER H264]",
-        {
-            firstBytes: Array.from(h264Payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '),
-            nalTypes: nals.nalTypes,
-            spsPresent: nals.hasSPS,
-            ppsPresent: nals.hasPPS,
-            idrPresent: nals.hasIDR
-        }
-    );
-
-    // ========================================================
-    // 7. H.264 Codec string derivation from SPS
-    // ========================================================
-    let codecString = 'avc1.42c028';
-    if (nals.spsUnit && nals.spsUnit.length >= 4) {
-        const p = nals.spsUnit[1].toString(16).padStart(2, '0');
-        const c = nals.spsUnit[2].toString(16).padStart(2, '0');
-        const l = nals.spsUnit[3].toString(16).padStart(2, '0');
-        codecString = `avc1.${p}${c}${l}`;
+    if (nals.hasSPS && nals.spsUnit) {
+        cachedSPS = nals.spsUnit;
+    }
+    if (nals.hasPPS && nals.ppsUnit) {
+        cachedPPS = nals.ppsUnit;
     }
 
-    // ========================================================
-    // 6 & 11. WebCodecs Decoder Initialization & Reuse
-    // ========================================================
-    if (!videoDecoder || videoDecoder.state === 'closed') {
-        videoCodecConfigured = false;
-        hasReceivedFirstKeyframe = false;
+    // STEP 3: Keyframe State & Evaluation
+    const hasSPS = (cachedSPS !== null || nals.hasSPS);
+    const hasPPS = (cachedPPS !== null || nals.hasPPS);
+    const hasIDR = nals.hasIDR;
+    const isKey = hasIDR && hasSPS && hasPPS;
 
-        console.log("[BROWSER DECODER]", {
-            videoDecoderAvailable: ("VideoDecoder" in window)
-        });
+    const keyDeltaStr = isKey ? "key" : "delta";
+    console.log(`[BROWSER H264]\npacket_size=${length}\nreassembled_size=${actualPayloadSize}\nNAL types=[${nals.nalTypes.join(',')}]\nSPS=${hasSPS}\nPPS=${hasPPS}\nIDR=${hasIDR}\nkey/delta=${keyDeltaStr}`);
 
-        try {
-            videoDecoder = new VideoDecoder({
-                output(frame) {
-                    browserPerf.decodedFrames++;
+    for (const n of nals.nalTypes) {
+        if (n === 7) {
+            streamStats.received_sps++;
+        } else if (n === 8) {
+            streamStats.received_pps++;
+        } else if (n === 5) {
+            streamStats.received_idr++;
+        } else if (n === 1) {
+            streamStats.received_non_idr++;
+        }
+    }
 
-                    if (canvas && ctx) {
-                        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-                            canvas.width = frame.displayWidth;
-                            canvas.height = frame.displayHeight;
-                        }
+    // Codec string derivation from SPS
+    const spsForCodec = nals.spsUnit || cachedSPS;
+    const codecString = getCodecStringFromSps(spsForCodec);
 
-                        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-                        browserPerf.renderedFrames++;
-
-                        // Periodically print browser performance stats every 100 frames
-                        if (browserPerf.renderedFrames % 100 === 0) {
-                            const now = performance.now();
-                            const elapsedSec = (now - browserPerf.lastLog) / 1000.0;
-                            const renderFps = elapsedSec > 0 ? (100 / elapsedSec).toFixed(1) : "0.0";
-                            browserPerf.lastLog = now;
-
-                            console.log(
-                                `[VIDEO PERFORMANCE] Received: ${browserPerf.rxPackets}, Decoded: ${browserPerf.decodedFrames}, Rendered: ${browserPerf.renderedFrames}, Render FPS: ${renderFps}, Decoder Queue: ${videoDecoder.decodeQueueSize}`
-                            );
-                        }
-                    }
-                    frame.close();
-                },
-                error(error) {
-                    console.error("[BROWSER DECODE ERROR]", error);
-                    videoCodecConfigured = false;
-                }
-            });
-        } catch (err) {
-            console.error("[VIDEO FATAL] Failed to construct VideoDecoder:", err);
+    // Initialize VideoDecoder if needed
+    if (!videoDecoder || videoDecoder.state === 'closed' || decoderState === DecoderState.ERROR) {
+        if (!initVideoDecoder()) {
             return;
         }
     }
 
-    // Configure decoder with derived codec string
-    if (!videoCodecConfigured) {
+    // Configure decoder when in UNCONFIGURED state
+    if (decoderState === DecoderState.UNCONFIGURED) {
         try {
-            console.log("[BROWSER DECODER CONFIG]", {
-                codec: codecString,
-                codedWidth: width,
-                codedHeight: height,
-                descriptionPresence: false,
-                state: videoDecoder.state
-            });
-
             videoDecoder.configure({
                 codec: codecString,
                 codedWidth: width,
                 codedHeight: height,
                 optimizeForLatency: true
             });
-            videoCodecConfigured = true;
-            console.log("[H264] Decoder configured successfully:", codecString, width, "x", height);
+            decoderState = DecoderState.CONFIGURED_WAITING_FOR_KEYFRAME;
+            setStreamState("WAITING_FOR_KEYFRAME");
+            console.log(`[WEBCODECS CONFIG]\ncodec=${codecString}\nwidth=${width}\nheight=${height}\ndescriptionBytes=0\nformat=AnnexB`);
         } catch (e) {
             console.error("[BROWSER DECODER CONFIG ERROR]", e);
+            decoderState = DecoderState.ERROR;
             return;
         }
     }
 
-    // ========================================================
-    // 9. Critical Keyframe Rule
-    // ========================================================
-    const isKey = nals.hasIDR || nals.hasSPS;
-    if (isKey) {
-        hasReceivedFirstKeyframe = true;
-    }
+    // Monotonic timestamp in microseconds
+    const timestamp = Math.round(performance.now() * 1000);
 
-    if (!hasReceivedFirstKeyframe) {
-        console.warn("[BROWSER VIDEO] Waiting for first keyframe (SPS/PPS/IDR) before decoding P-frames.");
+    // State Handling: CONFIGURED_WAITING_FOR_KEYFRAME
+    if (decoderState === DecoderState.CONFIGURED_WAITING_FOR_KEYFRAME) {
+        if (!isKey) {
+            console.warn("[BROWSER VIDEO] Waiting for first keyframe (SPS/PPS/IDR) before decoding delta frames.");
+            return;
+        }
+
+        const annexBKeyframe = prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS);
+        console.log(`[WEBCODECS DECODE]\ntype=key\ntimestamp=${timestamp}\nbytes=${annexBKeyframe.byteLength}\nNAL types=[${nals.nalTypes.join(',')}]`);
+
+        try {
+            const chunk = new EncodedVideoChunk({
+                type: 'key',
+                timestamp: timestamp,
+                data: annexBKeyframe
+            });
+            videoDecoder.decode(chunk);
+        } catch (e) {
+            console.error("[BROWSER DECODER ERROR] decode(key) exception:", e);
+            decoderState = DecoderState.ERROR;
+        }
         return;
     }
 
-    // ========================================================
-    // 10. Handle Decoder State Before Decode
-    // ========================================================
-    console.log("[BROWSER DECODER STATE]", videoDecoder.state);
-    if (videoDecoder.state === "closed") {
-        console.warn("[BROWSER DECODER] Decoder is closed. Resetting for next keyframe.");
-        videoDecoder = null;
-        videoCodecConfigured = false;
-        return;
-    }
+    // State Handling: DECODING
+    if (decoderState === DecoderState.DECODING) {
+        const chunkType = isKey ? 'key' : 'delta';
+        const chunkData = isKey ? prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS) : h264Payload;
 
-    const timestamp = videoFrameCount * 33333;
+        console.log(`[WEBCODECS DECODE]\ntype=${chunkType}\ntimestamp=${timestamp}\nbytes=${chunkData.byteLength}\nNAL types=[${nals.nalTypes.join(',')}]`);
 
-    try {
-        const chunk = new EncodedVideoChunk({
-            type: isKey ? 'key' : 'delta',
-            timestamp: timestamp,
-            data: h264Payload
-        });
-
-        console.log(
-            "[BROWSER DECODE]",
-            {
-                chunkType: chunk.type,
-                timestamp: chunk.timestamp,
-                byteLength: chunk.byteLength
-            }
-        );
-
-        videoDecoder.decode(chunk);
-        videoFrameCount++;
-
-        setHud(
-            "LIVE • FRAME " +
-            videoFrameCount +
-            " • " +
-            width +
-            "×" +
-            height
-        );
-    } catch (e) {
-        console.error("[BROWSER DECODER ERROR] decode() exception:", e);
+        try {
+            const chunk = new EncodedVideoChunk({
+                type: chunkType,
+                timestamp: timestamp,
+                data: chunkData
+            });
+            videoDecoder.decode(chunk);
+        } catch (e) {
+            console.error(`[BROWSER DECODER ERROR] decode(${chunkType}) exception:`, e);
+            decoderState = DecoderState.ERROR;
+        }
     }
 }
 
@@ -2162,14 +2228,14 @@ async function handleMessage(event) {
     const type =
         new Uint8Array(buffer)[0];
 
-
-    console.log(
-        "[WS] Packet:",
-        {
-            type,
-            size: buffer.byteLength
-        }
-    );
+    console.log(`[WS RX] packet type=${type}`);
+    console.log(`[WS RX] bytes=${buffer.byteLength}`);
+    if (type === 13 || type === 15) {
+        console.log(`[VIDEO RX] packet type=${type} bytes=${buffer.byteLength}`);
+    } else {
+        console.log(`[CONTROL RX] packet type=${type}`);
+    }
+    console.log(`[BROWSER RX] packet type=${type} bytes=${buffer.byteLength}`);
 
 
     /*
@@ -2178,15 +2244,9 @@ async function handleMessage(event) {
      */
 
     if (type === 2) {
-
         console.log("[VIDEO] Stream-active packet received.");
-
-        setHud(
-            "STREAM ACTIVE • WAITING FOR FRAME"
-        );
-
+        setStreamState("STREAM_ACTIVE");
         return;
-
     }
 
 
@@ -2198,13 +2258,10 @@ async function handleMessage(event) {
      */
 
     if (type === 13 || type === 15) {
-
         await handleVideoPacket(
             buffer
         );
-
         return;
-
     }
 
 
@@ -2214,15 +2271,24 @@ async function handleMessage(event) {
      */
 
     if (type === 17) {
-
         handleAudioPacket(
             buffer
         );
-
         return;
-
     }
 
+
+    /*
+     * TYPE 14
+     * HEARTBEAT / PING
+     */
+
+    if (type === 14) {
+        if (videoFrameCount === 0 && currentStreamState === "CONNECTING") {
+            setStreamState("STREAM_ACTIVE");
+        }
+        return;
+    }
 
     /*
      * TYPE 16
@@ -2254,54 +2320,27 @@ async function handleMessage(event) {
 ============================================================ */
 
 function sendInitializationPacket() {
-
     if (!isSocketOpen()) {
-
         return;
-
     }
 
-    /*
-     * 39 bytes total
-     *
-     * Byte 0:
-     *     2
-     *
-     * Byte 1..38:
-     *     device UID
-     */
+    const cleanId = String(DEVICE_ID).replace(/[^0-9a-zA-Z_\-]/g, '');
+    const idBytes = new TextEncoder().encode(cleanId);
 
-    const pkt =
-        new Uint8Array(39);
-
+    // Protocol: [1 byte Type = 2] + [N bytes System ID] + [32 bytes Auth Hash]
+    const pkt = new Uint8Array(1 + idBytes.length + 32);
     pkt[0] = 2;
-
-    const deviceBytes =
-        new TextEncoder().encode(
-            DEVICE_ID
-        );
-
-    const copyLength =
-        Math.min(
-            deviceBytes.length,
-            38
-        );
-
-    pkt.set(
-        deviceBytes.slice(
-            0,
-            copyLength
-        ),
-        1
-    );
+    pkt.set(idBytes, 1);
+    // [1 + idBytes.length .. end] is 32 bytes of zeros for default pin/auth
 
     ws.send(pkt);
 
     console.log(
-        "[WS] Initialization sent:",
-        DEVICE_ID
+        "[WS] Viewer handshake sent for host:",
+        cleanId,
+        "Packet length:",
+        pkt.length
     );
-
 }
 
 
@@ -2345,14 +2384,18 @@ function startWebStream() {
 
 
     videoFrameCount = 0;
-
     renderWidth = 0;
-
     renderHeight = 0;
-
     videoDecodeBusy = false;
-
     safeCloseImage();
+
+    if (videoDecoder && videoDecoder.state !== 'closed') {
+        try { videoDecoder.close(); } catch (e) {}
+        videoDecoder = null;
+    }
+    decoderState = DecoderState.UNCONFIGURED;
+    cachedSPS = null;
+    cachedPPS = null;
 
 
     canvas.width = 1280;
@@ -2383,14 +2426,6 @@ function startWebStream() {
 
     advToolbar.style.display =
         "flex";
-
-
-    streamBtn.textContent =
-        "Disconnect Web Stream";
-
-
-    streamBtn.className =
-        "btn btn-danger";
 
 
     setHud(
@@ -2506,8 +2541,15 @@ function stopWebStream() {
     safeCloseImage();
 
     renderWidth = 0;
-
     renderHeight = 0;
+
+    if (videoDecoder && videoDecoder.state !== 'closed') {
+        try { videoDecoder.close(); } catch (e) {}
+        videoDecoder = null;
+    }
+    decoderState = DecoderState.UNCONFIGURED;
+    cachedSPS = null;
+    cachedPPS = null;
 
 
     if (
@@ -2558,31 +2600,15 @@ function stopWebStream() {
     }
 
 
-    streamBox.style.display =
-        "none";
-
-
-    advToolbar.style.display =
-        "none";
-
-
-    streamBtn.textContent =
-        "Start Web Canvas Stream";
-
-
-    streamBtn.className =
-        "btn btn-success";
-
-
     setHud(
         "DISCONNECTED"
     );
 
-
-    chatPanel.classList.remove(
-        "open"
-    );
-
+    if (chatPanel) {
+        chatPanel.classList.remove(
+            "open"
+        );
+    }
 }
 
 
@@ -2791,421 +2817,278 @@ async function sendSingleFile(file) {
 ============================================================ */
 
 function getCoordinates(event) {
-
-    if (
-        !canvas ||
-        !canvas.width ||
-        !canvas.height
-    ) {
-
+    if (!canvas) {
         return null;
-
     }
 
-    const rect =
-        canvas.getBoundingClientRect();
+    const canvasWidth = canvas.width || 1920;
+    const canvasHeight = canvas.height || 1080;
 
-    if (
-        rect.width <= 0 ||
-        rect.height <= 0
-    ) {
-
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
         return null;
-
     }
-
 
     /*
      * Canvas uses object-fit: contain.
-     *
-     * Therefore the visible image may have
-     * letterboxing.
-     *
-     * We calculate the actual displayed
-     * image rectangle.
+     * Calculate displayed video rect inside canvas letterbox.
      */
+    const scale = Math.min(
+        rect.width / canvasWidth,
+        rect.height / canvasHeight
+    );
 
-    const scale =
-        Math.min(
-            rect.width / canvas.width,
-            rect.height / canvas.height
-        );
+    const displayedWidth = canvasWidth * scale;
+    const displayedHeight = canvasHeight * scale;
 
+    const offsetX = (rect.width - displayedWidth) / 2;
+    const offsetY = (rect.height - displayedHeight) / 2;
 
-    const displayedWidth =
-        canvas.width * scale;
+    let x = event.clientX - rect.left - offsetX;
+    let y = event.clientY - rect.top - offsetY;
 
-    const displayedHeight =
-        canvas.height * scale;
+    x = Math.max(0, Math.min(displayedWidth, x));
+    y = Math.max(0, Math.min(displayedHeight, y));
 
+    const canvasX = x / scale;
+    const canvasY = y / scale;
 
-    const offsetX =
-        (rect.width -
-            displayedWidth) / 2;
+    const remoteX = Math.max(0, Math.min(canvasWidth - 1, Math.floor(canvasX)));
+    const remoteY = Math.max(0, Math.min(canvasHeight - 1, Math.floor(canvasY)));
 
-
-    const offsetY =
-        (rect.height -
-            displayedHeight) / 2;
-
-
-    let x =
-        event.clientX -
-        rect.left -
-        offsetX;
-
-
-    let y =
-        event.clientY -
-        rect.top -
-        offsetY;
-
-
-    x =
-        Math.max(
-            0,
-            Math.min(
-                displayedWidth,
-                x
-            )
-        );
-
-
-    y =
-        Math.max(
-            0,
-            Math.min(
-                displayedHeight,
-                y
-            )
-        );
-
-
-    const canvasX =
-        x / scale;
-
-
-    const canvasY =
-        y / scale;
-
-
-    const normalizedX =
-        Math.max(
-            0,
-            Math.min(
-                65535,
-                Math.floor(
-                    canvasX /
-                    canvas.width *
-                    65535
-                )
-            )
-        );
-
-
-    const normalizedY =
-        Math.max(
-            0,
-            Math.min(
-                65535,
-                Math.floor(
-                    canvasY /
-                    canvas.height *
-                    65535
-                )
-            )
-        );
-
+    const normalizedX = Math.max(0, Math.min(65535, Math.floor((remoteX / (canvasWidth - 1)) * 65535)));
+    const normalizedY = Math.max(0, Math.min(65535, Math.floor((remoteY / (canvasHeight - 1)) * 65535)));
 
     return {
-
         x: normalizedX,
-
-        y: normalizedY
-
+        y: normalizedY,
+        remoteX: remoteX,
+        remoteY: remoteY
     };
-
 }
-
 
 /* ============================================================
    MOUSE MOVE
 ============================================================ */
 
 function sendMouseMove(event) {
-
     if (!isSocketOpen()) {
-
         return;
-
     }
 
-    const coords =
-        getCoordinates(event);
-
+    const coords = getCoordinates(event);
     if (!coords) {
-
         return;
-
     }
 
-    const pkt =
-        new Uint8Array(9);
+    console.log(`[INPUT MOUSE]\nevent=mousemove\nx=${coords.remoteX}\ny=${coords.remoteY}`);
+    console.log(`[BROWSER INPUT] mousemove`);
+    console.log(`[BROWSER CONTROL TX] MOUSE_MOVE`);
+    console.log(`[CONTROL TX] type=MOUSE_MOVE`);
+    console.log(`[CONTROL TX] bytes=9`);
+    console.log(`[CONTROL TX] device=${targetId}`);
 
+    const pkt = new Uint8Array(9);
     pkt[0] = 0;
-
-    pkt[1] =
-        (coords.x >> 8) & 0xff;
-
-    pkt[2] =
-        coords.x & 0xff;
-
-    pkt[3] =
-        (coords.y >> 8) & 0xff;
-
-    pkt[4] =
-        coords.y & 0xff;
+    pkt[1] = (coords.x >> 8) & 0xff;
+    pkt[2] = coords.x & 0xff;
+    pkt[3] = (coords.y >> 8) & 0xff;
+    pkt[4] = coords.y & 0xff;
 
     ws.send(pkt);
-
 }
-
 
 /* ============================================================
    MOUSE DOWN
 ============================================================ */
 
 function sendMouseDown(event) {
-
     if (!isSocketOpen()) {
-
         return;
-
     }
 
-    const coords =
-        getCoordinates(event);
-
+    const coords = getCoordinates(event);
     if (!coords) {
-
         return;
-
     }
 
-    const type =
-        event.button === 2
-            ? 3
-            : 1;
+    let type = 1; // Left down
+    let btnName = "LEFT";
+    if (event.button === 2) {
+        type = 3; // Right down
+        btnName = "RIGHT";
+    } else if (event.button === 1) {
+        type = 7; // Middle down
+        btnName = "MIDDLE";
+    }
 
-    const pkt =
-        new Uint8Array(9);
+    console.log(`[INPUT MOUSE]\nevent=mousedown\nbutton=${event.button}\nx=${coords.remoteX}\ny=${coords.remoteY}`);
+    console.log(`[BROWSER INPUT] mousedown`);
+    console.log(`[BROWSER CONTROL TX] MOUSE_DOWN`);
+    console.log(`[CONTROL TX] type=MOUSE_DOWN`);
+    console.log(`[CONTROL TX] bytes=9`);
+    console.log(`[CONTROL TX] device=${targetId}`);
 
+    const pkt = new Uint8Array(9);
     pkt[0] = type;
-
-    pkt[1] =
-        (coords.x >> 8) & 0xff;
-
-    pkt[2] =
-        coords.x & 0xff;
-
-    pkt[3] =
-        (coords.y >> 8) & 0xff;
-
-    pkt[4] =
-        coords.y & 0xff;
+    pkt[1] = (coords.x >> 8) & 0xff;
+    pkt[2] = coords.x & 0xff;
+    pkt[3] = (coords.y >> 8) & 0xff;
+    pkt[4] = coords.y & 0xff;
 
     ws.send(pkt);
-
 }
-
 
 /* ============================================================
    MOUSE UP
 ============================================================ */
 
 function sendMouseUp(event) {
-
     if (!isSocketOpen()) {
-
         return;
-
     }
 
-    const type =
-        event.button === 2
-            ? 4
-            : 2;
+    const coords = getCoordinates(event);
 
-    const pkt =
-        new Uint8Array(9);
+    let type = 2; // Left up
+    let btnName = "LEFT";
+    if (event.button === 2) {
+        type = 4; // Right up
+        btnName = "RIGHT";
+    } else if (event.button === 1) {
+        type = 8; // Middle up
+        btnName = "MIDDLE";
+    }
 
+    console.log(`[INPUT MOUSE]\nevent=mouseup\nbutton=${event.button}`);
+    console.log(`[BROWSER INPUT] mouseup`);
+    console.log(`[BROWSER CONTROL TX] MOUSE_UP`);
+    console.log(`[CONTROL TX] type=MOUSE_UP`);
+    console.log(`[CONTROL TX] bytes=9`);
+    console.log(`[CONTROL TX] device=${targetId}`);
+
+    const pkt = new Uint8Array(9);
     pkt[0] = type;
+    if (coords) {
+        pkt[1] = (coords.x >> 8) & 0xff;
+        pkt[2] = coords.x & 0xff;
+        pkt[3] = (coords.y >> 8) & 0xff;
+        pkt[4] = coords.y & 0xff;
+    }
 
     ws.send(pkt);
-
 }
-
 
 /* ============================================================
    MOUSE WHEEL
 ============================================================ */
 
 function sendMouseWheel(event) {
-
     if (!isSocketOpen()) {
-
         return;
-
     }
 
     event.preventDefault();
+    console.log(`[INPUT MOUSE]\nevent=wheel\ndeltaX=${event.deltaX}\ndeltaY=${event.deltaY}`);
+    console.log(`[BROWSER INPUT] wheel`);
+    console.log(`[BROWSER CONTROL TX] MOUSE_WHEEL`);
+    console.log(`[CONTROL TX] type=MOUSE_WHEEL`);
+    console.log(`[CONTROL TX] bytes=9`);
+    console.log(`[CONTROL TX] device=${targetId}`);
 
-    const scroll =
-        event.deltaY > 0
-            ? -120
-            : 120;
-
-    const pkt =
-        new Uint8Array(9);
-
-    pkt[0] = 8;
-
-    pkt[1] = 0;
-
-    pkt[2] = 0;
-
-    pkt[3] =
-        (scroll >> 8) & 0xff;
-
-    pkt[4] =
-        scroll & 0xff;
+    const scroll = event.deltaY > 0 ? -120 : 120;
+    const pkt = new Uint8Array(9);
+    pkt[0] = 9;
+    pkt[3] = (scroll >> 8) & 0xff;
+    pkt[4] = scroll & 0xff;
 
     ws.send(pkt);
-
 }
-
 
 /* ============================================================
    KEYBOARD
 ============================================================ */
 
 function sendKeyboard(event, type) {
-
     if (!isSocketOpen()) {
-
         return;
-
     }
 
     event.preventDefault();
+    const keyCode = event.keyCode || event.which;
+    const typeName = type === 5 ? "KEY_DOWN" : "KEY_UP";
 
-    const keyCode =
-        event.keyCode ||
-        event.which;
+    if (type === 5) {
+        console.log(`[INPUT KEYBOARD]\nevent=keydown\nkey=${event.key}\ncode=${event.code}\nkeyCode=${keyCode}\nctrl=${event.ctrlKey}\nshift=${event.shiftKey}\nalt=${event.altKey}`);
+        console.log(`[BROWSER INPUT] keydown`);
+        console.log(`[BROWSER CONTROL TX] KEY_DOWN`);
+    } else {
+        console.log(`[INPUT KEYBOARD]\nevent=keyup\nkey=${event.key}\ncode=${event.code}`);
+        console.log(`[BROWSER INPUT] keyup`);
+        console.log(`[BROWSER CONTROL TX] KEY_UP`);
+    }
 
-    const pkt =
-        new Uint8Array(5);
+    console.log(`[CONTROL TX] type=${typeName}`);
+    console.log(`[CONTROL TX] bytes=9`);
+    console.log(`[CONTROL TX] device=${targetId}`);
 
+    const pkt = new Uint8Array(9);
     pkt[0] = type;
-
-    pkt[1] =
-        (keyCode >> 24) & 0xff;
-
-    pkt[2] =
-        (keyCode >> 16) & 0xff;
-
-    pkt[3] =
-        (keyCode >> 8) & 0xff;
-
-    pkt[4] =
-        keyCode & 0xff;
+    pkt[1] = (keyCode >> 24) & 0xff;
+    pkt[2] = (keyCode >> 16) & 0xff;
+    pkt[3] = (keyCode >> 8) & 0xff;
+    pkt[4] = keyCode & 0xff;
 
     ws.send(pkt);
-
 }
-
 
 /* ============================================================
    CANVAS EVENTS
 ============================================================ */
 
 function attachCanvasEvents() {
-
     if (!canvas) {
-
         return;
-
     }
 
+    canvas.setAttribute("tabindex", "0");
+    canvas.style.outline = "none";
 
-    canvas.addEventListener(
-        "mousemove",
-        sendMouseMove
-    );
+    canvas.addEventListener("mousemove", sendMouseMove);
 
+    canvas.addEventListener("mousedown", event => {
+        canvas.focus();
+        sendMouseDown(event);
+    });
 
-    canvas.addEventListener(
-        "mousedown",
-        event => {
+    canvas.addEventListener("mouseup", sendMouseUp);
 
-            canvas.focus();
+    canvas.addEventListener("contextmenu", event => {
+        event.preventDefault();
+    });
 
-            sendMouseDown(event);
+    canvas.addEventListener("wheel", sendMouseWheel, { passive: false });
 
+    // Attach keyboard events to window for seamless focus retention
+    window.addEventListener("keydown", event => {
+        if (document.activeElement === chatInput) {
+            return;
         }
-    );
-
-
-    canvas.addEventListener(
-        "mouseup",
-        sendMouseUp
-    );
-
-
-    canvas.addEventListener(
-        "contextmenu",
-        event => {
-
-            event.preventDefault();
-
+        if (!isSocketOpen()) {
+            return;
         }
-    );
+        sendKeyboard(event, 5);
+    });
 
-
-    canvas.addEventListener(
-        "wheel",
-        sendMouseWheel,
-        {
-            passive: false
+    window.addEventListener("keyup", event => {
+        if (document.activeElement === chatInput) {
+            return;
         }
-    );
-
-
-    canvas.addEventListener(
-        "keydown",
-        event => {
-
-            sendKeyboard(
-                event,
-                5
-            );
-
+        if (!isSocketOpen()) {
+            return;
         }
-    );
-
-
-    canvas.addEventListener(
-        "keyup",
-        event => {
-
-            sendKeyboard(
-                event,
-                6
-            );
-
-        }
-    );
-
+        sendKeyboard(event, 6);
+    });
 }
 
 
@@ -3214,126 +3097,96 @@ function attachCanvasEvents() {
 ============================================================ */
 
 function attachDropEvents() {
+    if (!streamBox || !dropOverlay) return;
 
     streamBox.addEventListener(
         "dragover",
         event => {
-
             event.preventDefault();
-
-            dropOverlay.classList.add(
-                "active"
-            );
-
+            dropOverlay.classList.add("active");
         }
     );
-
 
     streamBox.addEventListener(
         "dragleave",
         event => {
-
             event.preventDefault();
-
-            dropOverlay.classList.remove(
-                "active"
-            );
-
+            dropOverlay.classList.remove("active");
         }
     );
-
 
     streamBox.addEventListener(
         "drop",
         async event => {
-
             event.preventDefault();
-
-            dropOverlay.classList.remove(
-                "active"
-            );
+            dropOverlay.classList.remove("active");
 
             if (!isSocketOpen()) {
-
-                alert(
-                    "WebSocket not connected."
-                );
-
+                alert("WebSocket not connected.");
                 return;
-
             }
 
-            await sendFiles(
-                event.dataTransfer.files
-            );
-
+            await sendFiles(event.dataTransfer.files);
         }
     );
-
 }
-
 
 /* ============================================================
    BUTTON EVENTS
 ============================================================ */
 
-streamBtn.addEventListener(
-    "click",
-    toggleWebStream
-);
+if (audioBtn) {
+    audioBtn.addEventListener("click", toggleAudio);
+}
 
-audioBtn.addEventListener(
-    "click",
-    toggleAudio
-);
+if (chatBtn) {
+    chatBtn.addEventListener("click", toggleChat);
+}
 
-chatBtn.addEventListener(
-    "click",
-    toggleChat
-);
+if (chatClose) {
+    chatClose.addEventListener("click", toggleChat);
+}
 
-chatClose.addEventListener(
-    "click",
-    toggleChat
-);
+if (sendChatBtn) {
+    sendChatBtn.addEventListener("click", sendChat);
+}
 
-sendChatBtn.addEventListener(
-    "click",
-    sendChat
-);
-
-chatInput.addEventListener(
-    "keydown",
-    event => {
-
+if (chatInput) {
+    chatInput.addEventListener("keydown", event => {
         if (event.key === "Enter") {
-
             sendChat();
-
         }
+    });
+}
 
+if (recordBtn) {
+    recordBtn.addEventListener("click", toggleRecording);
+}
+
+if (monitorSelect) {
+    monitorSelect.addEventListener("change", function () {
+        switchMonitor(this.value);
+    });
+}
+
+
+function toggleFullscreen() {
+    const box = document.getElementById("stream-box");
+    if (!document.fullscreenElement) {
+        if (box.requestFullscreen) {
+            box.requestFullscreen();
+        } else if (box.webkitRequestFullscreen) {
+            box.webkitRequestFullscreen();
+        }
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        }
     }
-);
-
-recordBtn.addEventListener(
-    "click",
-    toggleRecording
-);
-
-monitorSelect.addEventListener(
-    "change",
-    function () {
-
-        switchMonitor(
-            this.value
-        );
-
-    }
-);
-
+}
 
 /* ============================================================
-   INITIALIZE
+   INITIALIZE & AUTO-CONNECT
 ============================================================ */
 
 canvas =
@@ -3344,6 +3197,13 @@ canvas =
 attachCanvasEvents();
 
 attachDropEvents();
+
+// Automatically start remote desktop stream
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startWebStream);
+} else {
+    startWebStream();
+}
 
 
 /* ============================================================

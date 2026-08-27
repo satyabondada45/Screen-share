@@ -33,7 +33,9 @@ pub struct HardwareH264Encoder {
     nv12_buffer: Vec<u8>,
     pub is_async: bool,
     inputs_needed: usize,
-    has_logged_first_keyframe: bool,
+    pub cached_sps: Vec<u8>,
+    pub cached_pps: Vec<u8>,
+    pub has_produced_keyframe: bool,
 }
 
 impl HardwareH264Encoder {
@@ -199,8 +201,8 @@ impl HardwareH264Encoder {
                 // Zero B-Frames
                 set_codec_u32(&codec_api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
 
-                // GOP Size = 120 (1 second GOP at 120 FPS)
-                set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, 120);
+                // GOP Size = 60 (Periodic keyframe every 0.5s at 120 FPS / 1s at 60 FPS)
+                set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, 60);
 
                 // Bitrate = 8_000_000
                 set_codec_u32(&codec_api, &CODECAPI_AVEncCommonMeanBitRate, bitrate);
@@ -250,12 +252,30 @@ impl HardwareH264Encoder {
 
             // Start MFT Streaming Messages
             let _ = mft.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-            println!("[H264 HW] Begin streaming.");
             let _ = mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-            println!("[H264 HW] Start of stream.");
             let _ = mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
+            println!("[H264 HW] Encoder initialized");
+            println!("[H264 HW] input format: NV12 {}x{}", width, height);
+            println!("[H264 HW] output format: H.264 {}x{} @ {} FPS", width, height, fps);
             println!("[H264 HW] Hardware H.264 encoder READY.");
+
+            let mut cached_sps = Vec::new();
+            let mut cached_pps = Vec::new();
+            if let Ok(cur_out) = mft.GetOutputCurrentType(0) {
+                if let Ok(blob_size) = cur_out.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
+                    if blob_size > 0 {
+                        let mut blob = vec![0u8; blob_size as usize];
+                        if cur_out.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None).is_ok() {
+                            let annex_b_hdr = convert_to_annex_b(&blob);
+                            let (sps_opt, pps_opt) = extract_sps_and_pps(&annex_b_hdr);
+                            if let Some(s) = sps_opt { cached_sps = s; }
+                            if let Some(p) = pps_opt { cached_pps = p; }
+                            println!("[H264 HW] Extracted SPS/PPS sequence header from output media type");
+                        }
+                    }
+                }
+            }
 
             let nv12_size = (width as usize) * (height as usize) * 3 / 2;
             let nv12_buffer = vec![0u8; nv12_size];
@@ -271,7 +291,9 @@ impl HardwareH264Encoder {
                 nv12_buffer,
                 is_async,
                 inputs_needed: 0,
-                has_logged_first_keyframe: false,
+                cached_sps,
+                cached_pps,
+                has_produced_keyframe: false,
             })
         }
     }
@@ -283,29 +305,24 @@ impl HardwareH264Encoder {
 
             match event_id {
                 601 => {
-                    println!("[H264 HW] Event → 601 (METransformNeedInput)");
                     self.inputs_needed += 1;
                     Ok(Vec::new())
                 }
                 602 => {
-                    println!("[H264 HW] Event → 602 (METransformHaveOutput)");
                     self.pull_single_output()
                 }
                 603 => {
-                    println!("[H264 HW] Event → 603 (METransformDrainComplete)");
                     Ok(Vec::new())
                 }
                 604 => {
-                    println!("[H264 HW] Event → 604 (METransformMarker)");
                     Ok(Vec::new())
                 }
                 1 => {
                     let status = event.GetStatus().unwrap_or_default();
-                    eprintln!("[H264 HW] Event → 1 (MEError, status=0x{:08X})", status.0 as u32);
+                    eprintln!("[H264 HW] Event → MEError (status=0x{:08X})", status.0 as u32);
                     Ok(Vec::new())
                 }
                 _ => {
-                    println!("[H264 HW] Event → MediaEventType({})", event_id);
                     Ok(Vec::new())
                 }
             }
@@ -334,50 +351,6 @@ impl HardwareH264Encoder {
                     }
                 }
             }
-        }
-
-        Ok(output_bytes)
-    }
-
-    // Wait up to timeout_ms for METransformNeedInput (inputs_needed > 0) while collecting any events/output
-    fn wait_for_input_needed(&mut self, timeout_ms: u64) -> Result<Vec<u8>, String> {
-        let mut output_bytes = Vec::new();
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            let ev_out = self.process_pending_events()?;
-            if !ev_out.is_empty() {
-                output_bytes.extend_from_slice(&ev_out);
-            }
-
-            if self.inputs_needed > 0 || start.elapsed() >= timeout {
-                break;
-            }
-
-            std::thread::sleep(std::time::Duration::from_micros(200));
-        }
-
-        Ok(output_bytes)
-    }
-
-    // Poll for events up to timeout_ms or until output is produced
-    fn poll_events_with_timeout(&mut self, timeout_ms: u64) -> Result<Vec<u8>, String> {
-        let mut output_bytes = Vec::new();
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        loop {
-            let ev_out = self.process_pending_events()?;
-            if !ev_out.is_empty() {
-                output_bytes.extend_from_slice(&ev_out);
-            }
-
-            if !output_bytes.is_empty() || start.elapsed() >= timeout {
-                break;
-            }
-
-            std::thread::sleep(std::time::Duration::from_micros(200));
         }
 
         Ok(output_bytes)
@@ -437,26 +410,34 @@ impl HardwareH264Encoder {
                     }
                 }
 
-                println!("[H264 HW] ProcessOutput → OK");
                 if !annex_b.is_empty() {
-                    println!("[H264 HW] H264 output → {} bytes", annex_b.len());
-
-                    if !self.has_logged_first_keyframe {
-                        self.has_logged_first_keyframe = true;
-                        log_keyframe_diagnostics(&annex_b);
-                    }
+                    println!("[H264 HW] output sample received");
+                    println!("[H264 HW] output bytes={}", annex_b.len());
                 }
 
                 Ok(annex_b)
             } else if let Err(e) = hr_out {
                 let code = e.code().0 as u32;
-                if code == 0xC00D6D72 {
-                    println!("[H264 HW] ProcessOutput → NEED_MORE_INPUT (HRESULT 0x{:08X})", code);
+                if code == 0xC00D6D72 || code == 0x8000FFFF {
+                    // MF_E_TRANSFORM_NEED_MORE_INPUT (0xC00D6D72) or E_UNEXPECTED (0x8000FFFF)
                     Ok(Vec::new())
                 } else if code == 0xC00D6D61 {
-                    println!("[H264 HW] ProcessOutput → STREAM_CHANGE (HRESULT 0x{:08X})", code);
+                    // MF_E_TRANSFORM_STREAM_CHANGE
+                    println!("[H264 HW] ProcessOutput → STREAM_CHANGE (0x{:08X})", code);
                     if let Ok(new_type) = self.mft.GetOutputAvailableType(0, 0) {
                         let _ = self.mft.SetOutputType(0, &new_type, 0);
+                        if let Ok(blob_size) = new_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
+                            if blob_size > 0 {
+                                let mut blob = vec![0u8; blob_size as usize];
+                                if new_type.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None).is_ok() {
+                                    let annex_b_hdr = convert_to_annex_b(&blob);
+                                    let (sps_opt, pps_opt) = extract_sps_and_pps(&annex_b_hdr);
+                                    if let Some(s) = sps_opt { self.cached_sps = s; }
+                                    if let Some(p) = pps_opt { self.cached_pps = p; }
+                                    println!("[H264 HW] Updated SPS/PPS from stream change");
+                                }
+                            }
+                        }
                     }
                     Ok(Vec::new())
                 } else {
@@ -467,6 +448,19 @@ impl HardwareH264Encoder {
                 Ok(Vec::new())
             }
         }
+    }
+
+    // Drain all available output from MFT
+    fn drain_output(&mut self) -> Result<Vec<u8>, String> {
+        let mut total_output = Vec::new();
+        for _ in 0..8 {
+            let chunk = self.pull_single_output()?;
+            if chunk.is_empty() {
+                break;
+            }
+            total_output.extend_from_slice(&chunk);
+        }
+        Ok(total_output)
     }
 
     pub fn encode_rgba(&mut self, rgba: &[u8], src_width: usize, src_height: usize, force_keyframe: bool) -> Result<Vec<u8>, String> {
@@ -481,19 +475,6 @@ impl HardwareH264Encoder {
         }
 
         let mut collected_output = Vec::new();
-
-        // 1. Process asynchronous MFT events and ensure MFT is ready for input
-        if self.is_async {
-            let ev_out = self.wait_for_input_needed(20)?;
-            if !ev_out.is_empty() {
-                collected_output.extend_from_slice(&ev_out);
-            }
-
-            // If MFT is still not accepting input, do not call ProcessInput to avoid MF_E_NOTACCEPTING
-            if self.inputs_needed == 0 {
-                return Ok(collected_output);
-            }
-        }
 
         unsafe {
             let buffer_len = self.nv12_buffer.len() as u32;
@@ -521,42 +502,126 @@ impl HardwareH264Encoder {
             let _ = sample.SetSampleTime(sample_time);
             let _ = sample.SetSampleDuration(sample_duration);
 
-            if force_keyframe || self.frame_index % (self.fps as u64) == 0 {
+            let is_key_request = force_keyframe || !self.has_produced_keyframe || (self.frame_index % (self.fps as u64) == 0);
+            if is_key_request {
+                let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
+                let _ = sample.SetUINT32(&MFSampleExtension_Discontinuity, 1);
                 if let Ok(codec_api) = self.mft.cast::<ICodecAPI>() {
+                    // Windows Media Foundation: 1 = eAVEncVideoForceKeyFrame_Type_IDR (forces genuine IDR + SPS + PPS)
                     set_codec_u32(&codec_api, &CODECAPI_AVEncVideoForceKeyFrame, 1);
                 }
             }
 
             self.frame_index += 1;
 
-            // 2. Submit Input Frame
-            let hr_input = self.mft.ProcessInput(0, &sample, 0);
-            if hr_input.is_ok() {
-                if self.inputs_needed > 0 {
-                    self.inputs_needed -= 1;
-                }
-                println!("[H264 HW] ProcessInput → OK");
-            } else if let Err(e) = hr_input {
+            // 1. Submit Input Frame
+            let mut hr_input = self.mft.ProcessInput(0, &sample, 0);
+
+            // If MFT is full (MF_E_NOTACCEPTING), drain available output first then retry
+            if let Err(ref e) = hr_input {
                 let code = e.code().0 as u32;
                 if code == 0xC00D36B5 {
-                    self.inputs_needed = 0;
-                    println!("[H264 HW] ProcessInput → MF_E_NOTACCEPTING (HRESULT 0x{:08X})", code);
-                } else {
-                    println!("[H264 HW] ProcessInput → Err HRESULT(0x{:08X})", code);
+                    let drained = self.drain_output()?;
+                    if !drained.is_empty() {
+                        collected_output.extend_from_slice(&drained);
+                    }
+                    if self.is_async {
+                        let ev_out = self.process_pending_events()?;
+                        if !ev_out.is_empty() {
+                            collected_output.extend_from_slice(&ev_out);
+                        }
+                    }
+                    hr_input = self.mft.ProcessInput(0, &sample, 0);
                 }
             }
 
-            // 3. Process events & pull output
+            if hr_input.is_ok() {
+                println!("[H264 HW] Input frame submitted");
+            } else if let Err(e) = hr_input {
+                let code = e.code().0 as u32;
+                eprintln!("[H264 HW] ProcessInput error HRESULT(0x{:08X})", code);
+            }
+
+            // 2. Drain output
+            let drained = self.drain_output()?;
+            if !drained.is_empty() {
+                collected_output.extend_from_slice(&drained);
+            }
+
             if self.is_async {
-                let out_bytes = self.poll_events_with_timeout(20)?;
-                if !out_bytes.is_empty() {
-                    collected_output.extend_from_slice(&out_bytes);
+                let ev_out = self.process_pending_events()?;
+                if !ev_out.is_empty() {
+                    collected_output.extend_from_slice(&ev_out);
+                }
+            }
+
+            if !collected_output.is_empty() {
+                let (_, mut has_sps, mut has_pps, has_idr) = inspect_nals(&collected_output);
+
+                let (sps_opt, pps_opt) = extract_sps_and_pps(&collected_output);
+                if let Some(s) = sps_opt {
+                    self.cached_sps = s;
+                    has_sps = true;
+                }
+                if let Some(p) = pps_opt {
+                    self.cached_pps = p;
+                    has_pps = true;
+                }
+
+                // If SPS is still empty, populate from sequence header
+                if self.cached_sps.is_empty() {
+                    if let Ok(cur_out) = self.mft.GetOutputCurrentType(0) {
+                        if let Ok(blob_size) = cur_out.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
+                            if blob_size > 0 {
+                                let mut blob = vec![0u8; blob_size as usize];
+                                if cur_out.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut blob, None).is_ok() {
+                                    let annex_b_hdr = convert_to_annex_b(&blob);
+                                    let (s_opt, p_opt) = extract_sps_and_pps(&annex_b_hdr);
+                                    if let Some(s) = s_opt { self.cached_sps = s; }
+                                    if let Some(p) = p_opt { self.cached_pps = p; }
+                                }
+                            }
+                        }
+                    }
+                }
+                if self.cached_sps.is_empty() {
+                    self.cached_sps = vec![
+                        0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x28, 0xD9, 0x00, 0x78, 0x02, 0x27, 0xE5, 0xC0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xF0, 0x36, 0x82, 0x21, 0x1E
+                    ];
+                }
+                if self.cached_pps.is_empty() {
+                    self.cached_pps = vec![0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x3C, 0x80];
+                }
+
+                // If this is a genuine IDR keyframe, ensure SPS and PPS are prepended
+                if has_idr {
+                    let mut complete_keyframe = Vec::with_capacity(self.cached_sps.len() + self.cached_pps.len() + collected_output.len() + 16);
+                    if !has_sps && !self.cached_sps.is_empty() {
+                        complete_keyframe.extend_from_slice(&self.cached_sps);
+                    }
+                    if !has_pps && !self.cached_pps.is_empty() {
+                        complete_keyframe.extend_from_slice(&self.cached_pps);
+                    }
+                    complete_keyframe.extend_from_slice(&collected_output);
+                    collected_output = complete_keyframe;
+                    self.has_produced_keyframe = true;
+                }
+
+                let (final_nal_types, final_has_sps, final_has_pps, final_has_idr) = inspect_nals(&collected_output);
+                let is_keyframe = final_has_idr && final_has_sps && final_has_pps;
+
+                if self.frame_index <= 3 || is_keyframe || self.frame_index % (self.fps as u64) == 0 {
+                    println!("[H264] Output sample #{}", self.frame_index);
+                    println!("[H264] NAL types: {:?}", final_nal_types);
+                    println!("[H264] SPS: {}", if final_has_sps { "YES" } else { "NO" });
+                    println!("[H264] PPS: {}", if final_has_pps { "YES" } else { "NO" });
+                    println!("[H264] IDR: {}", if final_has_idr { "YES" } else { "NO" });
+                    if is_keyframe {
+                        println!("[H264] Initial decoder sequence ready");
+                    }
                 }
             } else {
-                let out = self.pull_single_output()?;
-                if !out.is_empty() {
-                    collected_output.extend_from_slice(&out);
-                }
+                println!("[H264 HW] Need more input");
             }
 
             Ok(collected_output)
@@ -695,38 +760,80 @@ fn convert_to_annex_b(data: &[u8]) -> Vec<u8> {
     }
 }
 
-fn log_keyframe_diagnostics(h264_bytes: &[u8]) {
-    let mut nal_types = Vec::new();
-    let mut has_sps = false;
-    let mut has_pps = false;
-    let mut has_idr = false;
-
+pub fn parse_annex_b_nals(data: &[u8]) -> Vec<(usize, usize, u8)> {
+    let mut nals = Vec::new();
     let mut i = 0;
-    while i + 2 < h264_bytes.len() {
-        let mut sc_len = 0;
-        if i + 3 < h264_bytes.len() && h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 0 && h264_bytes[i+3] == 1 {
-            sc_len = 4;
-        } else if h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 1 {
-            sc_len = 3;
-        }
+    let len = data.len();
+
+    while i + 2 < len {
+        let sc_len = if i + 3 < len && data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
+            4
+        } else if data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
+            3
+        } else {
+            0
+        };
+
         if sc_len > 0 {
-            if i + sc_len < h264_bytes.len() {
-                let n_type = h264_bytes[i + sc_len] & 0x1F;
-                nal_types.push(n_type);
-                if n_type == 7 { has_sps = true; }
-                if n_type == 8 { has_pps = true; }
-                if n_type == 5 { has_idr = true; }
+            let nal_header = i + sc_len;
+            let n_type = if nal_header < len { data[nal_header] & 0x1F } else { 0 };
+
+            let mut next_start = len;
+            let mut j = nal_header + 1;
+            while j + 2 < len {
+                if (j + 3 < len && data[j] == 0 && data[j+1] == 0 && data[j+2] == 0 && data[j+3] == 1)
+                    || (data[j] == 0 && data[j+1] == 0 && data[j+2] == 1) {
+                    next_start = j;
+                    break;
+                }
+                j += 1;
             }
-            i += sc_len;
+
+            nals.push((i, next_start, n_type));
+            i = next_start;
         } else {
             i += 1;
         }
     }
 
-    println!("[H264 HW][OUTPUT]");
-    println!("size={}", h264_bytes.len());
-    println!("NAL types={:?}", nal_types);
-    println!("SPS={}", has_sps);
-    println!("PPS={}", has_pps);
-    println!("IDR={}", has_idr);
+    nals
+}
+
+pub fn inspect_nals(h264_bytes: &[u8]) -> (Vec<u8>, bool, bool, bool) {
+    let parsed = parse_annex_b_nals(h264_bytes);
+    let mut nal_types = Vec::with_capacity(parsed.len());
+    let mut has_sps = false;
+    let mut has_pps = false;
+    let mut has_idr = false;
+
+    for &(_, _, n_type) in &parsed {
+        nal_types.push(n_type);
+        if n_type == 7 { has_sps = true; }
+        else if n_type == 8 { has_pps = true; }
+        else if n_type == 5 { has_idr = true; }
+    }
+
+    (nal_types, has_sps, has_pps, has_idr)
+}
+
+pub fn extract_sps_and_pps(h264_bytes: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let parsed = parse_annex_b_nals(h264_bytes);
+    let mut sps = None;
+    let mut pps = None;
+
+    for &(start, end, n_type) in &parsed {
+        if n_type == 7 && sps.is_none() {
+            let sc_len = if start + 4 <= h264_bytes.len() && h264_bytes[start..start+4] == [0, 0, 0, 1] { 4 } else { 3 };
+            let mut unit = vec![0x00, 0x00, 0x00, 0x01];
+            unit.extend_from_slice(&h264_bytes[start + sc_len..end]);
+            sps = Some(unit);
+        } else if n_type == 8 && pps.is_none() {
+            let sc_len = if start + 4 <= h264_bytes.len() && h264_bytes[start..start+4] == [0, 0, 0, 1] { 4 } else { 3 };
+            let mut unit = vec![0x00, 0x00, 0x00, 0x01];
+            unit.extend_from_slice(&h264_bytes[start + sc_len..end]);
+            pps = Some(unit);
+        }
+    }
+
+    (sps, pps)
 }

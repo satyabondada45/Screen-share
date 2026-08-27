@@ -511,14 +511,14 @@ fn main() {
     println!("========================================");
 
     let args: Vec<String> = env::args().collect();
-    let relay_addr = env::var("RELAY_ADDR").unwrap_or_else(|_| "192.168.29.229:9001".to_string());
+    let relay_addr = env::var("RELAY_ADDR").unwrap_or_else(|_| "127.0.0.1:9001".to_string());
 
     /* ========================================================
        TARGET ID
        ======================================================== */
 
-    let target_id = if args.len() > 1 {
-        args[1].trim().replace("screenshare://", "").replace('-', "").replace('/', "")
+    let target_id: String = if args.len() > 1 {
+        args[1].trim().replace("screenshare://", "").chars().filter(|c| c.is_ascii_digit()).collect()
     } else {
         print!("Enter Remote Desktop ID: ");
         let _ = io::stdout().flush();
@@ -526,11 +526,11 @@ fn main() {
         if io::stdin().read_line(&mut input).is_err() {
             return;
         }
-        input.trim().replace('-', "")
+        input.trim().chars().filter(|c| c.is_ascii_digit()).collect()
     };
 
-    if target_id.len() != 6 || !target_id.chars().all(|c| c.is_ascii_digit()) {
-        eprintln!("[Viewer] Invalid ID: {}", target_id);
+    if (target_id.len() != 9 && target_id.len() != 6) || !target_id.chars().all(|c| c.is_ascii_digit()) {
+        eprintln!("[Viewer] Invalid ID: {} (expected 9 or 6 digits)", target_id);
         return;
     }
 
@@ -555,7 +555,7 @@ fn main() {
     let pin = env::var("CONNECT_PIN").unwrap_or_default();
     let auth_hash = compute_sha256(&pin);
 
-    let mut connect_packet = Vec::with_capacity(39);
+    let mut connect_packet = Vec::with_capacity(1 + target_id.len() + 32);
     connect_packet.push(2);
     connect_packet.extend_from_slice(target_id.as_bytes());
     connect_packet.extend_from_slice(&auth_hash);

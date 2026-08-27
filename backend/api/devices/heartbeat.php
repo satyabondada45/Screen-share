@@ -1,7 +1,9 @@
 <?php
-header("Content-Type: application/json");
-header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Headers: Content-Type");
+// backend/api/devices/heartbeat.php
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit(0);
@@ -9,41 +11,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require_once __DIR__ . '/../../config/database.php';
 
-$data = json_decode(file_get_contents("php://input"), true);
+$rawInput = file_get_contents('php://input');
+$data = json_decode($rawInput, true);
 
-if (!isset($data['device_id']) && !isset($data['device_uid'])) {
+$systemId = preg_replace('/[^0-9]/', '', (string)($data['system_id'] ?? $data['device_uid'] ?? $data['device_id'] ?? ''));
+$machineId = trim($data['machine_identifier'] ?? $data['device_uuid'] ?? '');
+
+if (empty($systemId) && empty($machineId)) {
     http_response_code(400);
-    echo json_encode(["status" => "error", "message" => "Missing device_id"]);
-    exit;
+    echo json_encode(["status" => "error", "message" => "Missing system_id or machine_identifier"]);
+    exit();
 }
-
-$deviceId = $data['device_id'] ?? $data['device_uid'];
-$osInfo = $data['os_info'] ?? 'windows';
-$hostname = $data['hostname'] ?? 'RustDevice';
-$ipAddress = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
 
 try {
     $stmt = $pdo->prepare("
-        INSERT INTO devices (device_uid, name, os_type, ip_address, is_online, last_seen_at, created_at)
-        VALUES (?, ?, ?, ?, 1, NOW(), NOW())
-        ON DUPLICATE KEY UPDATE 
-            name = VALUES(name),
-            os_type = VALUES(os_type),
-            is_online = 1,
-            ip_address = VALUES(ip_address),
-            last_seen_at = NOW()
+        UPDATE devices 
+        SET is_online = 1, last_seen_at = NOW() 
+        WHERE (system_id = ? OR device_uid = ?) OR (machine_identifier IS NOT NULL AND machine_identifier = ?)
     ");
+    $stmt->execute([$systemId, $systemId, $machineId]);
+    $affected = $stmt->rowCount();
 
-    $stmt->execute([
-        $deviceId,
-        $hostname,
-        $osInfo,
-        $ipAddress
+    echo json_encode([
+        "status" => "success",
+        "system_id" => $systemId,
+        "machine_identifier" => $machineId,
+        "updated" => ($affected > 0),
+        "synced_at" => date('Y-m-d H:i:s')
     ]);
-
-    echo json_encode(["status" => "success", "message" => "Device heartbeat recorded"]);
 } catch (\PDOException $e) {
     http_response_code(500);
     echo json_encode(["status" => "error", "message" => $e->getMessage()]);
 }
-?>

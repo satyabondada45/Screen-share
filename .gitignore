@@ -7,3 +7,6 @@ target/
 *.exe
 *.d
 *.o
+config.json
+agent_config.json
+*.jsonl

@@ -1,16 +1,89 @@
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
 use tungstenite::Message;
 
-type ClientMap = Arc<Mutex<HashMap<String, TcpStream>>>;
+enum ViewerSession {
+    WebSocket(Arc<Mutex<tungstenite::WebSocket<TcpStream>>>),
+    Tcp(TcpStream),
+}
+
+struct ViewerSessionRequest {
+    auth_hash: [u8; 32],
+    response_tx: Sender<bool>,
+    session: ViewerSession,
+}
+
+type ClientMap = Arc<Mutex<HashMap<String, Sender<ViewerSessionRequest>>>>;
 
 const RELAY_ADDR: &str = "0.0.0.0:9001";
+
+// ============================================================
+// AUTOSTART & BACKGROUND PERSISTENCE
+// ============================================================
+
+#[cfg(windows)]
+fn enable_autostart(app_name: &str) -> Result<String, String> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegSetValueExW, HKEY_CURRENT_USER, REG_SZ,
+    };
+
+    let current_exe = env::current_exe().map_err(|e| e.to_string())?;
+
+    let target_path = if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        let bin_dir = std::path::Path::new(&local_app_data).join("DeskStream").join("bin");
+        let _ = fs::create_dir_all(&bin_dir);
+        let target_exe = bin_dir.join("relay-server.exe");
+        if current_exe != target_exe {
+            let _ = fs::copy(&current_exe, &target_exe);
+        }
+        target_exe
+    } else {
+        current_exe
+    };
+
+    let exe_path_str = target_path.to_str().ok_or("Invalid path")?;
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+        .encode_utf16()
+        .collect();
+
+    let name_utf16: Vec<u16> = format!("{}\0", app_name).encode_utf16().collect();
+    let val_utf16: Vec<u16> = format!("\"{}\"\0", exe_path_str).encode_utf16().collect();
+
+    unsafe {
+        let mut key = 0;
+        if RegCreateKeyW(HKEY_CURRENT_USER, subkey.as_ptr(), &mut key) != 0 {
+            return Err("Failed to open registry key".to_string());
+        }
+        let res = RegSetValueExW(
+            key,
+            name_utf16.as_ptr(),
+            0,
+            REG_SZ,
+            val_utf16.as_ptr() as *const u8,
+            (val_utf16.len() * 2) as u32,
+        );
+        RegCloseKey(key);
+        if res == 0 {
+            Ok(exe_path_str.to_string())
+        } else {
+            Err(format!("RegSetValueExW failed with code {}", res))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_autostart(_app_name: &str) -> Result<String, String> {
+    Ok("non-windows".to_string())
+}
 
 // ============================================================
 // SEND ALL
@@ -24,11 +97,9 @@ fn send_all(stream: &mut TcpStream, data: &[u8]) -> bool {
             Ok(0) => {
                 return false;
             }
-
             Ok(n) => {
                 offset += n;
             }
-
             Err(e) => {
                 eprintln!("[Relay] Write error: {:?}", e);
                 return false;
@@ -36,6 +107,31 @@ fn send_all(stream: &mut TcpStream, data: &[u8]) -> bool {
         }
     }
 
+    true
+}
+
+fn send_all_pair(target_name: &str, stream: &mut TcpStream, data: &[u8]) -> bool {
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
+    println!("[PAIR] Writing to {} socket (peer={})", target_name, peer);
+    let mut offset = 0;
+
+    while offset < data.len() {
+        match stream.write(&data[offset..]) {
+            Ok(0) => {
+                eprintln!("[PAIR][ERROR] Write failed: target={} peer={} error=ZeroBytesWritten", target_name, peer);
+                return false;
+            }
+            Ok(n) => {
+                offset += n;
+            }
+            Err(e) => {
+                eprintln!("[PAIR][ERROR] Write failed: target={} peer={} error={:?}", target_name, peer, e);
+                return false;
+            }
+        }
+    }
+
+    println!("[PAIR] Pairing message sent successfully to {} ({})", target_name, peer);
     true
 }
 
@@ -50,261 +146,99 @@ fn read_exact_logged(
 ) -> bool {
     match stream.read_exact(buffer) {
         Ok(_) => true,
-
         Err(e) => {
-            eprintln!(
-                "[Relay] {} read failed: {:?}",
-                name,
-                e
-            );
-
+            eprintln!("[Relay] {} read failed: {:?}", name, e);
             false
         }
     }
 }
 
 // ============================================================
-// HOST -> VIEWER
-//
-// IMPORTANT:
-//
-// After authentication, TCP traffic is NOT parsed.
-//
-// Everything is copied exactly as received.
-//
-// Protocol:
-//
-// [TYPE][WIDTH][HEIGHT][JPEG_SIZE][JPEG]
-//
-// TCP does not preserve application packet boundaries.
-// Therefore we simply proxy the bytes.
+// TCP FORWARDING: HOST <-> VIEWER
 // ============================================================
 
-fn host_to_viewer(
+fn host_to_viewer_tcp(
     mut host: TcpStream,
     mut viewer: TcpStream,
     host_control: TcpStream,
     viewer_control: TcpStream,
 ) {
-    println!(
-        "[Relay] HOST -> VIEWER forwarding started"
-    );
-
+    println!("[Relay] HOST -> VIEWER forwarding started");
     let _ = host.set_nodelay(true);
     let _ = viewer.set_nodelay(true);
 
     let mut buffer = [0u8; 128 * 1024];
-
-    let mut total_received: u64 = 0;
-    let mut total_sent: u64 = 0;
-    let mut last_reported_mb: u64 = 0;
-
     loop {
         match host.read(&mut buffer) {
             Ok(0) => {
-                println!(
-                    "[Relay] Host -> Viewer connection closed."
-                );
-
-                println!(
-                    "[Relay Video] Final host bytes received: {}",
-                    total_received
-                );
-
-                println!(
-                    "[Relay Video] Final viewer bytes sent: {}",
-                    total_sent
-                );
-
+                println!("[Relay] Host -> Viewer TCP connection closed.");
                 let _ = viewer.shutdown(Shutdown::Both);
                 let _ = host_control.shutdown(Shutdown::Both);
                 let _ = viewer_control.shutdown(Shutdown::Both);
-
                 break;
             }
-
             Ok(n) => {
-                total_received += n as u64;
-
-                println!(
-                    "[Relay Video] HOST READ: {} bytes | total={}",
-                    n,
-                    total_received
-                );
-
-                /*
-                    IMPORTANT:
-
-                    Do NOT parse this buffer.
-
-                    TCP may contain:
-                    - part of a packet
-                    - one complete packet
-                    - multiple packets
-                */
-
-                if !send_all(
-                    &mut viewer,
-                    &buffer[..n],
-                ) {
-                    println!(
-                        "[Relay] Failed forwarding data to viewer."
-                    );
-
+                if !send_all(&mut viewer, &buffer[..n]) {
                     let _ = host.shutdown(Shutdown::Both);
                     let _ = viewer.shutdown(Shutdown::Both);
                     let _ = host_control.shutdown(Shutdown::Both);
                     let _ = viewer_control.shutdown(Shutdown::Both);
-
                     break;
                 }
-
-                total_sent += n as u64;
-
-                println!(
-                    "[Relay Video] FORWARDED: {} bytes | total={}",
-                    n,
-                    total_sent
-                );
-
-                let current_mb =
-                    total_received / (1024 * 1024);
-
-                if current_mb >= last_reported_mb + 10 {
-                    last_reported_mb = current_mb;
-
-                    println!(
-                        "[Relay Video] Host received: {} MB",
-                        current_mb
-                    );
-
-                    println!(
-                        "[Relay Video] Viewer sent: {} MB",
-                        total_sent / (1024 * 1024)
-                    );
-                }
             }
-
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
                     continue;
                 }
-                eprintln!(
-                    "[Relay] HOST -> VIEWER read error: {:?}",
-                    e
-                );
-
+                eprintln!("[Relay] HOST -> VIEWER read error: {:?}", e);
                 let _ = viewer.shutdown(Shutdown::Both);
                 let _ = host_control.shutdown(Shutdown::Both);
                 let _ = viewer_control.shutdown(Shutdown::Both);
-
                 break;
             }
         }
     }
 }
 
-// ============================================================
-// VIEWER -> HOST
-//
-// Everything is copied unchanged.
-//
-// Examples:
-//
-// 0  = mouse move
-// 1  = left mouse down
-// 2  = left mouse up
-// 3  = right mouse down
-// 4  = right mouse up
-// 5  = keyboard down
-// 6  = keyboard up
-// 8  = scroll
-// 12 = clipboard
-// 16 = chat
-// 20/21 = file transfer
-// ============================================================
-
-fn viewer_to_host(
+fn viewer_to_host_tcp(
     mut viewer: TcpStream,
     mut host: TcpStream,
     host_control: TcpStream,
     viewer_control: TcpStream,
 ) {
-    println!(
-        "[Relay] VIEWER -> HOST forwarding started"
-    );
-
+    println!("[Relay] VIEWER -> HOST forwarding started");
     let _ = viewer.set_nodelay(true);
     let _ = host.set_nodelay(true);
 
     let mut buffer = [0u8; 64 * 1024];
-
-    let mut total_received: u64 = 0;
-    let mut total_sent: u64 = 0;
-
     loop {
         match viewer.read(&mut buffer) {
             Ok(0) => {
-                println!(
-                    "[Relay] Viewer -> Host connection closed."
-                );
-
+                println!("[Relay] Viewer -> Host TCP connection closed.");
                 let _ = host.shutdown(Shutdown::Both);
                 let _ = viewer.shutdown(Shutdown::Both);
                 let _ = host_control.shutdown(Shutdown::Both);
                 let _ = viewer_control.shutdown(Shutdown::Both);
-
                 break;
             }
-
             Ok(n) => {
-                total_received += n as u64;
-
-                println!(
-                    "[Relay Input] VIEWER READ: {} bytes | total={}",
-                    n,
-                    total_received
-                );
-
-                if !send_all(
-                    &mut host,
-                    &buffer[..n],
-                ) {
-                    println!(
-                        "[Relay] Failed forwarding data to host."
-                    );
-
+                if !send_all(&mut host, &buffer[..n]) {
                     let _ = viewer.shutdown(Shutdown::Both);
                     let _ = host.shutdown(Shutdown::Both);
                     let _ = host_control.shutdown(Shutdown::Both);
                     let _ = viewer_control.shutdown(Shutdown::Both);
-
                     break;
                 }
-
-                total_sent += n as u64;
-
-                println!(
-                    "[Relay Input] FORWARDED TO HOST: {} bytes | total={}",
-                    n,
-                    total_sent
-                );
             }
-
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
                     continue;
                 }
-                eprintln!(
-                    "[Relay] VIEWER -> HOST read error: {:?}",
-                    e
-                );
-
+                eprintln!("[Relay] VIEWER -> HOST read error: {:?}", e);
                 let _ = host.shutdown(Shutdown::Both);
                 let _ = viewer.shutdown(Shutdown::Both);
                 let _ = host_control.shutdown(Shutdown::Both);
                 let _ = viewer_control.shutdown(Shutdown::Both);
-
                 break;
             }
         }
@@ -312,152 +246,530 @@ fn viewer_to_host(
 }
 
 // ============================================================
-// HOST CONNECTION
+// HOST SESSION RUNNER (WEBSOCKET BRIDGE)
 // ============================================================
-//
-// Host registration:
-//
-// 1 byte  = 1
-// 6 bytes = session ID
-//
-// Total = 7 bytes
+
+fn run_websocket_bridge(
+    session_id: &str,
+    stream: &mut TcpStream,
+    ws_arc: Arc<Mutex<tungstenite::WebSocket<TcpStream>>>,
+) -> bool {
+    let mut host_reader = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut host_writer = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let is_active = Arc::new(AtomicBool::new(true));
+    let is_active_reader = Arc::clone(&is_active);
+    let session_id_for_thread = session_id.to_string();
+
+    // Dedicated WS-writer channel: eliminates Arc<Mutex<WebSocket>> contention
+    // between the video-sender thread and the control-read loop.
+    let (ws_tx, ws_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(512);
+    let ws_tx_fwd = ws_tx.clone();
+
+    let ws_arc_writer = Arc::clone(&ws_arc);
+    let is_active_writer = Arc::clone(&is_active);
+    let session_id_writer = session_id.to_string();
+
+    // WS writer thread
+    let ws_writer_handle = thread::spawn(move || {
+        while is_active_writer.load(Ordering::SeqCst) {
+            let msg_bytes = match ws_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(b) => b,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
+            let mut lock = match ws_arc_writer.lock() {
+                Ok(l) => l,
+                Err(_) => {
+                    eprintln!("[WS CLOSE] component=ws_writer reason=mutex_poisoned device={}", session_id_writer);
+                    break;
+                }
+            };
+            let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+            if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
+                eprintln!("[WS CLOSE] component=ws_writer reason=send_failed error={:?} device={}", e, session_id_writer);
+                break;
+            }
+        }
+        println!("[WS CLOSE] component=ws_writer reason=exiting device={}", session_id_writer);
+    });
+
+    // Host -> WS forwarder thread
+    let host_to_ws_handle = thread::spawn(move || {
+        while is_active_reader.load(Ordering::SeqCst) {
+            let _ = host_reader.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut type_buf = [0u8; 1];
+            if let Err(e) = host_reader.read_exact(&mut type_buf) {
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
+                    continue;
+                }
+                eprintln!("[WS CLOSE] component=host_to_ws reason=host_read_failed error={:?} device={}", e, session_id_for_thread);
+                break;
+            }
+            let pkt = type_buf[0];
+
+            match pkt {
+                13 | 15 => {
+                    let mut header = [0u8; 12];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = host_reader.read_exact(&mut header) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=video_header_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let width  = u32::from_be_bytes(header[0..4].try_into().unwrap());
+                    let height = u32::from_be_bytes(header[4..8].try_into().unwrap());
+                    let psize  = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
+                    if width == 0 || width > 7680 || height == 0 || height > 4320 || psize == 0 || psize > 50 * 1024 * 1024 {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=invalid_video_dims w={} h={} p={} device={}", width, height, psize, session_id_for_thread);
+                        break;
+                    }
+                    let mut payload = vec![0u8; psize];
+                    if let Err(e) = host_reader.read_exact(&mut payload) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=video_payload_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    println!("[RELAY RX] device={} type={} payload={}", session_id_for_thread, pkt, psize);
+                    println!("[RELAY TX] device={} type={} viewer=active", session_id_for_thread, pkt);
+                    let mut msg = Vec::with_capacity(1 + 12 + psize);
+                    msg.push(pkt);
+                    msg.extend_from_slice(&header);
+                    msg.extend_from_slice(&payload);
+                    if ws_tx_fwd.try_send(msg).is_err() {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=tx_full_dropped_video device={}", session_id_for_thread);
+                    }
+                }
+                17 => {
+                    let mut header = [0u8; 10];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = host_reader.read_exact(&mut header) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=audio_header_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let psize = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
+                    if psize == 0 || psize > 10 * 1024 * 1024 { break; }
+                    let mut payload = vec![0u8; psize];
+                    if let Err(e) = host_reader.read_exact(&mut payload) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=audio_payload_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let mut msg = Vec::with_capacity(1 + 10 + psize);
+                    msg.push(17u8);
+                    msg.extend_from_slice(&header);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                14 => {
+                    let mut payload = [0u8; 8];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = host_reader.read_exact(&mut payload) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=heartbeat_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    println!("[HEARTBEAT] device_id={}", session_id_for_thread);
+                    let mut msg = Vec::with_capacity(9);
+                    msg.push(14u8);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                12 => {
+                    let mut hdr = [0u8; 4];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = host_reader.read_exact(&mut hdr) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=clipboard_header_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let psize = u32::from_be_bytes(hdr) as usize;
+                    if psize > 50 * 1024 * 1024 { break; }
+                    let mut payload = vec![0u8; psize];
+                    if let Err(e) = host_reader.read_exact(&mut payload) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=clipboard_payload_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let mut msg = Vec::with_capacity(5 + psize);
+                    msg.push(12u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                16 => {
+                    let mut hdr = [0u8; 2];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = host_reader.read_exact(&mut hdr) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=chat_header_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let psize = u16::from_be_bytes(hdr) as usize;
+                    let mut payload = vec![0u8; psize];
+                    if let Err(e) = host_reader.read_exact(&mut payload) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=chat_payload_failed error={:?} device={}", e, session_id_for_thread);
+                        break;
+                    }
+                    let mut msg = Vec::with_capacity(3 + psize);
+                    msg.push(16u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                99 => {
+                    println!("[WS CLOSE] component=host_to_ws reason=host_sent_99 device={}", session_id_for_thread);
+                    break;
+                }
+                _ => {
+                    // Unknown type: log and continue (1 byte already consumed, stream in sync)
+                    eprintln!("[WS ERROR] component=host_to_ws reason=unknown_type type={} device={}", pkt, session_id_for_thread);
+                }
+            }
+        }
+        println!("[WS CLOSE] component=host_to_ws reason=thread_exit device={}", session_id_for_thread);
+    });
+
+    // WebSocket -> Host (control input loop)
+    loop {
+        let msg_res = {
+            let mut lock = match ws_arc.lock() {
+                Ok(l) => l,
+                Err(_) => {
+                    eprintln!("[WS CLOSE] component=ws_to_host reason=mutex_poisoned device={}", session_id);
+                    break;
+                }
+            };
+            let _ = lock.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
+            lock.read()
+        };
+
+        match msg_res {
+            Ok(Message::Binary(data)) => {
+                if !data.is_empty() {
+                    let type_name = match data[0] {
+                        0 => "MOUSE_MOVE", 1 | 3 | 7 => "MOUSE_DOWN", 2 | 4 | 8 => "MOUSE_UP",
+                        5 => "KEY_DOWN", 6 => "KEY_UP", 9 => "MOUSE_WHEEL", _ => "CONTROL",
+                    };
+                    println!("[CONTROL RX] type={} bytes={} device={}", data[0], data.len(), session_id);
+                    println!("[RELAY CONTROL RX] {}", type_name);
+                }
+                // CRITICAL: control write failure is NON-FATAL
+                if !send_all(&mut host_writer, &data) {
+                    eprintln!("[WS ERROR] component=ws_to_host reason=control_write_failed \
+                        type={} device={}", data.first().copied().unwrap_or(255), session_id);
+                    // Non-fatal: video stream continues
+                }
+            }
+            Ok(Message::Ping(data)) => {
+                let mut lock = match ws_arc.lock() {
+                    Ok(l) => l,
+                    Err(_) => { eprintln!("[WS CLOSE] component=ws_to_host reason=ping_mutex_poisoned device={}", session_id); break; }
+                };
+                if let Err(e) = lock.send(Message::Pong(data)) {
+                    eprintln!("[WS CLOSE] component=ws_to_host reason=pong_failed error={:?} device={}", e, session_id);
+                    break;
+                }
+            }
+            Ok(Message::Pong(_)) => {}
+            Ok(Message::Close(_)) => {
+                println!("[WS CLOSE] component=ws_to_host reason=browser_sent_close device={}", session_id);
+                break;
+            }
+            Err(tungstenite::error::Error::Io(ref e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) => {
+                println!("[WS CLOSE] component=ws_to_host reason=ws_read_error error={:?} device={}", e, session_id);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    println!("[WS CLOSE] component=bridge reason=main_loop_exited device={}", session_id);
+    is_active.store(false, Ordering::SeqCst);
+    drop(ws_tx); // signal writer thread to exit
+    println!("[REGISTRY] Viewer disconnected for Device ID: {}", session_id);
+    let _ = host_writer.write_all(&[99u8]);
+    let _ = host_to_ws_handle.join();
+    let _ = ws_writer_handle.join();
+    true
+}
+
+// ============================================================
+// HOST CONNECTION & LIFECYCLE (PERSISTENT AGENT THREAD)
 // ============================================================
 
 fn handle_host(
     mut stream: TcpStream,
     hosts: ClientMap,
 ) {
-    let mut init = [0u8; 7];
+    let mut type_byte = [0u8; 1];
 
     if !read_exact_logged(
         &mut stream,
-        &mut init,
-        "Host registration",
+        &mut type_byte,
+        "Host packet type",
     ) {
         return;
     }
 
-    let packet_type = init[0];
+    let packet_type = type_byte[0];
 
     if packet_type != 1 {
         eprintln!(
             "[Relay] Invalid host registration packet type: {}",
             packet_type
         );
-
         return;
     }
 
-    let session_id = match std::str::from_utf8(
-        &init[1..7],
-    ) {
-        Ok(id) => id.to_string(),
+    let mut id_buf = [0u8; 32];
+    let n = match stream.peek(&mut id_buf) {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
 
+    let mut id_len = 0;
+    for &b in &id_buf[..n] {
+        if b.is_ascii_alphanumeric() || b == b'-' {
+            id_len += 1;
+        } else {
+            break;
+        }
+    }
+    if id_len == 0 {
+        id_len = if n >= 9 { 9 } else { 6 };
+    }
+
+    let mut actual_id_buf = vec![0u8; id_len];
+    if !read_exact_logged(&mut stream, &mut actual_id_buf, "Host session ID") {
+        return;
+    }
+
+    let session_id = match std::str::from_utf8(&actual_id_buf) {
+        Ok(id) => id.trim().to_string(),
         Err(_) => {
-            eprintln!(
-                "[Relay] Invalid host session ID."
-            );
-
+            eprintln!("[Relay] Invalid host session ID.");
             return;
         }
     };
 
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
     let _ = stream.set_nodelay(true);
 
-    println!("[RELAY] Client connected");
+    println!("[RELAY] Client connected: {}", peer);
     println!("[RELAY] Registration received: {}", session_id);
-    println!("[RELAY] Device ID: {}", session_id);
 
-    /*
-        Replace any stale host with this connection.
-    */
-
-    if let Ok(mut map) = hosts.lock() {
-        map.insert(
-            session_id.clone(),
-            stream,
-        );
-        println!("[RELAY] Device added to device registry");
-        println!("[RELAY] Broadcasting device list/update");
-    } else {
-        eprintln!(
-            "[Relay] Failed to lock host registry."
-        );
-
+    if !send_all(&mut stream, &[1u8]) {
+        eprintln!("[RELAY][ERROR] Failed to send registration ACK to Device ID: {}", session_id);
         return;
     }
 
-    println!(
-        "[Relay] Host {} waiting for viewer...",
-        session_id
-    );
+    println!("[RELAY] Registration ACK sent: {}", session_id);
+    println!("[RELAY] Agent {} marked ONLINE", session_id);
+    println!("[RELAY] Registered agent: {}", session_id);
+    println!("[RELAY] activeAgents[{}] = ONLINE", session_id);
+    println!("[REGISTRY] Register device");
+    println!("[REGISTRY] Device ID: {}", session_id);
+    println!("[REGISTRY] Connection ID: {}", peer);
+    println!("[REGISTRY] Status: ONLINE");
+    println!("[RELAY] Connection remains active");
+
+    let (session_tx, session_rx): (Sender<ViewerSessionRequest>, Receiver<ViewerSessionRequest>) = channel();
+
+    // Register active agent sender in hosts map
+    if let Ok(mut map) = hosts.lock() {
+        map.insert(session_id.clone(), session_tx);
+    } else {
+        eprintln!("[AUTH][ERROR] Failed to lock host registry.");
+        return;
+    }
+
+    // ============================================================
+    // PERSISTENT HOST CONNECTION & HEARTBEAT LOOP
+    // ============================================================
+
+    let mut idle_buf = [0u8; 1];
+    let host_peer = peer.clone();
+
+    loop {
+        // 1. Check for incoming viewer session request
+        if let Ok(req) = session_rx.try_recv() {
+            println!("[ROUTING] Forwarding request to agent: {}", session_id);
+            println!("[PAIR] Preparing pairing message");
+            println!("[PAIR] Target socket: HOST ({})", host_peer);
+            println!("[PAIR] Message type: AUTH_REQUEST (3)");
+            println!("[PAIR] Message size: 33 bytes");
+
+            let mut auth_request = Vec::with_capacity(33);
+            auth_request.push(3u8);
+            auth_request.extend_from_slice(&req.auth_hash);
+
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            if !send_all_pair("HOST", &mut stream, &auth_request) {
+                eprintln!("[PAIR][ERROR] Failed to send auth request to host: {}", session_id);
+                let _ = req.response_tx.send(false);
+                continue;
+            }
+
+            println!("[PAIR] Waiting for HOST authentication response...");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+            let mut response = [0u8; 1];
+            if !read_exact_logged(&mut stream, &mut response, "Host authentication response") {
+                eprintln!("[PAIR][ERROR] Failed to read authentication response from HOST: {}", session_id);
+                let _ = req.response_tx.send(false);
+                continue;
+            }
+
+            if response[0] != 1 {
+                println!("[APPROVAL] Host rejected or timed out: {}", session_id);
+                let _ = req.response_tx.send(false);
+                continue;
+            }
+
+            println!("[APPROVAL] Target {} accepted", session_id);
+            println!("[APPROVAL] Request sent to {}", session_id);
+            println!("[APPROVAL] Target {} accepted", session_id);
+            let _ = req.response_tx.send(true);
+
+            match req.session {
+                ViewerSession::WebSocket(ws_arc) => {
+                    run_websocket_bridge(&session_id, &mut stream, ws_arc);
+                }
+                ViewerSession::Tcp(mut viewer_tcp) => {
+                    println!("[PAIR] Starting TCP bridge for {}", session_id);
+                    let _ = send_all_pair("VIEWER", &mut viewer_tcp, &[2u8]);
+
+                    let host_r = match stream.try_clone() { Ok(s) => s, Err(_) => break };
+                    let host_w = match stream.try_clone() { Ok(s) => s, Err(_) => break };
+                    let host_c1 = match stream.try_clone() { Ok(s) => s, Err(_) => break };
+                    let host_c2 = match stream.try_clone() { Ok(s) => s, Err(_) => break };
+
+                    let viewer_r = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
+                    let viewer_w = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
+                    let viewer_c1 = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
+                    let viewer_c2 = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
+
+                    let t1 = thread::spawn(move || host_to_viewer_tcp(host_r, viewer_w, host_c1, viewer_c1));
+                    let t2 = thread::spawn(move || viewer_to_host_tcp(viewer_r, host_w, host_c2, viewer_c2));
+                    let _ = t1.join();
+                    let _ = t2.join();
+                }
+            }
+
+            println!("[REGISTRY] Re-registering host {} in active registry (viewer session ended)", session_id);
+            println!("[RELAY] activeAgents[{}] = ONLINE", session_id);
+            println!("[REGISTRY] Device ID: {}", session_id);
+            println!("[REGISTRY] Status: ONLINE");
+            println!("[RELAY] Connection remains active");
+            continue;
+        }
+
+        // 2. Non-blocking read with 200ms timeout for Heartbeats and Keepalive
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+        match stream.read_exact(&mut idle_buf) {
+            Ok(_) => {
+                match idle_buf[0] {
+                    // Type 14: Heartbeat / Keepalive from host
+                    14 => {
+                        let mut time_buf = [0u8; 8];
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        if stream.read_exact(&mut time_buf).is_ok() {
+                            println!("[HEARTBEAT] device_id={}", session_id);
+                            println!("[RELAY] Agent {} heartbeat", session_id);
+                            let mut ack = Vec::with_capacity(9);
+                            ack.push(14u8);
+                            ack.extend_from_slice(&time_buf);
+                            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                            let _ = stream.write_all(&ack);
+                        }
+                    }
+                    other => {
+                        eprintln!("[RELAY] Received unexpected idle byte: {} from agent {}", other, session_id);
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
+                    // Normal idle wait timeout, loop back to check viewer requests and heartbeats
+                    continue;
+                }
+                // Actual socket disconnect / error
+                println!("[RELAY] Agent {} disconnected", session_id);
+                println!("[RELAY] Disconnect reason: {:?}", e);
+                println!("[RELAY][DISCONNECT] reason=Connection closed or reset by remote agent");
+                println!("[RELAY][DISCONNECT] system_id={}", session_id);
+                println!("[RELAY][DISCONNECT] socket_error={:?}", e);
+                println!("[RELAY][DISCONNECT] remote_closed=true");
+                break;
+            }
+        }
+    }
+
+    // Clean up from activeAgents on exit
+    if let Ok(mut map) = hosts.lock() {
+        map.remove(&session_id);
+    }
+    println!("[REGISTRY] Device {} removed from active registry (OFFLINE)", session_id);
+    println!("[RELAY] activeAgents[{}] = OFFLINE", session_id);
 }
 
 // ============================================================
 // NORMAL TCP VIEWER CONNECTION
-// ============================================================
-//
-// Viewer:
-//
-// 1 byte  = 2
-// 6 bytes = session ID
-// 32 bytes = SHA256 PIN
-//
-// Total handshake = 39 bytes
 // ============================================================
 
 fn handle_viewer(
     mut viewer: TcpStream,
     hosts: ClientMap,
 ) {
-    let mut header = [0u8; 7];
+    let mut type_byte = [0u8; 1];
 
     if !read_exact_logged(
         &mut viewer,
-        &mut header,
-        "Viewer handshake",
+        &mut type_byte,
+        "Viewer packet type",
     ) {
         return;
     }
 
-    println!(
-        "[Relay] Viewer connected"
-    );
+    println!("[Relay] Viewer connected");
 
-    println!(
-        "[Relay] Received packet type: {}",
-        header[0]
-    );
-
-    if header[0] != 2 {
+    if type_byte[0] != 2 {
         eprintln!(
             "[Relay] Invalid viewer packet type: {}",
-            header[0]
+            type_byte[0]
         );
-
         let _ = viewer.write_all(&[3u8]);
-
         return;
     }
 
-    let session_id = match std::str::from_utf8(
-        &header[1..7],
-    ) {
-        Ok(id) => id.to_string(),
+    let mut peek_buf = [0u8; 64];
+    let n = match viewer.peek(&mut peek_buf) {
+        Ok(n) if n >= 32 => n,
+        _ => return,
+    };
 
+    let id_len = if n > 32 { n - 32 } else { 9 };
+    let mut id_buf = vec![0u8; id_len];
+    if !read_exact_logged(&mut viewer, &mut id_buf, "Viewer session ID") {
+        return;
+    }
+
+    let session_id = match std::str::from_utf8(&id_buf) {
+        Ok(id) => id.trim().to_string(),
         Err(_) => {
-            eprintln!(
-                "[Relay] Invalid viewer session ID."
-            );
-
+            eprintln!("[Relay] Invalid viewer session ID.");
             let _ = viewer.write_all(&[3u8]);
-
             return;
         }
     };
 
     let mut auth_hash = [0u8; 32];
-
     if !read_exact_logged(
         &mut viewer,
         &mut auth_hash,
@@ -466,287 +778,48 @@ fn handle_viewer(
         return;
     }
 
-    println!(
-        "[Relay] Target ID: {}",
-        session_id
-    );
+    println!("[Relay] Target ID: {}", session_id);
 
-    // --------------------------------------------------------
-    // Take ownership of host
-    // --------------------------------------------------------
-
-    let host = {
-        let mut map = match hosts.lock() {
+    let host_tx = {
+        let map = match hosts.lock() {
             Ok(map) => map,
-
             Err(_) => {
                 let _ = viewer.write_all(&[3u8]);
                 return;
             }
         };
-
-        map.remove(&session_id)
+        map.get(&session_id).cloned()
     };
 
-    let mut host = match host {
-        Some(host) => {
-            println!(
-                "[Relay] Target host found"
-            );
-
-            host
-        }
-
+    let host_tx = match host_tx {
+        Some(tx) => tx,
         None => {
-            println!(
-                "[Relay] Target host not found"
-            );
-
+            println!("[Relay] Target host not found: {}", session_id);
             let _ = viewer.write_all(&[3u8]);
-
             return;
         }
     };
 
-    let _ = host.set_nodelay(true);
-    let _ = viewer.set_nodelay(true);
+    let (resp_tx, resp_rx) = channel();
+    let req = ViewerSessionRequest {
+        auth_hash,
+        response_tx: resp_tx,
+        session: ViewerSession::Tcp(viewer),
+    };
 
-    // --------------------------------------------------------
-    // Send authentication request to host
-    //
-    // Host receives:
-    // Host receives:
-    //
-    // [3][32-byte SHA256]
-    // --------------------------------------------------------
-
-    let mut auth_request =
-        Vec::with_capacity(33);
-
-    auth_request.push(3u8);
-
-    auth_request.extend_from_slice(
-        &auth_hash,
-    );
-
-    if !send_all(
-        &mut host,
-        &auth_request,
-    ) {
-        eprintln!(
-            "[Relay] Failed to send authentication to host."
-        );
-
-        let _ = viewer.write_all(&[3u8]);
-
+    if host_tx.send(req).is_err() {
+        eprintln!("[PAIR][ERROR] Failed to forward request to host: {}", session_id);
         return;
     }
 
-    println!(
-        "[Relay] Forwarding approval request..."
-    );
-
-    // --------------------------------------------------------
-    // Host authentication response
-    //
-    // 1 = approved
-    // 2 = rejected
-    // --------------------------------------------------------
-
-    let mut response = [0u8; 1];
-
-    println!(
-        "[Relay] Waiting for host response..."
-    );
-
-    if !read_exact_logged(
-        &mut host,
-        &mut response,
-        "Host authentication response",
-    ) {
-        let _ = viewer.write_all(&[3u8]);
-        return;
+    let approved = resp_rx.recv().unwrap_or(false);
+    if !approved {
+        println!("[Relay] TCP viewer pairing rejected for {}", session_id);
     }
-
-    if response[0] != 1 {
-        println!(
-            "[Relay] Host rejected/timed out"
-        );
-
-        println!(
-            "[Relay] Sending ACK to viewer"
-        );
-
-        let _ = viewer.write_all(&[2u8]);
-
-        // Put host back into registry.
-        if let Ok(mut map) = hosts.lock() {
-            map.insert(
-                session_id.clone(),
-                host,
-            );
-        }
-
-        return;
-    }
-
-    // --------------------------------------------------------
-    // Authentication successful
-    // --------------------------------------------------------
-
-    println!(
-        "[Relay] Host approved"
-    );
-
-    println!(
-        "[Relay] Sending ACK to viewer"
-    );
-
-    // Tell viewer connection is approved.
-    if !send_all(
-        &mut viewer,
-        &[2u8],
-    ) {
-        return;
-    }
-
-    println!(
-        "[Relay] Approval ACK sent successfully"
-    );
-
-    // --------------------------------------------------------
-    // Clone streams
-    // --------------------------------------------------------
-
-    let host_reader =
-        match host.try_clone() {
-            Ok(s) => s,
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] Failed to clone host reader: {:?}",
-                    e
-                );
-
-                return;
-            }
-        };
-
-    let viewer_writer =
-        match viewer.try_clone() {
-            Ok(s) => s,
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] Failed to clone viewer writer: {:?}",
-                    e
-                );
-
-                return;
-            }
-        };
-
-    let viewer_reader =
-        match viewer.try_clone() {
-            Ok(s) => s,
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] Failed to clone viewer reader: {:?}",
-                    e
-                );
-
-                return;
-            }
-        };
-
-    let host_writer =
-        match host.try_clone() {
-            Ok(s) => s,
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] Failed to clone host writer: {:?}",
-                    e
-                );
-
-                return;
-            }
-        };
-
-    // Additional control clones used to shut down
-    // the opposite direction when one side closes.
-
-    let host_control_for_host_thread =
-        match host.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-    let viewer_control_for_host_thread =
-        match viewer.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-    let host_control_for_viewer_thread =
-        match host.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-    let viewer_control_for_viewer_thread =
-        match viewer.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-    // --------------------------------------------------------
-    // HOST -> VIEWER
-    // --------------------------------------------------------
-
-    let host_to_viewer_thread =
-        thread::spawn(move || {
-            host_to_viewer(
-                host_reader,
-                viewer_writer,
-                host_control_for_host_thread,
-                viewer_control_for_host_thread,
-            );
-        });
-
-    // --------------------------------------------------------
-    // VIEWER -> HOST
-    // --------------------------------------------------------
-
-    let viewer_to_host_thread =
-        thread::spawn(move || {
-            viewer_to_host(
-                viewer_reader,
-                host_writer,
-                host_control_for_viewer_thread,
-                viewer_control_for_viewer_thread,
-            );
-        });
-
-    // --------------------------------------------------------
-    // Wait for forwarding threads
-    // --------------------------------------------------------
-
-    let _ = host_to_viewer_thread.join();
-    let _ = viewer_to_host_thread.join();
-
-    let _ = host.shutdown(Shutdown::Both);
-    let _ = viewer.shutdown(Shutdown::Both);
-
-    println!(
-        "[Relay] Session {} closed.",
-        session_id
-    );
 }
 
 // ============================================================
-// WEBSOCKET VIEWER (FIXED - now parses TYPE 13 correctly)
+// WEBSOCKET VIEWER
 // ============================================================
 
 fn handle_websocket_viewer(
@@ -755,778 +828,147 @@ fn handle_websocket_viewer(
 ) {
     let mut ws = match tungstenite::accept(stream) {
         Ok(ws) => ws,
-
         Err(e) => {
-            eprintln!(
-                "[Relay] WS accept error: {:?}",
-                e
-            );
-
+            eprintln!("[Relay] WS accept error: {:?}", e);
             return;
         }
     };
-
-    // --------------------------------------------------------
-    // First WebSocket message = viewer handshake
-    // --------------------------------------------------------
 
     let msg = match ws.read() {
         Ok(Message::Binary(data)) => data,
-
         Ok(other) => {
-            eprintln!(
-                "[Relay] Unexpected WS handshake message: {:?}",
-                other
-            );
-
+            eprintln!("[Relay] Unexpected WS handshake message: {:?}", other);
             return;
         }
-
         Err(e) => {
-            eprintln!(
-                "[Relay] WS handshake read error: {:?}",
-                e
-            );
-
+            eprintln!("[Relay] WS handshake read error: {:?}", e);
             return;
         }
     };
 
-    /*
-        Expected:
-
-        1 byte  = 2
-        6 bytes = session ID
-        32 bytes = SHA256 PIN
-
-        Total = 39
-    */
-
-    if msg.len() < 39 || msg[0] != 2 {
-        eprintln!(
-            "[Relay] Invalid WS viewer packet"
-        );
-
-        let _ = ws.send(
-            Message::Binary(vec![3u8])
-        );
-
+    if msg.len() < 2 || msg[0] != 2 {
+        eprintln!("[Relay] Invalid WS viewer packet");
+        let _ = ws.send(Message::Binary(vec![3u8]));
         return;
     }
 
-    let session_id =
-        match std::str::from_utf8(
-            &msg[1..7],
-        ) {
-            Ok(id) => id.to_string(),
-
+    let payload = &msg[1..];
+    let (session_id, auth_hash) = if payload.len() >= 32 {
+        let id_slice = if payload.len() > 32 {
+            &payload[..payload.len() - 32]
+        } else {
+            payload
+        };
+        let clean_id = match std::str::from_utf8(id_slice) {
+            Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
             Err(_) => {
-                eprintln!(
-                    "[Relay] Invalid WS session ID."
-                );
-
+                eprintln!("[Relay] Invalid WS session ID.");
+                let _ = ws.send(Message::Binary(vec![3u8]));
                 return;
             }
         };
-
-    let mut auth_hash = [0u8; 32];
-
-    auth_hash.copy_from_slice(
-        &msg[7..39]
-    );
-
-    println!(
-        "[Relay] WS Viewer requesting host {}",
-        session_id
-    );
-
-    // --------------------------------------------------------
-    // Find host
-    // --------------------------------------------------------
-
-    let host_opt = {
-        let mut map = match hosts.lock() {
-            Ok(map) => map,
-
+        let mut hash = [0u8; 32];
+        if payload.len() > 32 {
+            hash.copy_from_slice(&payload[payload.len() - 32..]);
+        }
+        (clean_id, hash)
+    } else {
+        let clean_id = match std::str::from_utf8(payload) {
+            Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
             Err(_) => {
+                eprintln!("[Relay] Invalid WS session ID.");
+                let _ = ws.send(Message::Binary(vec![3u8]));
                 return;
             }
         };
-
-        map.remove(&session_id)
+        (clean_id, [0u8; 32])
     };
 
-    let mut host = match host_opt {
-        Some(host) => host,
+    println!("[VIEWER] Handshake received");
+    println!("[ROUTING] Selected target System ID: {}", session_id);
+    println!("[ROUTING] Relay lookup System ID: {}", session_id);
+    println!("[ROUTING] Looking up activeAgents[{}]", session_id);
 
+    if let Ok(map) = hosts.lock() {
+        println!("[RELAY] ACTIVE AGENTS (count={}):", map.len());
+        for (id, _) in map.iter() {
+            println!("  {} -> ONLINE", id);
+        }
+    }
+
+    // Look up agent sender (poll up to 2 seconds if reconnecting)
+    let mut host_tx_opt = None;
+    for _ in 0..20 {
+        {
+            if let Ok(map) = hosts.lock() {
+                let raw_clean = session_id.replace(' ', "");
+                host_tx_opt = map.get(&session_id).cloned().or_else(|| map.get(&raw_clean).cloned());
+            }
+        }
+        if host_tx_opt.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let target_found = host_tx_opt.is_some();
+    println!("[ROUTING] Target connection found: {}", target_found);
+
+    let host_tx = match host_tx_opt {
+        Some(tx) => {
+            println!("[VIEWER] Agent found for {}", session_id);
+            println!("[ROUTING] Target connection found: true");
+            tx
+        }
         None => {
-            println!(
-                "[Relay] Host {} not found.",
-                session_id
-            );
-
-            let _ = ws.send(
-                Message::Binary(vec![3u8])
-            );
-
+            eprintln!("[VIEWER][ERROR] No active agent registered for {}", session_id);
+            let _ = ws.send(Message::Binary(vec![3u8]));
             return;
         }
     };
 
-    let _ = host.set_nodelay(true);
+    let ws_arc = Arc::new(Mutex::new(ws));
+    let (resp_tx, resp_rx) = channel();
 
-    // --------------------------------------------------------
-    // Send authentication request to host
-    // --------------------------------------------------------
+    let req = ViewerSessionRequest {
+        auth_hash,
+        response_tx: resp_tx,
+        session: ViewerSession::WebSocket(Arc::clone(&ws_arc)),
+    };
 
-    let mut auth_request =
-        Vec::with_capacity(33);
-
-    auth_request.push(3u8);
-
-    auth_request.extend_from_slice(
-        &auth_hash,
-    );
-
-    if !send_all(
-        &mut host,
-        &auth_request,
-    ) {
-        let _ = ws.send(
-            Message::Binary(vec![3u8])
-        );
-
-        return;
-    }
-
-    // --------------------------------------------------------
-    // Read host authentication response
-    // --------------------------------------------------------
-
-    let mut response = [0u8; 1];
-
-    if !read_exact_logged(
-        &mut host,
-        &mut response,
-        "Host authentication response",
-    ) {
-        let _ = ws.send(
-            Message::Binary(vec![3u8])
-        );
-
-        return;
-    }
-
-    if response[0] != 1 {
-        println!(
-            "[Relay] Host rejected WS viewer {}",
-            session_id
-        );
-
-        let _ = ws.send(
-            Message::Binary(vec![2u8])
-        );
-
-        if let Ok(mut map) = hosts.lock() {
-            map.insert(
-                session_id.clone(),
-                host,
-            );
+    if host_tx.send(req).is_err() {
+        eprintln!("[PAIR][ERROR] Agent connection dropped before pairing: {}", session_id);
+        if let Ok(mut lock) = ws_arc.lock() {
+            let _ = lock.send(Message::Binary(vec![3u8]));
         }
-
         return;
     }
 
-    // --------------------------------------------------------
-    // Approved
-    // --------------------------------------------------------
+    println!("[PAIR] Waiting for HOST authentication response...");
+    let approved = resp_rx.recv().unwrap_or(false);
 
-    println!(
-        "[Relay] WS Session approved: {}",
-        session_id
-    );
-
-    if ws.send(
-        Message::Binary(vec![2u8])
-    ).is_err() {
+    if !approved {
+        println!("[Relay] Host rejected WS viewer {}", session_id);
+        println!("[PAIR] Sending reject to WS VIEWER");
+        if let Ok(mut lock) = ws_arc.lock() {
+            let _ = lock.send(Message::Binary(vec![3u8]));
+        }
         return;
     }
 
-    // --------------------------------------------------------
-    // Clone host
-    // --------------------------------------------------------
-
-    let mut host_reader =
-        match host.try_clone() {
-            Ok(s) => s,
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] Failed to clone WS host reader: {:?}",
-                    e
-                );
-
-                return;
-            }
-        };
-
-    let mut host_writer =
-        match host.try_clone() {
-            Ok(s) => s,
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] Failed to clone WS host writer: {:?}",
-                    e
-                );
-
-                return;
-            }
-        };
-
-    // --------------------------------------------------------
-    // Configure WebSocket TCP stream
-    // --------------------------------------------------------
-
-    let ws_stream = ws.get_mut();
-
-    let _ = ws_stream.set_read_timeout(
-        Some(Duration::from_millis(50))
-    );
-
-    let _ = ws_stream.set_nodelay(true);
-
-    // --------------------------------------------------------
-    // Put WebSocket in Arc/Mutex
-    // --------------------------------------------------------
-
-    let ws_arc =
-        Arc::new(Mutex::new(ws));
-
-    let ws_arc_clone =
-        Arc::clone(&ws_arc);
-
-    // --------------------------------------------------------
-    // HOST -> WEBSOCKET VIEWER (FIXED)
-    // --------------------------------------------------------
-
-    let _host_to_viewer_thread =
-        thread::spawn(move || {
-            loop {
-                // ------------------------------------------------
-                // Read packet type
-                // ------------------------------------------------
-
-                let mut type_buf = [0u8; 1];
-
-                if host_reader
-                    .read_exact(&mut type_buf)
-                    .is_err()
-                {
-                    break;
-                }
-
-                let packet_type =
-                    type_buf[0];
-
-                match packet_type {
-                    // ====================================================
-                    // TYPE 13 / 15 (H.264 VIDEO)
-                    //
-                    // 1 byte  = type (13 or 15)
-                    // 12 bytes = video header (WIDTH:u32, HEIGHT:u32, H264_SIZE:u32)
-                    // N bytes = H264 DATA
-                    // ====================================================
-                    13 | 15 => {
-                        let mut header = [0u8; 12];
-                        if host_reader.read_exact(&mut header).is_err() {
-                            break;
-                        }
-
-                        let mut width_buf = [0u8; 4];
-                        width_buf.copy_from_slice(&header[0..4]);
-                        let width = u32::from_be_bytes(width_buf);
-
-                        let mut height_buf = [0u8; 4];
-                        height_buf.copy_from_slice(&header[4..8]);
-                        let height = u32::from_be_bytes(height_buf);
-
-                        let mut size_buf = [0u8; 4];
-                        size_buf.copy_from_slice(&header[8..12]);
-                        let payload_size = u32::from_be_bytes(size_buf) as usize;
-
-                        if width == 0 || width > 7680 || height == 0 || height > 4320 {
-                            eprintln!(
-                                "[Relay H264] PARSE ERROR: Invalid dimensions: {}x{}",
-                                width, height
-                            );
-                            break;
-                        }
-
-                        if payload_size == 0 || payload_size > 50 * 1024 * 1024 {
-                            eprintln!(
-                                "[Relay H264] PARSE ERROR: Invalid payload size: {}",
-                                payload_size
-                            );
-                            break;
-                        }
-
-                        let mut payload = vec![0u8; payload_size];
-                        if let Err(e) = host_reader.read_exact(&mut payload) {
-                            eprintln!("[Relay H264] PARSE ERROR: failed to read payload: {:?}", e);
-                            break;
-                        }
-
-                        let total_size = 1 + 12 + payload_size;
-
-                        // ========================================================
-                        // [VIDEO DEBUG] STAGE 7 — RELAY RX
-                        // ========================================================
-                        println!("[VIDEO DEBUG][RELAY RX]\ntype={}\npacket_size={}", packet_type, total_size);
-                        println!("[VIDEO DEBUG][RELAY RX PARSE]\nwidth={}\nheight={}\ndeclared_size={}\nactual_size={}\nvalid={}",
-                            width, height, payload_size, payload.len(), payload_size == payload.len());
-
-                        let mut rx_hasher = Sha256::new();
-                        rx_hasher.update(&payload);
-                        let rx_hash = format!("{:x}", rx_hasher.finalize());
-                        println!("[VIDEO DEBUG][RELAY RX HASH]\nsha256={}", rx_hash);
-
-                        // ------------------------------------------------
-                        // RGBA -> RGB conversion
-                        //
-                        // If raw RGBA pixels are sent instead of encoded
-                        // bitstream, convert 4-byte RGBA to 3-byte RGB.
-                        // ------------------------------------------------
-
-                        let pixel_count = payload.len() / 4;
-                        let is_rgba = payload.len() % 4 == 0
-                            && pixel_count == (width as usize) * (height as usize);
-
-                        let (rgb_payload, rgb_size) = if is_rgba {
-                            let mut rgb = Vec::with_capacity(pixel_count * 3);
-                            for chunk in payload.chunks_exact(4) {
-                                rgb.push(chunk[0]); // R
-                                rgb.push(chunk[1]); // G
-                                rgb.push(chunk[2]); // B
-                                // chunk[3] = A (dropped)
-                            }
-                            let sz = rgb.len();
-                            (rgb, sz)
-                        } else {
-                            // Encoded H.264 bitstream data. Forward unchanged.
-                            let sz = payload.len();
-                            (payload, sz)
-                        };
-
-                        // Rebuild header with the (possibly new) payload size
-                        let mut new_header = [0u8; 12];
-                        new_header[0..4].copy_from_slice(&width.to_be_bytes());
-                        new_header[4..8].copy_from_slice(&height.to_be_bytes());
-                        new_header[8..12].copy_from_slice(&(rgb_size as u32).to_be_bytes());
-
-                        let new_total_size = 1 + 12 + rgb_size;
-
-                        let mut full_msg = Vec::with_capacity(new_total_size);
-                        full_msg.push(packet_type);
-                        full_msg.extend_from_slice(&new_header);
-                        full_msg.extend_from_slice(&rgb_payload);
-
-                        // ========================================================
-                        // [VIDEO DEBUG] STAGE 7 — RELAY TX
-                        // ========================================================
-                        println!("[VIDEO DEBUG][RELAY TX]\ntype={}\npacket_size={}\nh264_size={}", packet_type, new_total_size, rgb_size);
-                        let mut tx_hasher = Sha256::new();
-                        tx_hasher.update(&rgb_payload);
-                        let tx_hash = format!("{:x}", tx_hasher.finalize());
-                        println!("[VIDEO DEBUG][RELAY TX HASH]\nsha256={}", tx_hash);
-
-                        let mut lock = match ws_arc_clone.lock() {
-                            Ok(lock) => lock,
-                            Err(_) => {
-                                break;
-                            }
-                        };
-
-                        if lock.send(Message::Binary(full_msg)).is_err() {
-                            break;
-                        }
-                    }
-
-                    // ====================================================
-                    // TYPE 17 (AUDIO)
-                    //
-                    // 1 byte  = type
-                    // 4 bytes = audio data size (u32 BE)
-                    // 4 bytes = sample rate (u32 BE)
-                    // 2 bytes = channels (u16 BE)
-                    // N bytes = audio data
-                    // ====================================================
-                    17 => {
-                        let mut header = [0u8; 10];
-                        if host_reader.read_exact(&mut header).is_err() {
-                            break;
-                        }
-
-                        let mut size_buf = [0u8; 4];
-                        size_buf.copy_from_slice(&header[0..4]);
-                        let payload_size = u32::from_be_bytes(size_buf) as usize;
-
-                        if payload_size == 0 || payload_size > 10 * 1024 * 1024 {
-                            eprintln!("[Relay Audio] PARSE ERROR: Invalid payload size: {}", payload_size);
-                            break;
-                        }
-
-                        let mut payload = vec![0u8; payload_size];
-                        if let Err(e) = host_reader.read_exact(&mut payload) {
-                            eprintln!("[Relay Audio] PARSE ERROR: failed to read payload: {:?}", e);
-                            break;
-                        }
-
-                        let total_size = 1 + header.len() + payload_size;
-
-                        let mut msg = Vec::with_capacity(total_size);
-                        msg.push(17u8);
-                        msg.extend_from_slice(&header);
-                        msg.extend_from_slice(&payload);
-
-                        let mut lock = match ws_arc_clone.lock() {
-                            Ok(lock) => lock,
-                            Err(_) => {
-                                break;
-                            }
-                        };
-
-                        println!("[AUDIO RELAY TX] type=17 packet_size={}", total_size);
-
-                        if lock.send(Message::Binary(msg)).is_err() {
-                            break;
-                        }
-                    }
-
-                    // ====================================================
-                    // TYPE 14 (PING / STATUS)
-                    //
-                    // 1 byte  = type
-                    // 8 bytes = u64 timestamp
-                    // ====================================================
-                    14 => {
-                        let mut payload = [0u8; 8];
-                        if host_reader.read_exact(&mut payload).is_err() {
-                            break;
-                        }
-
-                        let mut msg = Vec::with_capacity(9);
-                        msg.push(14u8);
-                        msg.extend_from_slice(&payload);
-
-                        let mut lock = match ws_arc_clone.lock() {
-                            Ok(lock) => lock,
-                            Err(_) => break,
-                        };
-
-                        if lock.send(Message::Binary(msg)).is_err() {
-                            break;
-                        }
-                    }
-
-                    // ====================================================
-                    // TYPE 16
-                    //
-                    // 1 byte type
-                    // 2 byte payload size
-                    // payload
-                    // ====================================================
-
-                    16 => {
-                        let mut header =
-                            [0u8; 2];
-
-                        if host_reader
-                            .read_exact(&mut header)
-                            .is_err()
-                        {
-                            break;
-                        }
-
-                        let payload_size =
-                            u16::from_be_bytes(
-                                header
-                            ) as usize;
-
-                        let mut payload =
-                            vec![0u8; payload_size];
-
-                        if host_reader
-                            .read_exact(&mut payload)
-                            .is_err()
-                        {
-                            break;
-                        }
-
-                        let mut msg =
-                            Vec::with_capacity(
-                                1 +
-                                2 +
-                                payload_size
-                            );
-
-                        msg.push(16u8);
-
-                        msg.extend_from_slice(
-                            &header
-                        );
-
-                        msg.extend_from_slice(
-                            &payload
-                        );
-
-                        let mut lock =
-                            match ws_arc_clone.lock() {
-                                Ok(lock) => lock,
-                                Err(_) => break,
-                            };
-
-                        if lock
-                            .send(
-                                Message::Binary(msg)
-                            )
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-
-                    // ====================================================
-                    // TYPE 12 - CLIPBOARD
-                    //
-                    // 1 byte type
-                    // 4 byte payload size
-                    // payload
-                    // ====================================================
-
-                    12 => {
-                        let mut header =
-                            [0u8; 4];
-
-                        if host_reader
-                            .read_exact(&mut header)
-                            .is_err()
-                        {
-                            break;
-                        }
-
-                        let payload_size =
-                            u32::from_be_bytes(
-                                header
-                            ) as usize;
-
-                        if payload_size >
-                            50 * 1024 * 1024
-                        {
-                            eprintln!(
-                                "[Relay] Invalid clipboard payload size: {}",
-                                payload_size
-                            );
-
-                            break;
-                        }
-
-                        let mut payload =
-                            vec![0u8; payload_size];
-
-                        if host_reader
-                            .read_exact(&mut payload)
-                            .is_err()
-                        {
-                            break;
-                        }
-
-                        let mut msg =
-                            Vec::with_capacity(
-                                1 +
-                                4 +
-                                payload_size
-                            );
-
-                        msg.push(12u8);
-
-                        msg.extend_from_slice(
-                            &header
-                        );
-
-                        msg.extend_from_slice(
-                            &payload
-                        );
-
-                        let mut lock =
-                            match ws_arc_clone.lock() {
-                                Ok(lock) => lock,
-                                Err(_) => break,
-                            };
-
-                        if lock
-                            .send(
-                                Message::Binary(msg)
-                            )
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-
-                    // ====================================================
-                    // UNKNOWN
-                    // ====================================================
-
-                    _ => {
-                        eprintln!(
-                            "[Relay] Unknown packet type from host to viewer: {}",
-                            packet_type
-                        );
-
-                        break;
-                    }
-                }
-            }
-
-            println!(
-                "[Relay] WS HOST -> VIEWER thread closed."
-            );
-        });
-
-    // --------------------------------------------------------
-    // WEBSOCKET VIEWER -> HOST
-    // --------------------------------------------------------
-
-    loop {
-        let msg_res = {
-            let mut lock =
-                match ws_arc.lock() {
-                    Ok(lock) => lock,
-
-                    Err(_) => break,
-                };
-
-            lock.read()
-        };
-
-        match msg_res {
-            // ----------------------------------------------------
-            // Binary message
-            // ----------------------------------------------------
-
-            Ok(Message::Binary(data)) => {
-                if !send_all(
-                    &mut host_writer,
-                    &data,
-                ) {
-                    eprintln!(
-                        "[Relay] Failed forwarding WS data to host."
-                    );
-
-                    break;
-                }
-            }
-
-            // ----------------------------------------------------
-            // Ping
-            // ----------------------------------------------------
-
-            Ok(Message::Ping(data)) => {
-                let mut lock =
-                    match ws_arc.lock() {
-                        Ok(lock) => lock,
-                        Err(_) => break,
-                    };
-
-                if lock
-                    .send(Message::Pong(data))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-
-            // ----------------------------------------------------
-            // Pong
-            // ----------------------------------------------------
-
-            Ok(Message::Pong(_)) => {}
-
-            // ----------------------------------------------------
-            // Close
-            // ----------------------------------------------------
-
-            Ok(Message::Close(_)) => {
-                println!(
-                    "[Relay] WS viewer sent close."
-                );
-
-                break;
-            }
-
-            // ----------------------------------------------------
-            // Text is not expected
-            // ----------------------------------------------------
-
-            Ok(Message::Text(_)) => {
-                eprintln!(
-                    "[Relay] Unexpected WS text message."
-                );
-            }
-
-            // ----------------------------------------------------
-            // Timeout / WouldBlock
-            // ----------------------------------------------------
-
-            Err(
-                tungstenite::error::Error::Io(ref e)
-            )
-                if e.kind()
-                    == std::io::ErrorKind::WouldBlock
-                    || e.kind()
-                        == std::io::ErrorKind::TimedOut =>
-            {
-                thread::sleep(
-                    Duration::from_millis(1000)
-                );
-
-                continue;
-            }
-
-            // ----------------------------------------------------
-            // Other errors
-            // ----------------------------------------------------
-
-            Err(e) => {
-                eprintln!(
-                    "[Relay] WS read error: {:?}",
-                    e
-                );
-
-                break;
-            }
-
-            _ => {}
+    println!("[PAIR] Sending pairing message to VIEWER");
+    println!("[RELAY] Sending authentication success to viewer");
+    if let Ok(mut lock) = ws_arc.lock() {
+        if lock.send(Message::Binary(vec![2u8])).is_err() {
+            eprintln!("[PAIR][ERROR] Failed to send auth success packet to viewer");
+            return;
         }
     }
-
-    // --------------------------------------------------------
-    // Close host when WebSocket closes
-    // --------------------------------------------------------
-
-    let _ = host_writer.shutdown(
-        Shutdown::Both
-    );
-
-    let _ = host.shutdown(
-        Shutdown::Both
-    );
-
-    println!(
-        "[Relay] WS Session {} closed.",
-        session_id
-    );
+    println!("[PAIR] Viewer pairing message sent");
+    println!("[PAIR] Pairing successful");
+    println!("[STREAM] Starting stream");
+    println!("[CONNECTION] entering persistent connection loop");
+    println!("[RELAY] Host/viewer pairing established");
 }
 
 // ============================================================
@@ -1534,15 +976,18 @@ fn handle_websocket_viewer(
 // ============================================================
 
 fn main() {
+    let current_exe_path = env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    if let Ok(path) = enable_autostart("DeskStreamRelayServer") {
+        println!("[RELAY] Autostart registered -> {}", path);
+    }
+
     println!("========================================");
     println!("       REMOTE DESKTOP RELAY SERVER");
+    println!("  BUILD VERSION: 1.0.1 (Production Dedicated Relay)");
+    println!("  EXECUTABLE:    {}", current_exe_path);
     println!("========================================");
     println!("[RELAY] Starting relay server...");
     println!("[RELAY] Binding to {}...", RELAY_ADDR);
-
-    // --------------------------------------------------------
-    // Bind TCP listener
-    // --------------------------------------------------------
 
     let listener = match TcpListener::bind(RELAY_ADDR) {
         Ok(l) => {
@@ -1551,164 +996,73 @@ fn main() {
             l
         }
         Err(e) => {
+            if e.kind() == std::io::ErrorKind::AddrInUse || e.raw_os_error() == Some(10048) {
+                println!("[RELAY] Port 9001 is already in use by an active Relay Server instance.");
+                println!("[RELAY] Exactly ONE relay server instance should run on port 9001.");
+                println!("[RELAY] Existing relay server is already operational. Exiting cleanly without error.");
+                return;
+            }
             eprintln!("[RELAY][FATAL] Failed to bind to {}: {:?}", RELAY_ADDR, e);
-            panic!("Failed to bind relay server to port 9001: {:?}", e);
+            return;
         }
     };
 
-    // --------------------------------------------------------
-    // Host registry
-    // --------------------------------------------------------
-
-    let hosts: ClientMap =
-        Arc::new(
-            Mutex::new(
-                HashMap::new()
-            )
-        );
-
-    // --------------------------------------------------------
-    // Accept connections
-    // --------------------------------------------------------
+    let hosts: ClientMap = Arc::new(Mutex::new(HashMap::new()));
 
     for incoming in listener.incoming() {
         let stream = match incoming {
             Ok(stream) => stream,
-
             Err(e) => {
-                eprintln!(
-                    "[Relay] Incoming connection error: {:?}",
-                    e
-                );
-
+                eprintln!("[Relay] Incoming connection error: {:?}", e);
                 continue;
             }
         };
 
-        let peer =
-            stream.peer_addr()
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(
-                    |_| "unknown".to_string()
-                );
+        let peer = stream.peer_addr().map(|addr| addr.to_string()).unwrap_or_else(|_| "unknown".to_string());
+        println!("[RELAY] Client connected: {}", peer);
+        println!("[RELAY] Remote address: {}", peer);
+        println!("[RELAY] Waiting for authentication...");
 
-        println!(
-            "[RELAY] Client connected: {}",
-            peer
-        );
+        let _ = stream.set_nodelay(true);
 
-        let _ =
-            stream.set_nodelay(true);
-
-        // ----------------------------------------------------
-        // Peek first byte without consuming it.
-        // ----------------------------------------------------
-
-        let mut peek =
-            [0u8; 7];
-
-        if stream
-            .peek(&mut peek)
-            .is_err()
-        {
-            eprintln!(
-                "[Relay] Failed to inspect connection from {}",
-                peer
-            );
-
+        let mut peek = [0u8; 7];
+        if stream.peek(&mut peek).is_err() {
+            eprintln!("[Relay] Failed to inspect connection from {}", peer);
             continue;
         }
 
-        let connection_type =
-            peek[0];
-
-        let hosts_clone =
-            Arc::clone(&hosts);
-
-        // ----------------------------------------------------
-        // HOST
-        //
-        // 1 + 6 byte ID
-        // ----------------------------------------------------
+        let connection_type = peek[0];
+        let hosts_clone = Arc::clone(&hosts);
 
         match connection_type {
+            // HOST REGISTRATION (Type 1)
             1 => {
-                println!(
-                    "[Relay] Connection identified as HOST"
-                );
-
-                thread::spawn(
-                    move || {
-                        handle_host(
-                            stream,
-                            hosts_clone,
-                        );
-                    }
-                );
+                println!("[Relay] Connection identified as HOST");
+                thread::spawn(move || {
+                    handle_host(stream, hosts_clone);
+                });
             }
 
-            // ------------------------------------------------
-            // NORMAL TCP VIEWER
-            //
-            // 2 + 6 byte ID + 32 byte hash
-            // ------------------------------------------------
-
+            // NORMAL TCP VIEWER (Type 2)
             2 => {
-                println!(
-                    "[Relay] Connection identified as TCP VIEWER"
-                );
-
-                thread::spawn(
-                    move || {
-                        handle_viewer(
-                            stream,
-                            hosts_clone,
-                        );
-                    }
-                );
+                println!("[Relay] Connection identified as TCP VIEWER");
+                thread::spawn(move || {
+                    handle_viewer(stream, hosts_clone);
+                });
             }
 
-            // ------------------------------------------------
-            // WEBSOCKET VIEWER
-            //
-            // First byte of HTTP request:
-            //
-            // G = GET
-            // ASCII 71
-            // ------------------------------------------------
-
+            // WEBSOCKET VIEWER (HTTP GET)
             71 => {
-                println!(
-                    "[Relay] Connection identified as WEBSOCKET"
-                );
-
-                thread::spawn(
-                    move || {
-                        handle_websocket_viewer(
-                            stream,
-                            hosts_clone,
-                        );
-                    }
-                );
+                println!("[Relay] Connection identified as WEBSOCKET");
+                thread::spawn(move || {
+                    handle_websocket_viewer(stream, hosts_clone);
+                });
             }
-
-            // ------------------------------------------------
-            // UNKNOWN
-            // ------------------------------------------------
 
             _ => {
-                eprintln!(
-                    "[Relay] Unknown initial connection type: {}",
-                    connection_type
-                );
-
-                let mut stream =
-                    stream;
-
-                let _ =
-                    stream.shutdown(
-                        Shutdown::Both
-                    );
+                eprintln!("[Relay] Unknown initial connection type: {}", connection_type);
+                let stream = stream;
+                let _ = stream.shutdown(Shutdown::Both);
             }
         }
     }

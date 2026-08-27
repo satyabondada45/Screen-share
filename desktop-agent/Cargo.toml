@@ -27,7 +27,10 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_Registry"
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
+    "Win32_Graphics_Gdi"
 ] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
@@ -39,3 +42,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Variant"
 ] }
 openh264 = "0.9.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tungstenite = "0.20"

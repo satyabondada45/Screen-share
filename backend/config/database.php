@@ -12,8 +12,12 @@ $options = [
     PDO::ATTR_EMULATE_PREPARES   => false,
 ];
 
+date_default_timezone_set('UTC');
+
 try {
     $pdo = new PDO($dsn, $user, $pass, $options);
+    $pdo->exec("SET time_zone = '+00:00'");
+    $conn = $pdo; // Alias for backward compatibility across all modules
 } catch (\PDOException $e) {
     http_response_code(500);
     echo json_encode(["status" => "error", "message" => "Database connection failed"]);
