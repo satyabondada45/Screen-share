@@ -90,6 +90,24 @@ fn send_native_key(vk: u32, is_up: bool) {
     }
 }
 
+#[cfg(windows)]
+fn attach_thread_to_input_desktop() {
+    unsafe {
+        let hdesktop = windows_sys::Win32::System::StationsAndDesktops::OpenInputDesktop(
+            0,
+            0,
+            0x10000000u32, // GENERIC_ALL
+        );
+        if hdesktop != 0 {
+            windows_sys::Win32::System::StationsAndDesktops::SetThreadDesktop(hdesktop);
+            windows_sys::Win32::System::StationsAndDesktops::CloseDesktop(hdesktop);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_thread_to_input_desktop() {}
+
 // ============================================================
 // AUTOSTART
 // ============================================================
@@ -678,6 +696,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 is_conn_read.store(false, Ordering::SeqCst);
                                                 break;
                                             }
+                                            attach_thread_to_input_desktop();
                                             let event_type = pkt_type_buf[0];
                                             let type_name = match event_type {
                                                 0 => "MOUSE_MOVE",
@@ -688,6 +707,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 9 => "MOUSE_WHEEL",
                                                 _ => "CONTROL",
                                             };
+                                            println!("[CONTROL DEBUG][HOST RX]\ntype={}\nlength=9", type_name);
                                             println!("[AGENT CONTROL RX]\ntype={}\nbytes=9", event_type);
                                             println!("[AGENT CONTROL RX] {}", type_name);
 
@@ -701,6 +721,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 {
                                                     send_native_mouse_wheel(scroll_y);
                                                     println!("[AGENT MOUSE] injected wheel scroll={}", scroll_y);
+                                                    println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_WHEEL\nresult=success");
                                                 }
                                                 continue;
                                             }
@@ -712,6 +733,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     println!("[INPUT INJECT] keyboard event={} vk={}", if event_type == 5 { "keydown" } else { "keyup" }, key_code);
                                                     println!("[AGENT KEYBOARD]\nevent={}\nkey={}\ncode={}", if event_type == 5 { "keydown" } else { "keyup" }, key_code, key_code);
                                                     println!("[AGENT KEYBOARD] injected");
+                                                    println!("[CONTROL DEBUG][INPUT INJECTION]\ntype={}\nresult=success", if event_type == 5 { "KEY_DOWN" } else { "KEY_UP" });
                                                 }
                                                 continue;
                                             }
@@ -745,6 +767,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         println!("[INPUT INJECT] mousemove x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=none", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_MOVE\nresult=success");
                                                     }
                                                     1 => {
                                                         set_native_cursor_pos(target_x, target_y);
@@ -752,12 +775,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         println!("[INPUT INJECT] mousedown button=LEFT x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=left_down", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_DOWN\nresult=success");
                                                     }
                                                     2 => {
                                                         send_native_mouse_click(MOUSEEVENTF_LEFTUP);
                                                         println!("[INPUT INJECT] mouseup button=LEFT x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=left_up", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_UP\nresult=success");
                                                     }
                                                     3 => {
                                                         set_native_cursor_pos(target_x, target_y);
@@ -765,12 +790,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         println!("[INPUT INJECT] mousedown button=RIGHT x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=right_down", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_DOWN\nresult=success");
                                                     }
                                                     4 => {
                                                         send_native_mouse_click(MOUSEEVENTF_RIGHTUP);
                                                         println!("[INPUT INJECT] mouseup button=RIGHT x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=right_up", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_UP\nresult=success");
                                                     }
                                                     7 => {
                                                         set_native_cursor_pos(target_x, target_y);
@@ -778,12 +805,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         println!("[INPUT INJECT] mousedown button=MIDDLE x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=middle_down", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_DOWN\nresult=success");
                                                     }
                                                     8 => {
                                                         send_native_mouse_click(MOUSEEVENTF_MIDDLEUP);
                                                         println!("[INPUT INJECT] mouseup button=MIDDLE x={} y={}", target_x, target_y);
                                                         println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=middle_up", target_x, target_y);
                                                         println!("[AGENT MOUSE] injected");
+                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_UP\nresult=success");
                                                     }
                                                     _ => {}
                                                 }

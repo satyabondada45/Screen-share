@@ -452,12 +452,21 @@ fn run_websocket_bridge(
                     };
                     println!("[CONTROL RX] type={} bytes={} device={}", data[0], data.len(), session_id);
                     println!("[RELAY CONTROL RX] {}", type_name);
+                    println!("[CONTROL DEBUG][RELAY RX]\ntype={}\nlength={}", type_name, data.len());
                 }
                 // CRITICAL: control write failure is NON-FATAL
                 if !send_all(&mut host_writer, &data) {
                     eprintln!("[WS ERROR] component=ws_to_host reason=control_write_failed \
                         type={} device={}", data.first().copied().unwrap_or(255), session_id);
                     // Non-fatal: video stream continues
+                } else {
+                    if !data.is_empty() {
+                        let type_name = match data[0] {
+                            0 => "MOUSE_MOVE", 1 | 3 | 7 => "MOUSE_DOWN", 2 | 4 | 8 => "MOUSE_UP",
+                            5 => "KEY_DOWN", 6 => "KEY_UP", 9 => "MOUSE_WHEEL", _ => "CONTROL",
+                        };
+                        println!("[CONTROL DEBUG][RELAY -> HOST]\ntype={}\nlength={}", type_name, data.len());
+                    }
                 }
             }
             Ok(Message::Ping(data)) => {

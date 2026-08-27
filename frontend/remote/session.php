@@ -2886,7 +2886,7 @@ function sendMouseMove(event) {
     console.log(`[BROWSER CONTROL TX] MOUSE_MOVE`);
     console.log(`[CONTROL TX] type=MOUSE_MOVE`);
     console.log(`[CONTROL TX] bytes=9`);
-    console.log(`[CONTROL TX] device=${targetId}`);
+    console.log(`[CONTROL TX] device=${DEVICE_ID}`);
 
     const pkt = new Uint8Array(9);
     pkt[0] = 0;
@@ -2894,6 +2894,7 @@ function sendMouseMove(event) {
     pkt[2] = coords.x & 0xff;
     pkt[3] = (coords.y >> 8) & 0xff;
     pkt[4] = coords.y & 0xff;
+    console.log(`[CONTROL][BROWSER_TX]\ntype=MOUSE_MOVE\nx=${coords.x}\ny=${coords.y}`);
 
     ws.send(pkt);
 }
@@ -2927,7 +2928,7 @@ function sendMouseDown(event) {
     console.log(`[BROWSER CONTROL TX] MOUSE_DOWN`);
     console.log(`[CONTROL TX] type=MOUSE_DOWN`);
     console.log(`[CONTROL TX] bytes=9`);
-    console.log(`[CONTROL TX] device=${targetId}`);
+    console.log(`[CONTROL TX] device=${DEVICE_ID}`);
 
     const pkt = new Uint8Array(9);
     pkt[0] = type;
@@ -2965,7 +2966,7 @@ function sendMouseUp(event) {
     console.log(`[BROWSER CONTROL TX] MOUSE_UP`);
     console.log(`[CONTROL TX] type=MOUSE_UP`);
     console.log(`[CONTROL TX] bytes=9`);
-    console.log(`[CONTROL TX] device=${targetId}`);
+    console.log(`[CONTROL TX] device=${DEVICE_ID}`);
 
     const pkt = new Uint8Array(9);
     pkt[0] = type;
@@ -2994,7 +2995,7 @@ function sendMouseWheel(event) {
     console.log(`[BROWSER CONTROL TX] MOUSE_WHEEL`);
     console.log(`[CONTROL TX] type=MOUSE_WHEEL`);
     console.log(`[CONTROL TX] bytes=9`);
-    console.log(`[CONTROL TX] device=${targetId}`);
+    console.log(`[CONTROL TX] device=${DEVICE_ID}`);
 
     const scroll = event.deltaY > 0 ? -120 : 120;
     const pkt = new Uint8Array(9);
@@ -3030,7 +3031,7 @@ function sendKeyboard(event, type) {
 
     console.log(`[CONTROL TX] type=${typeName}`);
     console.log(`[CONTROL TX] bytes=9`);
-    console.log(`[CONTROL TX] device=${targetId}`);
+    console.log(`[CONTROL TX] device=${DEVICE_ID}`);
 
     const pkt = new Uint8Array(9);
     pkt[0] = type;
@@ -3038,6 +3039,7 @@ function sendKeyboard(event, type) {
     pkt[2] = (keyCode >> 16) & 0xff;
     pkt[3] = (keyCode >> 8) & 0xff;
     pkt[4] = keyCode & 0xff;
+    console.log(`[CONTROL][BROWSER_TX]\ntype=${typeName}\nkey=${event.key}\ncode=${keyCode}`);
 
     ws.send(pkt);
 }
