@@ -1239,6 +1239,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 // ============================================================
 
 fn main() {
+    let _single_instance_guard = match std::net::TcpListener::bind("127.0.0.1:49182") {
+        Ok(listener) => listener,
+        Err(_) => {
+            println!("[Agent] Another instance of DeskStream agent is already running. Exiting.");
+            std::process::exit(0);
+        }
+    };
+
     set_process_dpi_aware();
 
     let args: Vec<String> = env::args().collect();

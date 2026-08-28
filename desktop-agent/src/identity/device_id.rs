@@ -37,7 +37,6 @@ impl AgentConfig {
         self.app_mode.to_lowercase() == "server"
     }
 
-    /// Loads an existing config from canonical LocalAppData, verifying hardware MachineGuid consistency.
     pub fn load_or_create(_unused_config_path: &str, default_relay: &str) -> Self {
         // 1. Obtain permanent hardware UUID for this physical machine directly from Windows registry / OS
         let hardware_uuid = get_permanent_machine_uuid();
@@ -45,19 +44,25 @@ impl AgentConfig {
             .or_else(|_| env::var("HOSTNAME"))
             .unwrap_or_else(|_| "Desktop-PC".to_string());
 
-        let deterministic_id = generate_deterministic_system_id(&hardware_uuid);
+        // Combine hostname and hardware UUID for better uniqueness on cloned machines
+        let combined_hardware = format!("{}-{}", hardware_uuid, hostname);
+        let deterministic_id = generate_deterministic_system_id(&combined_hardware);
 
         // 2. Try loading from canonical LocalAppData directory
         if let Some(canonical_path) = Self::canonical_config_path() {
             if let Some(mut cfg) = Self::try_read_config(canonical_path.to_str().unwrap_or_default()) {
                 let mut dirty = false;
-                if cfg.device_uuid != hardware_uuid {
+                
+                // Do not blindly overwrite cfg.device_uuid with hardware_uuid. 
+                // This prevents cloned machines from adopting the master image's ID.
+                if cfg.device_uuid.is_empty() {
                     cfg.device_uuid = hardware_uuid.clone();
                     dirty = true;
                 }
-                // Preserve persistent system_id if already present in config, otherwise use deterministic_id
+                
+                // Preserve persistent system_id if already present in config
                 if cfg.system_id.is_empty() {
-                    cfg.system_id = deterministic_id;
+                    cfg.system_id = generate_deterministic_system_id(&format!("{}-{}", cfg.device_uuid, hostname));
                     dirty = true;
                 }
                 if cfg.relay_addr.is_empty() || cfg.relay_addr == "127.0.0.1:9001" {
@@ -87,7 +92,7 @@ impl AgentConfig {
             }
         }
 
-        // 3. First launch on this machine: create new config anchored to hardware UUID
+        // 3. First launch on this machine: create new config
         println!("[IDENTITY] No persistent identity found");
         println!("[IDENTITY] Generated Device ID: {}", deterministic_id);
         println!("[IDENTITY] MachineGuid: {}", hardware_uuid);
