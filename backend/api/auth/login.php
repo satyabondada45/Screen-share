@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(["status" => "error", "success" => false, "message" => "All fields are required."]);
             exit();
         }
-        header("Location: ../../../frontend/login.php?error=" . urlencode("All fields are required."));
+        header("Location: ../../../frontend/index.php?error=" . urlencode("All fields are required."));
         exit();
     }
 
@@ -101,20 +101,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(["status" => "error", "success" => false, "message" => "Invalid email or password."]);
                 exit();
             }
-            header("Location: ../../../frontend/login.php?error=" . urlencode("Invalid email or password."));
+            header("Location: ../../../frontend/index.php?error=" . urlencode("Invalid email or password."));
             exit();
         }
 
-    } catch (PDOException $e) {
+    } catch (\PDOException $e) {
         if ($isJson) {
             http_response_code(500);
             echo json_encode(["status" => "error", "success" => false, "message" => "Database error: " . $e->getMessage()]);
             exit();
         }
-        header("Location: ../../../frontend/login.php?error=" . urlencode("Database error: " . $e->getMessage()));
+        header("Location: ../../../frontend/index.php?error=" . urlencode("Database error: " . $e->getMessage()));
         exit();
     }
 } else {
-    header("Location: ../../../frontend/login.php");
+    header("Location: ../../../frontend/index.php");
     exit();
 }

@@ -27,7 +27,7 @@ try {
     $stmt = $pdo->prepare("
         UPDATE devices 
         SET is_online = 1, last_seen_at = NOW() 
-        WHERE (system_id = ? OR device_uid = ?) OR (machine_identifier IS NOT NULL AND machine_identifier = ?)
+        WHERE (system_id = ? OR device_uid = ?) OR (machine_identifier != '' AND machine_identifier IS NOT NULL AND machine_identifier = ?)
     ");
     $stmt->execute([$systemId, $systemId, $machineId]);
     $affected = $stmt->rowCount();

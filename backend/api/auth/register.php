@@ -91,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         // Redirect to login with success message
-        header("Location: ../../../frontend/login.php?success=" . urlencode("Registration successful! Please login."));
+        header("Location: ../../../frontend/index.php?success=" . urlencode("Registration successful! Please login."));
         exit();
 
     } catch (PDOException $e) {

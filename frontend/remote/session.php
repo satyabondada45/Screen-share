@@ -5,7 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // Require authenticated user session
 if (empty($_SESSION['user_id'])) {
-    header("Location: ../login.php");
+    header("Location: ../index.php");
     exit();
 }
 
@@ -48,9 +48,40 @@ if (!$device) {
 $deviceName = $device['name'] ?? 'Unknown Device';
 $isOnline = !empty($device['is_online']);
 
+// Requested Step 2: Log both identifiers to verify routing
+$accountId = $_SESSION['user_id'];
+$requestedId = $cleanId;
+$systemId = $device['system_id'] ?: $device['device_uid'];
+?>
+<!-- DIAGNOSTIC LOGS -->
+<script>
+    console.log("[SESSION DEBUG]");
+    console.log("Account ID = <?= htmlspecialchars($accountId) ?>");
+    console.log("Requested Device ID = <?= htmlspecialchars($requestedId) ?>");
+    console.log("Registered System ID = <?= htmlspecialchars($systemId) ?>");
+</script>
 $sessionCode = strlen($cleanId) === 9
     ? substr($cleanId, 0, 3) . ' ' . substr($cleanId, 3, 3) . ' ' . substr($cleanId, 6, 3)
     : (strlen($cleanId) > 3 ? substr($cleanId, 0, 3) . '-' . substr($cleanId, 3) : $cleanId);
+
+// ─── Relay Host Resolution ────────────────────────────────────────────────────
+// 1. Try explicitly configured host
+$relayConfigPath = __DIR__ . '/../../backend/config/relay.php';
+if (file_exists($relayConfigPath)) {
+    require_once $relayConfigPath;
+}
+
+if (defined('RELAY_SERVER_HOST')) {
+    $relayServerAddr = RELAY_SERVER_HOST;
+} else {
+    // 2. Dynamic discovery from web server
+    $relayServerAddr = $_SERVER['SERVER_ADDR'] ?? '';
+    if (empty($relayServerAddr) || $relayServerAddr === '::1' || $relayServerAddr === '127.0.0.1') {
+        $httpHost = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $relayServerAddr = strtok($httpHost, ':');
+    }
+}
+$relayWsHost = $relayServerAddr; // PHP string injected into JS
 ?>
 <!DOCTYPE html>
 
@@ -686,14 +717,22 @@ $sessionCode = strlen($cleanId) === 9
 
         const DEVICE_ID =
             <?= json_encode(
-                $deviceUid,
+                $device['system_id'] ?: $device['device_uid'],
                 JSON_UNESCAPED_SLASHES
             ) ?>;
 
         const WS_PORT = "9001";
-        const WS_HOST = location.hostname || "192.168.29.229";
+        // Get the real relay IP injected from PHP configuration
+        const WS_HOST_PHP = <?= json_encode($relayWsHost) ?>;
+        
+        // Use the configured/detected server IP. We never want "localhost" 
+        // if this is a remote viewer.
+        const WS_HOST = (WS_HOST_PHP && WS_HOST_PHP !== 'localhost' && WS_HOST_PHP !== '::1') 
+            ? WS_HOST_PHP 
+            : location.hostname;
+
         const WS_URL = location.protocol === "https:"
-            ? `wss://${location.host}/ws`
+            ? `wss://${WS_HOST}:${WS_PORT}`
             : `ws://${WS_HOST}:${WS_PORT}`;
 
 
@@ -702,6 +741,7 @@ $sessionCode = strlen($cleanId) === 9
         ============================================================ */
 
         let ws = null;
+        let wsRxBuffer = new Uint8Array(0);
 
         let isStreaming = false;
 
@@ -1594,6 +1634,12 @@ $sessionCode = strlen($cleanId) === 9
                                 addActivityLog(`Resolution changed to ${renderWidth}x${renderHeight}`);
                             }
 
+                            if (!window._display_logged) {
+                                console.log(`[DISPLAY]\nframeWidth = ${frame.displayWidth}\nframeHeight = ${frame.displayHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
+                                console.log("[DISPLAY] Frame rendered");
+                                window._display_logged = true;
+                            }
+
                             // Temporary Diagnostic: verify if decoded VideoFrame has non-black content
                             if (videoFrameCount <= 3) {
                                 try {
@@ -1637,6 +1683,10 @@ $sessionCode = strlen($cleanId) === 9
                         setStreamState("ERROR");
                     }
                 });
+                
+                if (window._rx_count <= 5) {
+                    console.log(`[DECODER]\nconfigured = ${videoDecoder ? 'YES' : 'NO'}\nstate = ${decoderState}\ndecodeQueueSize = ${videoDecoder ? videoDecoder.decodeQueueSize : 0}`);
+                }
                 return true;
             } catch (err) {
                 console.error("[VIDEO FATAL] Failed to construct VideoDecoder:", err);
@@ -1648,8 +1698,9 @@ $sessionCode = strlen($cleanId) === 9
         async function handleVideoPacket(buffer) {
             const bytes = new Uint8Array(buffer);
             const length = bytes.length;
+            window._rx_count = (window._rx_count || 0) + 1;
 
-            if (length < 13) {
+            if (length < 21) {
                 console.warn("[VIDEO] Packet too small:", length);
                 return;
             }
@@ -1665,8 +1716,14 @@ $sessionCode = strlen($cleanId) === 9
             const width = view.getUint32(1, false);
             const height = view.getUint32(5, false);
             const payloadSize = view.getUint32(9, false);
+            const captureTimestamp = Number(view.getBigUint64(13, false));
 
-            const available = length - 13;
+            const available = length - 21;
+
+            if (window._rx_count <= 5) {
+                console.log(`[VIDEO PARSER]\ntype = ${packetType}\nwidth = ${width}\nheight = ${height}\npayloadSize = ${payloadSize}\navailable = ${available}\npacketSize = ${length}`);
+            }
+
             if (payloadSize <= 0 || payloadSize > available) {
                 console.error(
                     "[VIDEO] Invalid H.264 payload size.",
@@ -1676,12 +1733,17 @@ $sessionCode = strlen($cleanId) === 9
             }
 
             const actualPayloadSize = (payloadSize > 0 && payloadSize <= available) ? payloadSize : available;
-            const h264Payload = bytes.slice(13, 13 + actualPayloadSize);
+            const h264Payload = bytes.slice(21, 21 + actualPayloadSize);
 
             streamStats.received_packets++;
             streamStats.received_bytes += actualPayloadSize;
             browserPerf.rxPackets++;
 
+            const receiveTime = Date.now();
+            const networkLatency = receiveTime - captureTimestamp;
+            const decodeQueue = videoDecoder ? videoDecoder.decodeQueueSize : 0;
+            
+            console.log(`[LATENCY] Capture->Browser: ${networkLatency}ms | DecodeQueue: ${decodeQueue}`);
             console.log(`[BROWSER VIDEO] width=${width} height=${height} h264_size=${actualPayloadSize}`);
 
             // Capability Detection BEFORE using VideoDecoder
@@ -1699,6 +1761,13 @@ $sessionCode = strlen($cleanId) === 9
 
             // STEP 2: NAL Parsing & Parameter Set Caching
             const nals = parseH264Nals(h264Payload);
+            
+            if (window._rx_count <= 5) {
+                console.log(`[VIDEO] SPS received = ${nals.hasSPS ? 'YES' : 'NO'}`);
+                console.log(`[VIDEO] PPS received = ${nals.hasPPS ? 'YES' : 'NO'}`);
+                console.log(`[VIDEO] IDR received = ${nals.hasIDR ? 'YES' : 'NO'}`);
+            }
+
             if (nals.hasSPS && nals.spsUnit) {
                 cachedSPS = nals.spsUnit;
             }
@@ -1710,7 +1779,7 @@ $sessionCode = strlen($cleanId) === 9
             const hasSPS = (cachedSPS !== null || nals.hasSPS);
             const hasPPS = (cachedPPS !== null || nals.hasPPS);
             const hasIDR = nals.hasIDR;
-            const isKey = hasIDR && hasSPS && hasPPS;
+            const isKey = (hasIDR || (nals.hasSPS && nals.hasPPS)) && hasSPS && hasPPS;
 
             const keyDeltaStr = isKey ? "key" : "delta";
             console.log(`[BROWSER H264]\npacket_size=${length}\nreassembled_size=${actualPayloadSize}\nNAL types=[${nals.nalTypes.join(',')}]\nSPS=${hasSPS}\nPPS=${hasPPS}\nIDR=${hasIDR}\nkey/delta=${keyDeltaStr}`);
@@ -1777,6 +1846,7 @@ $sessionCode = strlen($cleanId) === 9
                         data: annexBKeyframe
                     });
                     videoDecoder.decode(chunk);
+                    console.log("[DECODER] First keyframe submitted");
                 } catch (e) {
                     console.error("[BROWSER DECODER ERROR] decode(key) exception:", e);
                     decoderState = DecoderState.ERROR;
@@ -1784,10 +1854,15 @@ $sessionCode = strlen($cleanId) === 9
                 return;
             }
 
-            // State Handling: DECODING
             if (decoderState === DecoderState.DECODING) {
                 const chunkType = isKey ? 'key' : 'delta';
                 const chunkData = isKey ? prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS) : h264Payload;
+
+                // BACKPRESSURE: If the decoder is falling behind, drop stale delta frames to remain near-real-time.
+                if (videoDecoder && videoDecoder.decodeQueueSize > 5 && chunkType === 'delta') {
+                    console.warn(`[WEBCODECS BACKPRESSURE] Dropping delta frame. Queue size: ${videoDecoder.decodeQueueSize}`);
+                    return; // Skip decoding this frame
+                }
 
                 console.log(`[WEBCODECS DECODE]\ntype=${chunkType}\ntimestamp=${timestamp}\nbytes=${chunkData.byteLength}\nNAL types=[${nals.nalTypes.join(',')}]`);
 
@@ -2068,107 +2143,109 @@ $sessionCode = strlen($cleanId) === 9
         ============================================================ */
 
         async function handleMessage(event) {
-            let buffer;
+            let chunk;
             if (event.data instanceof ArrayBuffer) {
-                buffer = event.data;
+                chunk = new Uint8Array(event.data);
             } else if (event.data instanceof Blob) {
-                buffer = await event.data.arrayBuffer();
+                chunk = new Uint8Array(await event.data.arrayBuffer());
             } else {
                 console.warn("[WS] Non-binary message:", event.data);
                 return;
             }
 
-            if (!buffer || buffer.byteLength === 0) {
-                return;
-            }
+            if (chunk.length === 0) return;
 
-            const type =
-                new Uint8Array(buffer)[0];
+            // Append new chunk to persistent buffer
+            const newBuf = new Uint8Array(wsRxBuffer.length + chunk.length);
+            newBuf.set(wsRxBuffer);
+            newBuf.set(chunk, wsRxBuffer.length);
+            wsRxBuffer = newBuf;
 
-            console.log(`[WS RX] packet type=${type}`);
-            console.log(`[WS RX] bytes=${buffer.byteLength}`);
-            if (type === 13 || type === 15) {
-                console.log(`[VIDEO RX] packet type=${type} bytes=${buffer.byteLength}`);
-            } else {
-                console.log(`[CONTROL RX] packet type=${type}`);
-            }
-            console.log(`[BROWSER RX] packet type=${type} bytes=${buffer.byteLength}`);
+            // Process fully formed packets in the buffer
+            while (wsRxBuffer.length > 0) {
+                const type = wsRxBuffer[0];
+                
+                if (type === 13 || type === 15) {
+                    // Video Packet (Type 13 / 15)
+                    // Header: 1 (type) + 4 (width) + 4 (height) + 4 (size) + 8 (timestamp) = 21 bytes
+                    if (wsRxBuffer.length < 21) {
+                        return; // Wait for full header
+                    }
+                    const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                    const payloadSize = view.getUint32(9, false);
+                    const totalPacketSize = 21 + payloadSize;
 
+                    if (wsRxBuffer.length < totalPacketSize) {
+                        return; // Wait for full payload
+                    }
 
-            /*
-             * TYPE 99
-             * STREAM STATUS
-             */
-
-            if (type === 2) {
-                console.log("[VIDEO] Stream-active packet received.");
-                setStreamState("STREAM_ACTIVE");
-                return;
-            }
-
-
-            /*
-             * TYPE 13 or TYPE 15
-             * H.264 VIDEO FRAME
-             *
-             * Header: 1 byte type + 12 bytes (width:u32, height:u32, size:u32)
-             */
-
-            if (type === 13 || type === 15) {
-                await handleVideoPacket(
-                    buffer
-                );
-                return;
-            }
-
-
-            /*
-             * TYPE 17
-             * AUDIO
-             */
-
-            if (type === 17) {
-                handleAudioPacket(
-                    buffer
-                );
-                return;
-            }
-
-
-            /*
-             * TYPE 14
-             * HEARTBEAT / PING
-             */
-
-            if (type === 14) {
-                if (videoFrameCount === 0 && currentStreamState === "CONNECTING") {
-                    setStreamState("STREAM_ACTIVE");
+                    const packetBuffer = wsRxBuffer.buffer.slice(wsRxBuffer.byteOffset, wsRxBuffer.byteOffset + totalPacketSize);
+                    await handleVideoPacket(packetBuffer);
+                    
+                    wsRxBuffer = wsRxBuffer.slice(totalPacketSize);
+                    continue;
                 }
-                return;
+                else if (type === 17) {
+                    // Audio Packet (Type 17)
+                    // Header: 1 (type) + 4 (size) + 4 (rate) + 2 (channels) = 11 bytes
+                    if (wsRxBuffer.length < 11) {
+                        return;
+                    }
+                    const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                    const payloadSize = view.getUint32(1, false);
+                    const totalPacketSize = 11 + payloadSize;
+
+                    if (wsRxBuffer.length < totalPacketSize) {
+                        return;
+                    }
+
+                    const packetBuffer = wsRxBuffer.buffer.slice(wsRxBuffer.byteOffset, wsRxBuffer.byteOffset + totalPacketSize);
+                    handleAudioPacket(packetBuffer);
+                    
+                    wsRxBuffer = wsRxBuffer.slice(totalPacketSize);
+                    continue;
+                }
+                else if (type === 16) {
+                    // Chat Packet (Type 16)
+                    // Header: 1 (type) + 2 (size) = 3 bytes
+                    if (wsRxBuffer.length < 3) {
+                        return;
+                    }
+                    const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                    const payloadSize = (view.getUint8(1) << 8) | view.getUint8(2);
+                    const totalPacketSize = 3 + payloadSize;
+
+                    if (wsRxBuffer.length < totalPacketSize) {
+                        return;
+                    }
+
+                    const packetBuffer = wsRxBuffer.buffer.slice(wsRxBuffer.byteOffset, wsRxBuffer.byteOffset + totalPacketSize);
+                    handleChatPacket(packetBuffer);
+                    
+                    wsRxBuffer = wsRxBuffer.slice(totalPacketSize);
+                    continue;
+                }
+                else if (type === 2) {
+                    // Stream Active
+                    setStreamState("STREAM_ACTIVE");
+                    wsRxBuffer = wsRxBuffer.slice(1);
+                    continue;
+                }
+                else if (type === 14) {
+                    // Heartbeat
+                    if (videoFrameCount === 0 && currentStreamState === "CONNECTING") {
+                        setStreamState("STREAM_ACTIVE");
+                    }
+                    wsRxBuffer = wsRxBuffer.slice(1);
+                    continue;
+                }
+                else {
+                    // Unknown packet. Discard the first byte and attempt to resync.
+                    console.debug("[WS] Unknown packet type:", type);
+                    wsRxBuffer = wsRxBuffer.slice(1);
+                    continue;
+                }
             }
-
-            /*
-             * TYPE 16
-             * CHAT
-             */
-
-            if (type === 16) {
-
-                handleChatPacket(
-                    buffer
-                );
-
-                return;
-
-            }
-
-
-            console.debug(
-                "[WS] Unknown packet:",
-                type,
-                buffer.byteLength
-            );
-
         }
 
 
@@ -2206,6 +2283,15 @@ $sessionCode = strlen($cleanId) === 9
         ============================================================ */
 
         function startWebStream() {
+            console.log(`[SESSION] page loaded`);
+            console.log(`[SESSION] authenticated user = <?= json_encode($_SESSION['user_id'] ?? null) ?>`);
+            console.log(`[SESSION] session id = <?= json_encode(session_id()) ?>`);
+
+            console.log("[AUTH DEBUG] startWebStream called");
+            console.log("[AUTH DEBUG] WebSocket created");
+            console.log(`[SESSION] target device = <?= json_encode($_GET['id'] ?? null) ?>`);
+            console.log(`[SESSION] relay URL = ${WS_URL}`);
+            console.log(`[WS] Attempting:\n${WS_URL}`);
 
             if (isStreaming) {
 
@@ -2328,16 +2414,17 @@ $sessionCode = strlen($cleanId) === 9
             ws.onopen =
                 function () {
 
-                    console.log(
-                        "[WS] Connected:",
-                        WS_URL
-                    );
+                    console.log("[AUTH DEBUG] WebSocket OPEN");
+                    console.log("[WS] OPEN");
 
                     setHud(
                         "AUTHENTICATING..."
                     );
 
+                    console.log("[AUTH DEBUG] Sending auth");
                     sendInitializationPacket();
+                    console.log("[AUTH DEBUG] Auth sent");
+                    console.log("[AUTH DEBUG] Waiting for authentication response");
 
                 };
 
@@ -2364,6 +2451,7 @@ $sessionCode = strlen($cleanId) === 9
             ws.onclose =
                 function (event) {
 
+                    console.log(`[AUTH DEBUG] WebSocket CLOSED\ncode: ${event.code}\nreason: ${event.reason || 'none'}\nwasClean: ${event.wasClean}`);
                     console.log(
                         "[WS] Closed:",
                         event.code,

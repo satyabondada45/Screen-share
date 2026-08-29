@@ -8,9 +8,14 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // Ensure user is authenticated before accessing dashboard
 if (empty($_SESSION['user_id'])) {
-    header("Location: login.php");
+    header("Location: index.php");
     exit();
 }
+
+// Prevent browser caching of the authenticated dashboard
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Cache-Control: post-check=0, pre-check=0", false);
+header("Pragma: no-cache");
 
 $dbPath = __DIR__ . '/../backend/config/database.php';
 if (!file_exists($dbPath)) {
@@ -40,42 +45,52 @@ if ($pdo) {
             WHERE (last_seen_at IS NULL OR last_seen_at < (NOW() - INTERVAL 30 SECOND)) AND is_online = 1
         ");
 
-        if ($currentUserId) {
-            // First check if user has a registered device with valid physical machine_identifier
+        $cookieDeviceId = $_COOKIE['local_device_id'] ?? null;
+
+        // Try 1: Cookie + user_id match (most specific)
+        if ($cookieDeviceId && $currentUserId) {
             $stmt = $pdo->prepare("
-                SELECT *, 
-                       (last_seen_at >= (NOW() - INTERVAL 30 SECOND) AND is_online = 1) AS is_live_online 
+                SELECT *, (last_seen_at >= (NOW() - INTERVAL 30 SECOND) AND is_online = 1) AS is_live_online 
                 FROM devices 
-                WHERE user_id = ? AND machine_identifier IS NOT NULL
-                ORDER BY is_live_online DESC, last_seen_at DESC, id ASC 
-                LIMIT 1
+                WHERE (system_id = ? OR device_uid = ?) AND user_id = ? LIMIT 1
+            ");
+            $stmt->execute([$cookieDeviceId, $cookieDeviceId, $currentUserId]);
+            $hostDevice = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        // Try 2: Cookie only (device may not be linked to this user yet)
+        if (!$hostDevice && $cookieDeviceId) {
+            $stmt = $pdo->prepare("
+                SELECT *, (last_seen_at >= (NOW() - INTERVAL 30 SECOND) AND is_online = 1) AS is_live_online 
+                FROM devices 
+                WHERE (system_id = ? OR device_uid = ?) LIMIT 1
+            ");
+            $stmt->execute([$cookieDeviceId, $cookieDeviceId]);
+            $hostDevice = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            // Link the device to this user if it hasn't been claimed yet
+            if ($hostDevice && empty($hostDevice['user_id']) && $currentUserId) {
+                $upd = $pdo->prepare("UPDATE devices SET user_id = ? WHERE id = ?");
+                $upd->execute([$currentUserId, $hostDevice['id']]);
+                $hostDevice['user_id'] = $currentUserId;
+            }
+        }
+
+        // Try 3: If no valid cookie, just load the most recently seen device belonging to this user account
+        if (!$hostDevice && $currentUserId) {
+            $stmt = $pdo->prepare("
+                SELECT *, (last_seen_at >= (NOW() - INTERVAL 30 SECOND) AND is_online = 1) AS is_live_online 
+                FROM devices 
+                WHERE user_id = ? 
+                ORDER BY last_seen_at DESC LIMIT 1
             ");
             $stmt->execute([$currentUserId]);
             $hostDevice = $stmt->fetch(PDO::FETCH_ASSOC);
         }
 
-        // If no user-specific device found, look for active computer on local machine or most recent active device
-        if (!$hostDevice) {
-            $clientIp = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-            $stmt = $pdo->prepare("
-                SELECT *, 
-                       (last_seen_at >= (NOW() - INTERVAL 30 SECOND) AND is_online = 1) AS is_live_online 
-                FROM devices 
-                WHERE machine_identifier IS NOT NULL
-                  AND (ip_address = ? OR ip_address = '127.0.0.1' OR ip_address = '::1')
-                ORDER BY is_live_online DESC, last_seen_at DESC, id DESC 
-                LIMIT 1
-            ");
-            $stmt->execute([$clientIp]);
-            $hostDevice = $stmt->fetch(PDO::FETCH_ASSOC);
+        // No valid local device found. PHP will show 'Connecting...' and JS will 
+        // fetch the real ID from the local agent, set the cookie, and update the UI.
 
-            // Associate user to device if found without changing device's system_id
-            if ($hostDevice && $currentUserId && empty($hostDevice['user_id'])) {
-                $pdo->prepare("UPDATE devices SET user_id = ? WHERE id = ?")
-                    ->execute([$currentUserId, $hostDevice['id']]);
-                $hostDevice['user_id'] = $currentUserId;
-            }
-        }
 
         // Fetch other workstations (excluding this computer) for Recent Sessions grid
         if ($hostDevice && !empty($hostDevice['id'])) {
@@ -1380,7 +1395,7 @@ function getRelativeTime($timestamp)
                         title="Sign out">Logout</a>
                 </div>
             <?php else: ?>
-                <a href="login.php"
+                <a href="index.php"
                     style="font-size: 0.84rem; font-weight: 600; color: #2563eb; text-decoration: none;">Sign In</a>
             <?php endif; ?>
 
@@ -1537,24 +1552,8 @@ function getRelativeTime($timestamp)
                         </div>
                     </div>
 
-                    <div class="connection-ready-badge" id="hostStatusBadge" style="cursor:pointer;" onclick="if(!isHostOnlineGlobal) startDesktopAgent();">
-                        <?php if ($isHostOnline): ?>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2.5">
-                                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                                <polyline points="9 12 11 14 15 10" />
-                            </svg>
-                            <span>Ready for connections</span>
-                        <?php else: ?>
-                            <span style="color:#64748b; display:inline-flex; align-items:center; gap:6px;">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <circle cx="12" cy="12" r="10"/>
-                                    <line x1="12" y1="8" x2="12" y2="12"/>
-                                    <line x1="12" y1="16" x2="12.01" y2="16"/>
-                                </svg>
-                                Agent Offline (Start Desktop Agent)
-                            </span>
-                        <?php endif; ?>
+                    <div class="connection-ready-badge" id="hostStatusBadge">
+                        <!-- Content dynamically populated by JS -->
                     </div>
                 </div>
 
@@ -2165,77 +2164,136 @@ function getRelativeTime($timestamp)
             return String(id || '').replace(/[^0-9]/g, '');
         }
 
-        async function startDesktopAgent() {
-            console.log("[AGENT UI] Starting Desktop Agent");
-            console.log("[AGENT UI] Agent executable: dist/DeskStream.exe");
-            showToast("Starting Desktop Agent in background...");
-
+        async function checkLocalAgentStatus() {
             try {
-                const res = await fetch('../backend/api/agent/launch.php', { method: 'POST' });
-                const data = await res.json();
-                if (data.status === 'success') {
-                    if (data.already_running) {
-                        console.log("[AGENT UI] Agent process already running (PID: " + data.pid + ")");
-                        showToast("DeskStream Agent is already running (PID: " + data.pid + ")");
-                    } else {
-                        console.log("[AGENT UI] Agent process started");
-                        console.log("[AGENT UI] PID: " + data.pid);
-                        showToast("Desktop Agent started (PID: " + data.pid + ")");
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 1000);
+                const res = await fetch('http://127.0.0.1:49182/health', { signal: controller.signal });
+                clearTimeout(timeoutId);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.system_id) {
+                        return data;
                     }
-                    setTimeout(() => fetchAllDevices(true), 1000);
-                } else {
-                    console.error("[AGENT UI] Failed to start agent:", data.message);
-                    showToast("Failed to start Desktop Agent: " + data.message);
                 }
-            } catch (err) {
-                console.warn("[AGENT UI] Launch API failed, trying deskstream:// custom protocol...", err);
-                window.location.href = 'deskstream://open';
+            } catch (e) { }
+            return null;
+        }
+
+        function updateHostBadge(state) {
+            const badge = document.getElementById('hostStatusBadge');
+            if (!badge) return;
+            if (state === 'online') {
+                badge.innerHTML = `
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                        <polyline points="9 12 11 14 15 10" />
+                    </svg>
+                    <span> Agent Online</span>
+                `;
+            } else if (state === 'offline') {
+                badge.innerHTML = `
+                    <span style="color:#64748b; display:inline-flex; align-items:center; gap:6px;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" y1="8" x2="12" y2="12"/>
+                            <line x1="12" y1="16" x2="12.01" y2="16"/>
+                        </svg>
+                        Agent Offline
+                    </span>
+                    <button class="topbar-tab-btn" style="margin-left:auto; background:var(--bg-card); color:var(--text-dark); cursor:pointer;" onclick="startDesktopAgent()">
+                        Start Agent
+                    </button>
+                `;
+            } else if (state === 'not_installed') {
+                badge.innerHTML = `
+                    <span style="color:#ef4444; display:inline-flex; align-items:center; gap:6px;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                            <line x1="12" y1="9" x2="12" y2="13"/>
+                            <line x1="12" y1="17" x2="12.01" y2="17"/>
+                        </svg>
+                        Agent Not Installed
+                    </span>
+                    <a href="downloads/DeskStream-Agent-Installer.zip" class="topbar-tab-btn" style="margin-left:auto; background:var(--primary); color:#fff; cursor:pointer; text-decoration:none;">
+                        Download Installer
+                    </a>
+                `;
             }
+        }
+
+        async function startDesktopAgent() {
+            console.log("[AGENT UI] Triggering DeskStream native launcher...");
+            showToast("Opening DeskStream Agent...");
+
+            // Invoke the custom protocol registered by the installer on the local Windows machine
+            window.location.href = 'deskstream://open';
+
+            setTimeout(() => {
+                showToast("If nothing happens, ensure the DeskStream Agent is installed.");
+                fetchAllDevices(true);
+            }, 3000);
         }
 
         // 10. Live Polling Engine (Queries Database via API every 3 seconds)
         async function fetchAllDevices(isManual = false) {
             try {
                 const res = await fetch('../backend/api/devices/list.php');
+                if (res.status === 401) {
+                    window.location.href = 'index.php';
+                    return;
+                }
                 if (!res.ok) throw new Error('API offline');
                 const data = await res.json();
 
                 if (data.status === 'success' && Array.isArray(data.devices)) {
                     registeredDevicesList = data.devices;
 
-                    // If host UID is not set or was connecting, check if our machine has registered
-                    if (!currentHostUid || currentHostUid === 'Connecting...') {
-                        const localDev = data.devices.find(d => d.ip_address === '127.0.0.1' || d.ip_address === '::1');
-                        if (localDev) {
-                            currentHostUid = localDev.system_id || localDev.device_uid;
-                            document.getElementById('mainHostId').innerText = formatId(currentHostUid);
-                            document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
-                            if (localDev.name) {
-                                document.getElementById('mainHostAlias').innerText = localDev.name;
-                                document.getElementById('sidebarAliasDisplay').innerText = localDev.name;
-                            }
-                        }
+                    let isOnline = false;
+
+                    // 1. Ask the local agent who it REALLY is to prevent account-level hijacking
+                    const localAgent = await checkLocalAgentStatus();
+                    console.log('[DEVICE TRACE] Step 1 - Local agent response:', localAgent);
+                    console.log('[DEVICE TRACE] Step 2 - currentHostUid BEFORE agent check:', currentHostUid);
+                    if (localAgent && localAgent.system_id) {
+                        currentHostUid = localAgent.system_id;
+                        document.cookie = "local_device_id=" + currentHostUid + "; path=/; max-age=31536000"; // 1 year
+                    }
+                    console.log('[DEVICE TRACE] Step 3 - currentHostUid AFTER agent check:', currentHostUid);
+                    console.log('[DEVICE TRACE] Step 4 - All devices from API:', data.devices.map(d => ({ id: d.system_id, name: d.name, online: d.is_online })));
+
+                    // 2. Fetch the true presence from the database payload for whichever device is 'This Device'
+                    const dbHostDev = currentHostUid ? data.devices.find(d => cleanId(d.system_id) === cleanId(currentHostUid) || cleanId(d.device_uid) === cleanId(currentHostUid)) : null;
+
+                    if (dbHostDev) {
+                        // The device exists in the database
+                        currentHostUid = dbHostDev.system_id || dbHostDev.device_uid;
+                        document.getElementById('mainHostId').innerText = formatId(currentHostUid);
+                        document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
+
+                        const alias = dbHostDev.name || 'Workstation';
+                        document.getElementById('mainHostAlias').innerText = alias;
+                        document.getElementById('hostAliasInput').value = alias;
+
+                        isOnline = (dbHostDev.is_online === 1 || dbHostDev.is_online === true);
+                        updateHostBadge(isOnline ? 'online' : 'offline');
+                    } else if (currentHostUid && currentHostUid !== 'Connecting...') {
+                        // The agent provided an ID, but it hasn't registered in the DB yet (or we haven't fetched it)
+                        document.getElementById('mainHostId').innerText = formatId(currentHostUid);
+                        document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
+                        document.getElementById('mainHostAlias').innerText = 'Registering...';
+                        isOnline = true; // Local agent is running
+                        updateHostBadge('online');
+                    } else {
+                        // No local agent, no cookie, nothing.
+                        document.getElementById('mainHostId').innerText = 'Not Installed';
+                        document.getElementById('sidebarIdDisplay').innerText = 'Not Installed';
+                        document.getElementById('mainHostAlias').innerText = 'Agent Not Installed';
+                        isOnline = false;
+                        updateHostBadge('not_installed');
                     }
 
-                    // Dynamically update "This Device" readiness badge
-                    if (currentHostUid && currentHostUid !== 'Connecting...') {
-                        const myDev = data.devices.find(d => cleanId(d.system_id) === cleanId(currentHostUid) || cleanId(d.device_uid) === cleanId(currentHostUid));
-                        const isOnline = myDev && (myDev.is_online == 1 || myDev.is_online === true);
-                        isHostOnlineGlobal = isOnline;
-
-                        if (isOnline) {
-                            console.log("[STATUS] Backend returned agent = ONLINE");
-                            console.log("[STATUS] Device ID = " + myDev.system_id);
-                            console.log("[UI] Updating agent status = ONLINE");
-                        }
-
-                        const badge = document.querySelector('.connection-ready-badge');
-                        if (badge) {
-                            badge.innerHTML = isOnline
-                                ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg> <span>Agent Online (Ready for connections)</span>'
-                                : '<span style="color:#64748b; display:inline-flex; align-items:center; gap:6px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> Agent Offline (Start Desktop Agent)</span>';
-                        }
-                    }
+                    isHostOnlineGlobal = isOnline;
 
                     // Filter other workstations for the grid
                     const otherDevices = data.devices.filter(d => (cleanId(d.system_id) !== cleanId(currentHostUid) && cleanId(d.device_uid) !== cleanId(currentHostUid)));

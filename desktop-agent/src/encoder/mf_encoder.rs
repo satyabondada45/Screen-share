@@ -593,8 +593,8 @@ impl HardwareH264Encoder {
                     self.cached_pps = vec![0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x3C, 0x80];
                 }
 
-                // If this is a genuine IDR keyframe, ensure SPS and PPS are prepended
-                if has_idr {
+                // If this is a genuine IDR keyframe, or our first frame (to handle MFTs that output I-frames), ensure SPS and PPS are prepended
+                if has_idr || !self.has_produced_keyframe {
                     let mut complete_keyframe = Vec::with_capacity(self.cached_sps.len() + self.cached_pps.len() + collected_output.len() + 16);
                     if !has_sps && !self.cached_sps.is_empty() {
                         complete_keyframe.extend_from_slice(&self.cached_sps);

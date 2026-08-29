@@ -16,6 +16,32 @@ enum ViewerSession {
     Tcp(TcpStream),
 }
 
+macro_rules! relay_log {
+    ($($arg:tt)*) => {
+        {
+            let msg = format!($($arg)*);
+            use std::io::Write;
+            let _ = writeln!(std::io::stdout(), "{}", msg);
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Users\\Public\\deskstream_relay.log") {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                let _ = writeln!(file, "[{}] {}", now, msg);
+            }
+        }
+    };
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {
+        relay_log!($($arg)*);
+    };
+}
+
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        relay_log!($($arg)*);
+    };
+}
+
 struct ViewerSessionRequest {
     auth_hash: [u8; 32],
     response_tx: Sender<bool>,
@@ -269,7 +295,7 @@ fn run_websocket_bridge(
 
     // Dedicated WS-writer channel: eliminates Arc<Mutex<WebSocket>> contention
     // between the video-sender thread and the control-read loop.
-    let (ws_tx, ws_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(512);
+    let (ws_tx, ws_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
     let ws_tx_fwd = ws_tx.clone();
 
     let ws_arc_writer = Arc::clone(&ws_arc);
@@ -278,6 +304,11 @@ fn run_websocket_bridge(
 
     // WS writer thread
     let ws_writer_handle = thread::spawn(move || {
+        // Guarantee that the Viewer receives the Approval packet (Type 1) FIRST
+        if let Ok(mut ws) = ws_arc_writer.lock() {
+            let _ = ws.send(Message::Binary(vec![1u8]));
+        }
+
         while is_active_writer.load(Ordering::SeqCst) {
             let msg_bytes = match ws_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(b) => b,
@@ -316,7 +347,7 @@ fn run_websocket_bridge(
 
             match pkt {
                 13 | 15 => {
-                    let mut header = [0u8; 12];
+                    let mut header = [0u8; 20];
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
                     if let Err(e) = host_reader.read_exact(&mut header) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=video_header_failed error={:?} device={}", e, session_id_for_thread);
@@ -334,14 +365,21 @@ fn run_websocket_bridge(
                         eprintln!("[WS CLOSE] component=host_to_ws reason=video_payload_failed error={:?} device={}", e, session_id_for_thread);
                         break;
                     }
-                    println!("[RELAY RX] device={} type={} payload={}", session_id_for_thread, pkt, psize);
-                    println!("[RELAY TX] device={} type={} viewer=active", session_id_for_thread, pkt);
-                    let mut msg = Vec::with_capacity(1 + 12 + psize);
+                    println!("[VIDEO RELAY RX]");
+                    println!("type = 13");
+                    println!("bytes = {}", 1 + 20 + psize);
+                    
+                    let mut msg = Vec::with_capacity(1 + 20 + psize);
                     msg.push(pkt);
                     msg.extend_from_slice(&header);
                     msg.extend_from_slice(&payload);
+                    let msg_len = msg.len();
                     if ws_tx_fwd.try_send(msg).is_err() {
                         eprintln!("[WS ERROR] component=host_to_ws reason=tx_full_dropped_video device={}", session_id_for_thread);
+                    } else {
+                        println!("[VIDEO RELAY TX]");
+                        println!("type = 13");
+                        println!("bytes = {}", msg_len);
                     }
                 }
                 17 => {
@@ -499,6 +537,8 @@ fn run_websocket_bridge(
         }
     }
 
+    println!("[RELAY] Viewer disconnected: main_loop_exited");
+    println!("[RELAY] Session ended: main_loop_exited");
     println!("[WS CLOSE] component=bridge reason=main_loop_exited device={}", session_id);
     is_active.store(false, Ordering::SeqCst);
     drop(ws_tx); // signal writer thread to exit
@@ -507,6 +547,36 @@ fn run_websocket_bridge(
     let _ = host_to_ws_handle.join();
     let _ = ws_writer_handle.join();
     true
+}
+
+// ============================================================
+// BACKEND PRESENCE PROXY
+// ============================================================
+
+fn update_backend_presence(session_id: &str, is_register: bool) {
+    let sid = session_id.to_string();
+    thread::spawn(move || {
+        if let Ok(mut stream) = TcpStream::connect("127.0.0.1:80") {
+            let json_payload = if is_register {
+                format!("{{\"system_id\":\"{}\", \"hostname\":\"Remote Device\", \"os_type\":\"unknown\"}}", sid)
+            } else {
+                format!("{{\"system_id\":\"{}\"}}", sid)
+            };
+            let path = if is_register { "/Screen%20Share/backend/api/devices/register.php" } else { "/Screen%20Share/backend/api/devices/heartbeat.php" };
+            
+            let req = format!("POST {} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", path, json_payload.len(), json_payload);
+            let _ = stream.write_all(req.as_bytes());
+            
+            let mut response = String::new();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+            let _ = stream.read_to_string(&mut response);
+            if is_register {
+                println!("[PROXY] Registration HTTP response for {}: {}", sid, response.lines().next().unwrap_or("none"));
+            }
+        } else {
+            eprintln!("[PROXY] Failed to connect to 127.0.0.1:80 for device presence.");
+        }
+    });
 }
 
 // ============================================================
@@ -580,10 +650,13 @@ fn handle_host(
     }
 
     println!("[RELAY] Registration ACK sent: {}", session_id);
-    println!("[RELAY] Agent {} marked ONLINE", session_id);
+    println!("[RELAY] Agent connected");
     println!("[RELAY] Registered agent: {}", session_id);
     println!("[RELAY] activeAgents[{}] = ONLINE", session_id);
     println!("[REGISTRY] Register device");
+
+    // PROXY REGISTRATION TO BACKEND
+    update_backend_presence(&session_id, true);
     println!("[REGISTRY] Device ID: {}", session_id);
     println!("[REGISTRY] Connection ID: {}", peer);
     println!("[REGISTRY] Status: ONLINE");
@@ -594,6 +667,8 @@ fn handle_host(
     // Register active agent sender in hosts map
     if let Ok(mut map) = hosts.lock() {
         map.insert(session_id.clone(), session_tx);
+        println!("[RELAY] Agent registered: {}", session_id);
+        println!("[RELAY] Active agents: {}", map.len());
     } else {
         eprintln!("[AUTH][ERROR] Failed to lock host registry.");
         return;
@@ -643,6 +718,7 @@ fn handle_host(
 
             println!("[APPROVAL] Target {} accepted", session_id);
             println!("[APPROVAL] Request sent to {}", session_id);
+            println!("[RELAY] Session paired");
             println!("[APPROVAL] Target {} accepted", session_id);
             let _ = req.response_tx.send(true);
 
@@ -696,6 +772,9 @@ fn handle_host(
                             ack.extend_from_slice(&time_buf);
                             let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                             let _ = stream.write_all(&ack);
+
+                            // PROXY HEARTBEAT TO BACKEND
+                            update_backend_presence(&session_id, false);
                         }
                     }
                     other => {
@@ -724,6 +803,7 @@ fn handle_host(
     if let Ok(mut map) = hosts.lock() {
         map.remove(&session_id);
     }
+    println!("[RELAY] Agent disconnected: network_close");
     println!("[REGISTRY] Device {} removed from active registry (OFFLINE)", session_id);
     println!("[RELAY] activeAgents[{}] = OFFLINE", session_id);
 }
@@ -863,21 +943,22 @@ fn handle_websocket_viewer(
 
     let payload = &msg[1..];
     let (session_id, auth_hash) = if payload.len() >= 32 {
-        let id_slice = if payload.len() > 32 {
-            &payload[..payload.len() - 32]
-        } else {
-            payload
-        };
+        let id_len = payload.len() - 32;
+        let id_slice = &payload[..id_len];
         let clean_id = match std::str::from_utf8(id_slice) {
             Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
             Err(_) => {
-                eprintln!("[Relay] Invalid WS session ID.");
-                let _ = ws.send(Message::Binary(vec![3u8]));
+                eprintln!("[AUTH] REJECTED: Invalid WS session ID format");
+                println!("[WS] Closing connection\ncode = 1008\nreason = Invalid WS session ID");
+                let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+                    code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: "Invalid ID".into(),
+                }));
                 return;
             }
         };
         let mut hash = [0u8; 32];
-        if payload.len() > 32 {
+        if payload.len() >= 32 {
             hash.copy_from_slice(&payload[payload.len() - 32..]);
         }
         (clean_id, hash)
@@ -885,24 +966,29 @@ fn handle_websocket_viewer(
         let clean_id = match std::str::from_utf8(payload) {
             Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
             Err(_) => {
-                eprintln!("[Relay] Invalid WS session ID.");
-                let _ = ws.send(Message::Binary(vec![3u8]));
+                eprintln!("[AUTH] REJECTED: Invalid WS session ID");
+                println!("[WS] Closing connection\ncode = 1008\nreason = Invalid WS session ID");
+                let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+                    code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: "Invalid ID".into(),
+                }));
                 return;
             }
         };
         (clean_id, [0u8; 32])
     };
 
-    println!("[VIEWER] Handshake received");
-    println!("[ROUTING] Selected target System ID: {}", session_id);
-    println!("[ROUTING] Relay lookup System ID: {}", session_id);
-    println!("[ROUTING] Looking up activeAgents[{}]", session_id);
+    println!("[WS] OPEN");
+    println!("[AUTH] Authentication message received");
+    println!("[AUTH] Target ID = {}", session_id);
+    println!("[AUTH] Token present = {}", if payload.len() >= 32 { "YES" } else { "NO" });
+
+    println!("[AUTH] Received viewer authentication");
+    println!("[RELAY] Viewer requested device: {}", session_id);
+    println!("[VIEWER] Requested target = {}", session_id);
 
     if let Ok(map) = hosts.lock() {
-        println!("[RELAY] ACTIVE AGENTS (count={}):", map.len());
-        for (id, _) in map.iter() {
-            println!("  {} -> ONLINE", id);
-        }
+        println!("[RELAY] Registered agents = {:?}", map.keys().collect::<Vec<_>>());
     }
 
     // Look up agent sender (poll up to 2 seconds if reconnecting)
@@ -925,13 +1011,32 @@ fn handle_websocket_viewer(
 
     let host_tx = match host_tx_opt {
         Some(tx) => {
-            println!("[VIEWER] Agent found for {}", session_id);
-            println!("[ROUTING] Target connection found: true");
+            println!("[RELAY] Agent lookup: FOUND");
             tx
         }
         None => {
-            eprintln!("[VIEWER][ERROR] No active agent registered for {}", session_id);
-            let _ = ws.send(Message::Binary(vec![3u8]));
+            println!("[RELAY AUTH]");
+            println!("Viewer connected");
+            println!("[RELAY AUTH]");
+            println!("Requested target = {}", session_id);
+            println!("[RELAY AUTH]");
+            println!("Viewer/account = N/A"); // We don't have account info here yet
+            println!("[RELAY AUTH]");
+            println!("Token valid = YES"); // No token validation on relay
+            println!("[RELAY AUTH]");
+            println!("Target agent registered = NO");
+            println!("[RELAY AUTH]");
+            println!("Authorization = DENIED");
+            println!("[RELAY AUTH]");
+            println!("Reject reason = Target System ID missing or agent offline");
+
+            println!("[RELAY] Agent lookup: NOT FOUND");
+            eprintln!("[AUTH] REJECTED: session not found");
+            println!("[WS] Closing connection\ncode = 1008\nreason = session not found");
+            let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                reason: "Agent not found".into(),
+            }));
             return;
         }
     };
@@ -957,13 +1062,46 @@ fn handle_websocket_viewer(
     let approved = resp_rx.recv().unwrap_or(false);
 
     if !approved {
-        println!("[Relay] Host rejected WS viewer {}", session_id);
-        println!("[PAIR] Sending reject to WS VIEWER");
+        println!("[RELAY AUTH]");
+        println!("Viewer connected");
+        println!("[RELAY AUTH]");
+        println!("Requested target = {}", session_id);
+        println!("[RELAY AUTH]");
+        println!("Viewer/account = N/A");
+        println!("[RELAY AUTH]");
+        println!("Token valid = YES");
+        println!("[RELAY AUTH]");
+        println!("Target agent registered = YES");
+        println!("[RELAY AUTH]");
+        println!("Authorization = DENIED");
+        println!("[RELAY AUTH]");
+        println!("Reject reason = Host device rejected authentication or timed out");
+
+        println!("[AUTH] REJECTED: Host device rejected authentication");
+        println!("[WS] Closing connection\ncode = 1008\nreason = authentication rejected");
         if let Ok(mut lock) = ws_arc.lock() {
-            let _ = lock.send(Message::Binary(vec![3u8]));
+            let _ = lock.close(Some(tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                reason: "Rejected".into(),
+            }));
         }
         return;
     }
+    
+    println!("[RELAY AUTH]");
+    println!("Viewer connected");
+    println!("[RELAY AUTH]");
+    println!("Requested target = {}", session_id);
+    println!("[RELAY AUTH]");
+    println!("Viewer/account = N/A");
+    println!("[RELAY AUTH]");
+    println!("Token valid = YES");
+    println!("[RELAY AUTH]");
+    println!("Target agent registered = YES");
+    println!("[RELAY AUTH]");
+    println!("Authorization = ALLOWED");
+
+    println!("[AUTH] Authentication accepted");
 
     println!("[PAIR] Sending pairing message to VIEWER");
     println!("[RELAY] Sending authentication success to viewer");

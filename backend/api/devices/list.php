@@ -3,6 +3,17 @@
 header("Content-Type: application/json");
 header("Access-Control-Allow-Origin: *");
 
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+if (empty($_SESSION['user_id'])) {
+    http_response_code(401);
+    echo json_encode(["status" => "error", "message" => "Unauthorized"]);
+    exit();
+}
+$currentUserId = (int)$_SESSION['user_id'];
+
 require_once __DIR__ . '/../../config/database.php';
 
 try {
@@ -31,8 +42,10 @@ try {
             last_seen_at,
             created_at 
         FROM devices 
+        WHERE user_id = :user_id
         ORDER BY is_online DESC, last_seen_at DESC, id DESC
     ");
+    $stmt->execute(['user_id' => $currentUserId]);
 
     $devices = $stmt->fetchAll(PDO::FETCH_ASSOC);
 

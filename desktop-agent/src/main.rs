@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 // Hardware H264 Video Pipeline (120 FPS Ultra-Low Latency)
 pub mod registration {
     pub mod backend_client;
@@ -119,20 +121,7 @@ fn enable_autostart(app_name: &str) -> Result<String, String> {
     };
 
     let current_exe = env::current_exe().map_err(|e| e.to_string())?;
-
-    let target_path = if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-        let bin_dir = std::path::Path::new(&local_app_data).join("DeskStream").join("bin");
-        let _ = fs::create_dir_all(&bin_dir);
-        let target_exe = bin_dir.join("desktop-agent.exe");
-        if current_exe != target_exe {
-            let _ = fs::copy(&current_exe, &target_exe);
-        }
-        target_exe
-    } else {
-        current_exe
-    };
-
-    let exe_path_str = target_path.to_str().ok_or("Invalid path")?;
+    let exe_path_str = current_exe.to_str().ok_or("Invalid path")?;
     let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
         .encode_utf16()
         .collect();
@@ -165,6 +154,51 @@ fn enable_autostart(app_name: &str) -> Result<String, String> {
 #[cfg(not(windows))]
 fn enable_autostart(_app_name: &str) -> Result<String, String> {
     Ok("non-windows".to_string())
+}
+
+// ============================================================
+// HIDE CONSOLE & LOGGING
+// ============================================================
+
+#[cfg(windows)]
+fn hide_console_window() {
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    unsafe {
+        let window = GetConsoleWindow();
+        if window != 0 {
+            ShowWindow(window, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_console_window() {}
+
+macro_rules! agent_log {
+    ($($arg:tt)*) => {
+        {
+            let msg = format!($($arg)*);
+            use std::io::Write;
+            let _ = writeln!(std::io::stdout(), "{}", msg);
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Users\\Public\\deskstream_agent.log") {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                let _ = writeln!(file, "[{}] {}", now, msg);
+            }
+        }
+    };
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {
+        agent_log!($($arg)*);
+    };
+}
+
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        agent_log!($($arg)*);
+    };
 }
 
 // ============================================================
@@ -433,13 +467,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         &config.system_id,
     );
 
-    println!("[DISCOVERY] Registering with backend: {}", backend_url);
+    agent_log!("[DISCOVERY] Registering with backend: {}", backend_url);
+    agent_log!("[AGENT] Connecting to relay");
+    
     let system_id = if let Some(assigned_id) = backend.register() {
-        println!("[DISCOVERY] Registered successfully with Web Dashboard / Device Registry!");
-        println!("[DISCOVERY] Backend assigned System ID: {}", assigned_id);
+        agent_log!("[DISCOVERY] Registered successfully with Web Dashboard / Device Registry!");
+        agent_log!("[DISCOVERY] Backend assigned System ID: {}", assigned_id);
+        agent_log!("[AGENT] Local device ID = {}", assigned_id);
         assigned_id
     } else {
-        println!("[DISCOVERY] Running in standalone relay mode.");
+        agent_log!("[DISCOVERY] Running in standalone relay mode.");
         config.system_id.clone()
     };
 
@@ -452,17 +489,19 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         }
     };
 
-    println!("[IDENTITY] Device ID: {}", system_id);
-    println!("[IDENTITY] Device UUID:  {}", config.device_uuid);
-    println!("[IDENTITY] System ID:    {}", system_id);
-    println!("[IDENTITY] Display ID:   {}", id_str);
+    agent_log!("[AGENT] Registering device = {}", id_str);
+    agent_log!("[IDENTITY] Starting Host Desktop Agent...");
+    agent_log!("[IDENTITY] Device ID: {}", system_id);
+    agent_log!("[IDENTITY] Device UUID:  {}", config.device_uuid);
+    agent_log!("[IDENTITY] System ID:    {}", system_id);
+    agent_log!("[IDENTITY] Display ID:   {}", id_str);
 
     backend.start_heartbeat_thread();
 
     let mut backoff_secs = 1;
 
     loop {
-        println!("[RELAY] Connecting to relay {}...", relay_addr);
+        agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
 
         let mut stream = match TcpStream::connect(&relay_addr) {
             Ok(s) => {
@@ -509,6 +548,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         }
 
         println!("[RELAY] Registration ACK received");
+        agent_log!("[AGENT] Registration acknowledged");
+        let mut display_id = vec![0u8; 12];
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        if stream.read(&mut display_id).is_ok() {}
+        
+        agent_log!("[AGENT] Registration sent");
+        agent_log!("[AGENT] ACTUAL DEVICE ID = {}", id_str);
+
         println!("[SESSION STATE] ONLINE");
         backoff_secs = 1;
 
@@ -601,6 +648,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let is_conn_audio = Arc::clone(&is_connected);
                             let is_conn_ping = Arc::clone(&is_connected);
 
+                            if let Err(e) = stream.set_nodelay(true) {
+                                eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
+                            }
+
                             // TCP INPUT
                             let mut read_stream = match stream.try_clone() {
                                 Ok(s) => s,
@@ -611,8 +662,25 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             };
                             let _ = read_stream.set_read_timeout(None);
 
+                            // Bounded Send Buffer: 64KB ensures the OS doesn't hide seconds of latency
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::io::AsRawSocket;
+                                let sock = stream.as_raw_socket();
+                                let sndbuf: i32 = 65536;
+                                unsafe {
+                                    windows_sys::Win32::Networking::WinSock::setsockopt(
+                                        sock as usize,
+                                        windows_sys::Win32::Networking::WinSock::SOL_SOCKET,
+                                        windows_sys::Win32::Networking::WinSock::SO_SNDBUF,
+                                        &sndbuf as *const i32 as *const _,
+                                        4,
+                                    );
+                                }
+                            }
+
                             // OUTPUT QUEUE
-                            let (out_tx, out_rx) = sync_channel::<Vec<u8>>(128);
+                            let (out_tx, out_rx) = sync_channel::<Vec<u8>>(4);
                             let write_stream = out_tx.clone();
                             let mut write_tcp = match stream.try_clone() {
                                 Ok(s) => s,
@@ -690,7 +758,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
 
                                     match pkt_type_buf[0] {
-                                        0..=10 => {
+                                        0..=10 | 14 => {
                                             let mut data = [0u8; 8];
                                             if read_stream.read_exact(&mut data).is_err() {
                                                 is_conn_read.store(false, Ordering::SeqCst);
@@ -705,12 +773,17 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 5 => "KEY_DOWN",
                                                 6 => "KEY_UP",
                                                 9 => "MOUSE_WHEEL",
+                                                14 => "HEARTBEAT",
                                                 _ => "CONTROL",
                                             };
                                             println!("[CONTROL DEBUG][HOST RX]\ntype={}\nlength=9", type_name);
                                             println!("[AGENT CONTROL RX]\ntype={}\nbytes=9", event_type);
                                             println!("[AGENT CONTROL RX] {}", type_name);
 
+                                            if event_type == 14 {
+                                                println!("[AGENT] Heartbeat from viewer received");
+                                                continue;
+                                            }
                                             if event_type == 10 {
                                                 active_idx_input.store(data[0] as usize, Ordering::SeqCst);
                                                 continue;
@@ -1153,34 +1226,49 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     "AVC"
                                 };
                                 println!("[AGENT H264]\nencoder=hardware\nformat={}\nsize={}\nNAL types={:?}", format_str, h264_bytes.len(), nal_types);
-                                println!("[VIDEO AGENT] frame captured");
-                                println!("[VIDEO AGENT] H264 encoded: {} bytes", h264_bytes.len());
-                                println!("[VIDEO AGENT] sending TYPE=13 width={} height={} h264_size={}", MAX_WIDTH, MAX_HEIGHT, h264_bytes.len());
-                                println!("[VIDEO AGENT] NAL types: {:?} SPS={} PPS={} IDR={}", nal_types, has_sps, has_pps, has_idr);
+                                if frame_number <= 5 {
+                                    println!("[VIDEO TX]");
+                                    println!("capture = YES");
+                                    println!("encoded = YES");
+                                    println!("width = {}", MAX_WIDTH);
+                                    println!("height = {}", MAX_HEIGHT);
+                                    println!("bytes = {}", h264_bytes.len());
+                                    println!("keyframe = {}", if has_idr { "YES" } else { "NO" });
+                                }
 
-                                let packet_size = 13 + h264_bytes.len();
+                                let timestamp_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64;
+
+                                let packet_size = 21 + h264_bytes.len();
                                 let mut packet = Vec::with_capacity(packet_size);
                                 packet.push(13u8);
                                 packet.extend_from_slice(&(MAX_WIDTH as u32).to_be_bytes());
                                 packet.extend_from_slice(&(MAX_HEIGHT as u32).to_be_bytes());
                                 packet.extend_from_slice(&(h264_bytes.len() as u32).to_be_bytes());
+                                packet.extend_from_slice(&timestamp_ms.to_be_bytes());
                                 packet.extend_from_slice(&h264_bytes);
 
-                                let is_first_key = frame_number == 1;
-                                let send_res = if is_first_key {
-                                    write_stream_frames.send(packet).map_err(|_| std::sync::mpsc::TrySendError::Disconnected(Vec::new()))
-                                } else {
-                                    write_stream_frames.try_send(packet)
-                                };
+                                if frame_number <= 5 {
+                                    println!("[VIDEO SEND]");
+                                    println!("type = 13");
+                                    println!("bytes = {}", packet.len());
+                                }
 
-                                if let Err(e) = send_res {
-                                    match e {
-                                        std::sync::mpsc::TrySendError::Full(_) => {}
-                                        std::sync::mpsc::TrySendError::Disconnected(_) => {
-                                            is_conn_write.store(false, Ordering::SeqCst);
-                                            break;
-                                        }
-                                    }
+                                let is_first_key = frame_number == 1;
+                                let send_res = write_stream_frames.try_send(packet);
+
+                                if let Err(std::sync::mpsc::TrySendError::Full(_)) = send_res {
+                                    // Channel full — drop this frame to maintain live streaming
+                                    // For live desktop, latest frame is more important than every frame
+                                    continue;
+                                }
+
+                                if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = send_res {
+                                    // Writer thread has stopped — session is over
+                                    is_conn_write.store(false, Ordering::SeqCst);
+                                    break;
                                 }
                             }
 
@@ -1239,9 +1327,34 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 // ============================================================
 
 fn main() {
-    let _single_instance_guard = match std::net::TcpListener::bind("127.0.0.1:49182") {
+    // STARTUP TRACE: Log instantly before anything can fail!
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("C:\\Users\\Public\\deskstream_agent_boot_trace.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "[BOOT TRACE] desktop-agent.exe launched at {:?}", std::time::SystemTime::now());
+    }
+
+    // 1. Ensure correct working directory regardless of how it was launched
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let _ = std::env::set_current_dir(parent);
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Users\\Public\\deskstream_agent_boot_trace.log") {
+                use std::io::Write;
+                let _ = writeln!(file, "[BOOT TRACE] Working directory set to: {:?}", parent);
+            }
+        }
+    }
+
+    let listener = match std::net::TcpListener::bind("127.0.0.1:49182") {
         Ok(listener) => listener,
-        Err(_) => {
+        Err(e) => {
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Users\\Public\\deskstream_agent_boot_trace.log") {
+                use std::io::Write;
+                let _ = writeln!(file, "[BOOT TRACE] CRITICAL ERROR: Failed to bind 49182: {:?}", e);
+            }
             println!("[Agent] Another instance of DeskStream agent is already running. Exiting.");
             std::process::exit(0);
         }
@@ -1261,8 +1374,55 @@ fn main() {
     // This uses the Windows MachineGuid as the permanent device UUID
     let config = identity::device_id::AgentConfig::load_or_create("", &relay_addr);
 
+    hide_console_window();
+
     let current_exe_path = env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     let _ = enable_autostart("ScreenShareAgent");
+
+    agent_log!("========================================");
+    agent_log!("       REMOTE DESKTOP AGENT STARTING");
+    agent_log!("  EXECUTABLE:    {}", current_exe_path);
+    agent_log!("========================================");
+
+    let sys_id_for_health = config.system_id.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            if let Ok(mut stream) = stream {
+                let mut buf = [0; 1024];
+                if let Ok(n) = stream.read(&mut buf) {
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let is_options = request.starts_with("OPTIONS");
+
+                    let response = if is_options {
+                        // CORS preflight response — no body needed
+                        "HTTP/1.1 204 No Content\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                         Access-Control-Allow-Headers: Content-Type\r\n\
+                         Access-Control-Allow-Private-Network: true\r\n\
+                         Access-Control-Max-Age: 86400\r\n\
+                         Connection: close\r\n\
+                         \r\n".to_string()
+                    } else {
+                        // Normal GET response with JSON body
+                        format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/json\r\n\
+                             Access-Control-Allow-Origin: *\r\n\
+                             Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                             Access-Control-Allow-Headers: Content-Type\r\n\
+                             Access-Control-Allow-Private-Network: true\r\n\
+                             Connection: close\r\n\
+                             \r\n\
+                             {{\"running\": true, \"system_id\": \"{}\", \"status\": \"online\"}}",
+                            sys_id_for_health
+                        )
+                    };
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            }
+        }
+    });
 
     println!("========================================");
     println!("       REMOTE DESKTOP AGENT (120 FPS)");

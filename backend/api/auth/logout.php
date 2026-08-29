@@ -25,5 +25,5 @@ if (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'applicati
     exit();
 }
 
-header("Location: ../../../frontend/login.php?success=" . urlencode("Logged out successfully."));
+header("Location: ../../../frontend/index.php?success=" . urlencode("Logged out successfully."));
 exit();
