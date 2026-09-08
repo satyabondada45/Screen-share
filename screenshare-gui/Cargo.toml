@@ -1,0 +1,23 @@
+[package]
+name = "screenshare-gui"
+version = "1.2.0"
+edition = "2021"
+
+[[bin]]
+name = "ScreenShare"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Registry",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ApplicationInstallationAndServicing",
+    "Win32_System_Memory",
+    "Win32_System_DataExchange",
+] }

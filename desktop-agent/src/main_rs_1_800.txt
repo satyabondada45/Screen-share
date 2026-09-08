@@ -1,0 +1,808 @@
+Created At: 2026-09-02T10:49:18+05:30
+Completed At: 2026-09-02T10:49:18+05:30
+File Path: `file:///c:/xampp/htdocs/Screen%20Share/desktop-agent/src/main.rs`
+Total Lines: 1614
+Total Bytes: 83453
+Showing lines 1 to 800
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: #![windows_subsystem = "windows"]
+2: 
+3: // Hardware H264 Video Pipeline (120 FPS Ultra-Low Latency)
+4: pub mod registration {
+5:     pub mod backend_client;
+6: }
+7: pub mod encoder;
+8: pub mod identity;
+9: pub mod status;
+10: 
+11: use arboard::Clipboard;
+12: use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+13: use enigo::{Axis, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+14: use encoder::HardwareH264Encoder;
+15: use screenshots::Screen;
+16: use sha2::{Digest, Sha256};
+17: 
+18: use std::env;
+19: use std::fs::{self, File};
+20: use std::io::{Read, Write};
+21: use std::net::TcpStream;
+22: use std::path::PathBuf;
+23: use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+24: use std::sync::mpsc::sync_channel;
+25: use std::sync::{Arc, Condvar, Mutex};
+26: use std::thread;
+27: use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+28: 
+29: // ============================================================
+30: // VIDEO SETTINGS (120 FPS Ultra-Low Latency)
+31: // ============================================================
+32: 
+33: const TARGET_FPS: u32 = 120;
+34: const MAX_WIDTH: u32 = 1920;
+35: const MAX_HEIGHT: u32 = 1080;
+36: const TARGET_BITRATE: u32 = 8_000_000;
+37: const FRAME_INTERVAL_MICROS: u64 = 8333; // 120 FPS ~ 8.333 ms per frame
+38: 
+39: // ============================================================
+40: // DPI
+41: // ============================================================
+42: 
+43: #[cfg(windows)]
+44: fn set_process_dpi_aware() {
+45:     unsafe {
+46:         windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+47:             windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+48:         );
+49:     }
+50: }
+51: 
+52: #[cfg(not(windows))]
+53: fn set_process_dpi_aware() {}
+54: 
+55: // ============================================================
+56: // NATIVE MOUSE
+57: // ============================================================
+58: 
+59: #[cfg(windows)]
+60: fn set_native_cursor_pos(x: i32, y: i32) {
+61:     unsafe {
+62:         windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y);
+63:     }
+64: }
+65: 
+66: #[cfg(windows)]
+67: fn send_native_mouse_click(flags: u32) {
+68:     unsafe {
+69:         windows_sys::Win32::UI::Input::KeyboardAndMouse::mouse_event(flags, 0, 0, 0, 0);
+70:     }
+71: }
+72: 
+73: #[cfg(windows)]
+74: fn send_native_mouse_wheel(scroll_y: i16) {
+75:     unsafe {
+76:         use windows_sys::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_WHEEL;
+77:         windows_sys::Win32::UI::Input::KeyboardAndMouse::mouse_event(MOUSEEVENTF_WHEEL, 0, 0, scroll_y as i32, 0);
+78:     }
+79: }
+80: 
+81: #[cfg(windows)]
+82: fn send_native_key(vk: u32, is_up: bool) {
+83:     unsafe {
+84:         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+85:             keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+86:         };
+87:         let mut flags = if is_up { KEYEVENTF_KEYUP } else { 0 };
+88:         // Extended keys on Windows: arrows (37-40), PageUp/Dn (33-34), End (35), Home (36), Insert (45), Delete (46), Windows key (91-92)
+89:         if matches!(vk, 33..=46 | 91..=93 | 144 | 145) {
+90:             flags |= KEYEVENTF_EXTENDEDKEY;
+91:         }
+92:         keybd_event(vk as u8, 0, flags, 0);
+93:     }
+94: }
+95: 
+96: #[cfg(windows)]
+97: fn attach_thread_to_input_desktop() {
+98:     unsafe {
+99:         let hdesktop = windows_sys::Win32::System::StationsAndDesktops::OpenInputDesktop(
+100:             0,
+101:             0,
+102:             0x10000000u32, // GENERIC_ALL
+103:         );
+104:         if hdesktop != 0 {
+105:             windows_sys::Win32::System::StationsAndDesktops::SetThreadDesktop(hdesktop);
+106:             windows_sys::Win32::System::StationsAndDesktops::CloseDesktop(hdesktop);
+107:         }
+108:     }
+109: }
+110: 
+111: #[cfg(not(windows))]
+112: fn attach_thread_to_input_desktop() {}
+113: 
+114: // ============================================================
+115: // HIDE CONSOLE & LOGGING
+116: // ============================================================
+117: 
+118: #[cfg(windows)]
+119: fn hide_console_window() {
+120:     use windows_sys::Win32::System::Console::GetConsoleWindow;
+121:     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+122:     unsafe {
+123:         let window = GetConsoleWindow();
+124:         if window != 0 {
+125:             ShowWindow(window, SW_HIDE);
+126:         }
+127:     }
+128: }
+129: 
+130: #[cfg(not(windows))]
+131: fn hide_console_window() {}
+132: 
+133: #[cfg(windows)]
+134: fn get_log_dir() -> String {
+135:     let base = env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+136:     let log_dir = format!("{}\\Screen Share\\logs", base);
+137:     let _ = fs::create_dir_all(&log_dir);
+138:     log_dir
+139: }
+140: 
+141: #[cfg(not(windows))]
+142: fn get_log_dir() -> String {
+143:     let log_dir = "/tmp/screen-share-logs".to_string();
+144:     let _ = fs::create_dir_all(&log_dir);
+145:     log_dir
+146: }
+147: 
+148: #[cfg(windows)]
+149: fn get_log_paths() -> (String, String) {
+150:     let log_dir = get_log_dir();
+151:     let agent_log = format!("{}\\agent.log", log_dir);
+152:     let boot_trace = format!("{}\\agent_boot_trace.log", log_dir);
+153:     (agent_log, boot_trace)
+154: }
+155: 
+156: #[cfg(not(windows))]
+157: fn get_log_paths() -> (String, String) {
+158:     let log_dir = get_log_dir();
+159:     (format!("{}/agent.log", log_dir), format!("{}/agent_boot_trace.log", log_dir))
+160: }
+161: 
+162: macro_rules! agent_log {
+163:     ($($arg:tt)*) => {
+164:         {
+165:             let msg = format!($($arg)*);
+166:             let (agent_log, _) = get_log_paths();
+167:             use std::io::Write;
+168:             let _ = writeln!(std::io::stdout(), "{}", msg);
+169:             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&agent_log) {
+170:                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+171:                 let _ = writeln!(file, "[{}] {}", now, msg);
+172:             }
+173:         }
+174:     };
+175: }
+176: 
+177: macro_rules! println {
+178:     ($($arg:tt)*) => {
+179:         agent_log!($($arg)*);
+180:     };
+181: }
+182: 
+183: macro_rules! eprintln {
+184:     ($($arg:tt)*) => {
+185:         agent_log!($($arg)*);
+186:     };
+187: }
+188: 
+189: // ============================================================
+190: // CONNECTION DIALOG
+191: // ============================================================
+192: 
+193: 
+194: 
+195: // ============================================================
+196: // SHA256
+197: // ============================================================
+198: 
+199: fn compute_sha256(input: &str) -> [u8; 32] {
+200:     let mut hasher = Sha256::new();
+201:     hasher.update(input.as_bytes());
+202:     hasher.finalize().into()
+203: }
+204: 
+205: // ============================================================
+206: // TIME
+207: // ============================================================
+208: 
+209: fn current_time_millis() -> u64 {
+210:     SystemTime::now()
+211:         .duration_since(UNIX_EPOCH)
+212:         .unwrap_or_default()
+213:         .as_millis() as u64
+214: }
+215: 
+216: // ============================================================
+217: // KEY MAPPING
+218: // ============================================================
+219: 
+220: fn map_key_code(code: u32) -> Option<Key> {
+221:     match code {
+222:         65 => Some(Key::Unicode('a')),
+223:         66 => Some(Key::Unicode('b')),
+224:         67 => Some(Key::Unicode('c')),
+225:         68 => Some(Key::Unicode('d')),
+226:         69 => Some(Key::Unicode('e')),
+227:         70 => Some(Key::Unicode('f')),
+228:         71 => Some(Key::Unicode('g')),
+229:         72 => Some(Key::Unicode('h')),
+230:         73 => Some(Key::Unicode('i')),
+231:         74 => Some(Key::Unicode('j')),
+232:         75 => Some(Key::Unicode('k')),
+233:         76 => Some(Key::Unicode('l')),
+234:         77 => Some(Key::Unicode('m')),
+235:         78 => Some(Key::Unicode('n')),
+236:         79 => Some(Key::Unicode('o')),
+237:         80 => Some(Key::Unicode('p')),
+238:         81 => Some(Key::Unicode('q')),
+239:         82 => Some(Key::Unicode('r')),
+240:         83 => Some(Key::Unicode('s')),
+241:         84 => Some(Key::Unicode('t')),
+242:         85 => Some(Key::Unicode('u')),
+243:         86 => Some(Key::Unicode('v')),
+244:         87 => Some(Key::Unicode('w')),
+245:         88 => Some(Key::Unicode('x')),
+246:         89 => Some(Key::Unicode('y')),
+247:         90 => Some(Key::Unicode('z')),
+248: 
+249:         48 => Some(Key::Unicode('0')),
+250:         49 => Some(Key::Unicode('1')),
+251:         50 => Some(Key::Unicode('2')),
+252:         51 => Some(Key::Unicode('3')),
+253:         52 => Some(Key::Unicode('4')),
+254:         53 => Some(Key::Unicode('5')),
+255:         54 => Some(Key::Unicode('6')),
+256:         55 => Some(Key::Unicode('7')),
+257:         56 => Some(Key::Unicode('8')),
+258:         57 => Some(Key::Unicode('9')),
+259: 
+260:         32 => Some(Key::Space),
+261:         13 => Some(Key::Return),
+262:         8 => Some(Key::Backspace),
+263:         9 => Some(Key::Tab),
+264: 
+265:         16 => Some(Key::Shift),
+266:         17 => Some(Key::Control),
+267:         18 => Some(Key::Alt),
+268: 
+269:         37 => Some(Key::LeftArrow),
+270:         38 => Some(Key::UpArrow),
+271:         39 => Some(Key::RightArrow),
+272:         40 => Some(Key::DownArrow),
+273: 
+274:         46 => Some(Key::Delete),
+275: 
+276:         _ => None,
+277:     }
+278: }
+279: 
+280: // ============================================================
+281: // FRAME DATA
+282: // ============================================================
+283: 
+284: struct FrameData {
+285:     width: usize,
+286:     height: usize,
+287:     raw_pixels: Vec<u8>,
+288: }
+289: 
+290: #[cfg(windows)]
+291: fn capture_screen_gdi() -> Option<FrameData> {
+292:     unsafe {
+293:         let hdesktop = windows_sys::Win32::System::StationsAndDesktops::OpenInputDesktop(
+294:             0,
+295:             0,
+296:             0x10000000u32, // GENERIC_ALL
+297:         );
+298:         if hdesktop != 0 {
+299:             windows_sys::Win32::System::StationsAndDesktops::SetThreadDesktop(hdesktop);
+300:             windows_sys::Win32::System::StationsAndDesktops::CloseDesktop(hdesktop);
+301:         }
+302: 
+303:         let width = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as usize;
+304:         let height = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as usize;
+305:         if width == 0 || height == 0 {
+306:             return None;
+307:         }
+308: 
+309:         let hdc_screen = windows_sys::Win32::Graphics::Gdi::GetDC(0 as _);
+310:         if hdc_screen == 0 {
+311:             return None;
+312:         }
+313:         let hdc_mem = windows_sys::Win32::Graphics::Gdi::CreateCompatibleDC(hdc_screen);
+314:         if hdc_mem == 0 {
+315:             windows_sys::Win32::Graphics::Gdi::ReleaseDC(0 as _, hdc_screen);
+316:             return None;
+317:         }
+318: 
+319:         let mut bmi: windows_sys::Win32::Graphics::Gdi::BITMAPINFO = std::mem::zeroed();
+320:         bmi.bmiHeader.biSize = std::mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
+321:         bmi.bmiHeader.biWidth = width as i32;
+322:         bmi.bmiHeader.biHeight = -(height as i32); // Top-down
+323:         bmi.bmiHeader.biPlanes = 1;
+324:         bmi.bmiHeader.biBitCount = 32;
+325:         bmi.bmiHeader.biCompression = windows_sys::Win32::Graphics::Gdi::BI_RGB;
+326: 
+327:         let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+328:         let hbm = windows_sys::Win32::Graphics::Gdi::CreateDIBSection(
+329:             hdc_screen,
+330:             &bmi,
+331:             windows_sys::Win32::Graphics::Gdi::DIB_RGB_COLORS,
+332:             &mut bits_ptr,
+333:             0 as _,
+334:             0,
+335:         );
+336: 
+337:         if hbm == 0 || bits_ptr.is_null() {
+338:             windows_sys::Win32::Graphics::Gdi::DeleteDC(hdc_mem);
+339:             windows_sys::Win32::Graphics::Gdi::ReleaseDC(0 as _, hdc_screen);
+340:             return None;
+341:         }
+342: 
+343:         let old_obj = windows_sys::Win32::Graphics::Gdi::SelectObject(hdc_mem, hbm as _);
+344:         let blt_res = windows_sys::Win32::Graphics::Gdi::BitBlt(
+345:             hdc_mem,
+346:             0,
+347:             0,
+348:             width as i32,
+349:             height as i32,
+350:             hdc_screen,
+351:             0,
+352:             0,
+353:             windows_sys::Win32::Graphics::Gdi::SRCCOPY | windows_sys::Win32::Graphics::Gdi::CAPTUREBLT,
+354:         );
+355: 
+356:         let buf_size = width * height * 4;
+357:         let mut buffer = vec![0u8; buf_size];
+358: 
+359:         if blt_res != 0 {
+360:             let src_slice = std::slice::from_raw_parts(bits_ptr as *const u8, buf_size);
+361:             // Convert BGRA to RGBA
+362:             for (dst_px, src_px) in buffer.chunks_exact_mut(4).zip(src_slice.chunks_exact(4)) {
+363:                 dst_px[0] = src_px[2]; // R
+364:                 dst_px[1] = src_px[1]; // G
+365:                 dst_px[2] = src_px[0]; // B
+366:                 dst_px[3] = 255;       // A
+367:             }
+368:         }
+369: 
+370:         windows_sys::Win32::Graphics::Gdi::SelectObject(hdc_mem, old_obj);
+371:         windows_sys::Win32::Graphics::Gdi::DeleteObject(hbm as _);
+372:         windows_sys::Win32::Graphics::Gdi::DeleteDC(hdc_mem);
+373:         windows_sys::Win32::Graphics::Gdi::ReleaseDC(0 as _, hdc_screen);
+374: 
+375:         if blt_res == 0 {
+376:             return None;
+377:         }
+378: 
+379:         Some(FrameData {
+380:             width,
+381:             height,
+382:             raw_pixels: buffer,
+383:         })
+384:     }
+385: }
+386: 
+387: // ============================================================
+388: // AUDIO
+389: // ============================================================
+390: 
+391: fn start_audio_capture(
+392:     write_stream: std::sync::mpsc::SyncSender<Vec<u8>>,
+393:     is_running: Arc<AtomicBool>,
+394: ) -> Option<cpal::Stream> {
+395:     let host = cpal::default_host();
+396:     let device = host.default_input_device()?;
+397:     let config = device.default_input_config().ok()?;
+398:     let stream_config: cpal::StreamConfig = config.clone().into();
+399:     let sample_rate = stream_config.sample_rate.0;
+400:     let channels = stream_config.channels;
+401: 
+402:     println!(
+403:         "[Audio] Microphone active: {} Hz, {} channels",
+404:         sample_rate, channels
+405:     );
+406: 
+407:     let stream = device
+408:         .build_input_stream(
+409:             &stream_config,
+410:             move |data: &[f32], _: &_| {
+411:                 if !is_running.load(Ordering::SeqCst) {
+412:                     return;
+413:                 }
+414: 
+415:                 let byte_len = data.len() * std::mem::size_of::<f32>();
+416: 
+417:                 let mut packet = Vec::with_capacity(11 + byte_len);
+418:                 packet.push(17u8);
+419:                 packet.extend_from_slice(&(byte_len as u32).to_be_bytes());
+420:                 packet.extend_from_slice(&(sample_rate as u32).to_be_bytes());
+421:                 packet.extend_from_slice(&(channels as u16).to_be_bytes());
+422: 
+423:                 let slice = unsafe {
+424:                     std::slice::from_raw_parts(data.as_ptr() as *const u8, byte_len)
+425:                 };
+426:                 packet.extend_from_slice(slice);
+427: 
+428:                 let _ = write_stream.try_send(packet);
+429:             },
+430:             |_error| {},
+431:             None,
+432:         )
+433:         .ok()?;
+434: 
+435:     stream.play().ok()?;
+436:     Some(stream)
+437: }
+438: 
+439: // ============================================================
+440: // AGENT LOOP
+441: // ============================================================
+442: 
+443: fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig, authoritative_system_id: Arc<Mutex<String>>, backend_override: Option<String>) {
+444:     let backend_url = if let Some(b) = &backend_override {
+445:         b.trim_end_matches('/').to_string()
+446:     } else if !config.backend_url.is_empty() {
+447:         config.backend_url.trim_end_matches('/').to_string()
+448:     } else {
+449:         // Derive from relay_addr host only as last resort (rare for production)
+450:         let host_ip = relay_addr.split(':').next().unwrap_or("127.0.0.1");
+451:         format!("http://{}/Screen%20Share/backend/api", host_ip)
+452:     };
+453: 
+454:     // Use persistent device UUID as the machine identifier
+455:     // Use the config system_id (deterministic from UUID) as the initial system_id hint
+456:     let mut backend = registration::backend_client::BackendClient::new(
+457:         &backend_url,
+458:         &config.device_uuid,
+459:         &config.system_id,
+460:     );
+461: 
+462:     agent_log!("[CONFIG] Backend URL = {}", backend_url);
+463:     agent_log!("[CONFIG] Relay URL = {}", relay_addr);
+464:     agent_log!("[REGISTRATION] Registering with backend: {}", backend_url);
+465:     agent_log!("[RELAY] Connecting to relay");
+466:     
+467:     let register_result = backend.register();
+468:     let backend_ok = register_result.is_some();
+469:     let system_id = if let Some(assigned_id) = register_result {
+470:         agent_log!("[DISCOVERY] Registered successfully with Web Dashboard / Device Registry!");
+471:         if assigned_id != config.system_id {
+472:             agent_log!("[DISCOVERY] Backend returned stale ID {}, but AGENT ID is authoritative. Enforcing agent ID.", assigned_id);
+473:         }
+474:         
+475:         // AGENT IS AUTHORITATIVE. NEVER OVERWRITE WITH THE DB'S OLD ID.
+476:         let actual_system_id = config.system_id.clone();
+477:         
+478:         agent_log!("[AGENT] Local device ID = {}", actual_system_id);
+479:         
+480:         // Ensure the health server serves this authoritative ID
+481:         if let Ok(mut guard) = authoritative_system_id.lock() {
+482:             *guard = actual_system_id.clone();
+483:         }
+484:         
+485:         agent_log!("[SYNC] AGENT SYSTEM ID  = {}", actual_system_id);
+486:         agent_log!("[SYNC] DB SYSTEM ID     = {} (forced to match agent)", actual_system_id);
+487:         actual_system_id
+488:     } else {
+489:         agent_log!("[DISCOVERY] Running in standalone relay mode.");
+490:         // Health server keeps config.system_id (already set)
+491:         agent_log!("[SYNC] AGENT SYSTEM ID  = {} (offline/standalone)", config.system_id);
+492:         config.system_id.clone()
+493:     };
+494: 
+495:     {
+496:         let st_arc = status::live();
+497:         let mut st = st_arc.lock().unwrap();
+498:         st.system_id = system_id.clone();
+499:         st.device_name = config.name.clone();
+500:         st.backend_connected = backend_ok;
+501:         st.status = "connecting".to_string();
+502:     }
+503: 
+504:     let id_str = {
+505:         let clean: String = system_id.chars().filter(|c| c.is_ascii_digit()).collect();
+506:         if clean.len() == 9 {
+507:             format!("{} {} {}", &clean[0..3], &clean[3..6], &clean[6..9])
+508:         } else {
+509:             clean.clone()
+510:         }
+511:     };
+512: 
+513:     agent_log!("[AGENT] Registering device = {}", id_str);
+514:     agent_log!("[IDENTITY] Starting Host Desktop Agent...");
+515:     agent_log!("[IDENTITY] Device ID: {}", system_id);
+516:     agent_log!("[IDENTITY] Device UUID:  {}", config.device_uuid);
+517:     agent_log!("[IDENTITY] System ID:    {}", system_id);
+518:     agent_log!("[IDENTITY] Display ID:   {}", id_str);
+519: 
+520:     backend.start_heartbeat_thread(status::live());
+521: 
+522:     let mut backoff_secs = 1;
+523: 
+524:     loop {
+525:         agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
+526: 
+527:         let mut stream = match TcpStream::connect(&relay_addr) {
+528:             Ok(s) => {
+529:                 let _ = s.set_nodelay(true);
+530:                 let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+531:                 s
+532:             }
+533:             Err(e) => {
+534:                 eprintln!("[RELAY] Connection failed: {:?}", e);
+535:                 println!("[SESSION STATE] OFFLINE");
+536:                 println!("[RELAY][DISCONNECT] reason=Connection refused or network unreachable");
+537:                 println!("[RELAY][DISCONNECT] system_id={}", system_id);
+538:                 println!("[RELAY][DISCONNECT] socket_error={:?}", e);
+539:                 println!("[RELAY][DISCONNECT] remote_closed=false");
+540:                 status::set_relay_state(false);
+541:                 thread::sleep(Duration::from_secs(backoff_secs));
+542:                 backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+543:                 continue;
+544:             }
+545:         };
+546: 
+547:         println!("[RELAY] TCP connection established");
+548:         println!("[RELAY] Sending registration for System ID: {}", system_id);
+549: 
+550:         // Registration (Type 1 + System ID as relay session key)
+551:         let mut register_pkt = Vec::with_capacity(1 + system_id.len());
+552:         register_pkt.push(1u8);
+553:         register_pkt.extend_from_slice(system_id.as_bytes());
+554: 
+555:         if stream.write_all(&register_pkt).is_err() {
+556:             eprintln!("[RELAY] Failed to send registration packet");
+557:             println!("[SESSION STATE] OFFLINE");
+558:             status::set_relay_state(false);
+559:             thread::sleep(Duration::from_secs(backoff_secs));
+560:             backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+561:             continue;
+562:         }
+563: 
+564:         let mut ack = [0u8; 1];
+565:         if stream.read_exact(&mut ack).is_err() || ack[0] != 1 {
+566:             eprintln!("[RELAY] Registration failed or unacknowledged by relay");
+567:             println!("[SESSION STATE] OFFLINE");
+568:             status::set_relay_state(false);
+569:             thread::sleep(Duration::from_secs(backoff_secs));
+570:             backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+571:             continue;
+572:         }
+573: 
+574:         println!("[RELAY] Registration ACK received");
+575:         agent_log!("[AGENT] Registration acknowledged");
+576:         status::set_relay_state(true);
+577:         let mut display_id = vec![0u8; 12];
+578:         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+579:         if stream.read(&mut display_id).is_ok() {}
+580:         
+581:         agent_log!("[AGENT] Registration sent");
+582:         agent_log!("[AGENT] ACTUAL DEVICE ID = {}", id_str);
+583: 
+584:         // *** SYNC TRACE: All IDs must match here ***
+585:         agent_log!("[SYNC] ===== SYSTEM ID SYNCHRONIZATION CHECK =====");
+586:         agent_log!("[SYNC] AGENT SYSTEM ID       = {}", system_id);
+587:         agent_log!("[SYNC] RELAY REGISTERED ID   = {}", system_id);
+588:         agent_log!("[SYNC] DB SYSTEM ID          = {} (set by backend.register)", system_id);
+589:         agent_log!("[SYNC] HEALTH SERVER ID      = {} (served on :49182)", system_id);
+590:         agent_log!("[SYNC] ============================================");
+591: 
+592:         println!("[SESSION STATE] ONLINE");
+593:         backoff_secs = 1;
+594: 
+595:         let idle_write_stream = match stream.try_clone() {
+596:             Ok(s) => Arc::new(Mutex::new(s)),
+597:             Err(e) => {
+598:                 eprintln!("[Agent] Failed to clone stream for writer: {:?}", e);
+599:                 continue;
+600:             }
+601:         };
+602: 
+603:         let is_running_conn = Arc::new(AtomicBool::new(true));
+604:         let is_in_session = Arc::new(AtomicBool::new(false));
+605: 
+606:         // Heartbeat thread: Sends Type 14 to relay every 5s during idle state
+607:         let hb_write = Arc::clone(&idle_write_stream);
+608:         let hb_running = Arc::clone(&is_running_conn);
+609:         let hb_in_session = Arc::clone(&is_in_session);
+610: 
+611:         let heartbeat_handle = thread::spawn(move || {
+612:             while hb_running.load(Ordering::SeqCst) {
+613:                 if !hb_in_session.load(Ordering::SeqCst) {
+614:                     let mut ping_pkt = Vec::with_capacity(9);
+615:                     ping_pkt.push(14u8);
+616:                     ping_pkt.extend_from_slice(&current_time_millis().to_be_bytes());
+617: 
+618:                     if let Ok(mut writer) = hb_write.lock() {
+619:                         let _ = writer.set_write_timeout(Some(Duration::from_secs(2)));
+620:                         let _ = writer.write_all(&ping_pkt);
+621:                         status::touch_heartbeat();
+622:                     }
+623:                 }
+624:                 thread::sleep(Duration::from_secs(5));
+625:             }
+626:         });
+627: 
+628:         'viewer_loop: loop {
+629:             let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+630:             let mut type_buf = [0u8; 1];
+631: 
+632:             match stream.read_exact(&mut type_buf) {
+633:                 Ok(_) => {
+634:                     match type_buf[0] {
+635:                         // Type 14: Heartbeat ACK from relay
+636:                         14 => {
+637:                             let mut time_buf = [0u8; 8];
+638:                             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+639:                             if stream.read_exact(&mut time_buf).is_ok() {
+640:                                 println!("[HEARTBEAT] -> {}", system_id);
+641:                                 println!("[HEARTBEAT] <- ACK");
+642:                             }
+643:                         }
+644: 
+645:                         // Type 3: Incoming session request / Authentication
+646:                         3 => {
+647:                             let mut auth_hash = [0u8; 32];
+648:                             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+649:                             if stream.read_exact(&mut auth_hash).is_err() {
+650:                                 eprintln!("[Agent] Failed to read auth hash from relay.");
+651:                                 break 'viewer_loop;
+652:                             }
+653: 
+654:                             println!("[Host] Received connection request for Target ID: {}", id_str);
+655:                             println!("[SESSION] ACCEPT received");
+656:                             println!("[SESSION] Starting remote session");
+657:                             println!("[STREAM STATE] STARTING");
+658:                             println!("[STREAM] Starting screen capture");
+659:                             println!("[STREAM] Starting H.264 encoder");
+660: 
+661:                             is_in_session.store(true, Ordering::SeqCst);
+662: 
+663:                             // Send approval response [1u8]
+664:                             if let Ok(mut writer) = idle_write_stream.lock() {
+665:                                 let _ = writer.set_write_timeout(Some(Duration::from_secs(5)));
+666:                                 let _ = writer.write_all(&[1u8]);
+667:                             }
+668: 
+669:                             println!("[Host] Approval response sent successfully (APPROVED)");
+670:                             backend.log_session_start(&system_id);
+671:                             println!("[Agent] Session APPROVED! Starting live video...");
+672: 
+673:                             // ====================================================
+674:                             // CONNECTION STATE & STREAMING PIPELINE
+675:                             // ====================================================
+676: 
+677:                             let is_connected = Arc::new(AtomicBool::new(true));
+678:                             let is_conn_read = Arc::clone(&is_connected);
+679:                             let is_conn_write = Arc::clone(&is_connected);
+680:                             let is_conn_capture = Arc::clone(&is_connected);
+681:                             let is_conn_clip = Arc::clone(&is_connected);
+682:                             let is_conn_audio = Arc::clone(&is_connected);
+683:                             let is_conn_ping = Arc::clone(&is_connected);
+684: 
+685:                             if let Err(e) = stream.set_nodelay(true) {
+686:                                 eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
+687:                             }
+688: 
+689:                             // TCP INPUT
+690:                             let mut read_stream = match stream.try_clone() {
+691:                                 Ok(s) => s,
+692:                                 Err(_) => {
+693:                                     is_connected.store(false, Ordering::Release);
+694:                                     break 'viewer_loop;
+695:                                 }
+696:                             };
+697:                             let _ = read_stream.set_read_timeout(None);
+698: 
+699:                             // Bounded Send Buffer: 64KB ensures the OS doesn't hide seconds of latency
+700:                             #[cfg(windows)]
+701:                             {
+702:                                 use std::os::windows::io::AsRawSocket;
+703:                                 let sock = stream.as_raw_socket();
+704:                                 let sndbuf: i32 = 65536;
+705:                                 unsafe {
+706:                                     windows_sys::Win32::Networking::WinSock::setsockopt(
+707:                                         sock as usize,
+708:                                         windows_sys::Win32::Networking::WinSock::SOL_SOCKET,
+709:                                         windows_sys::Win32::Networking::WinSock::SO_SNDBUF,
+710:                                         &sndbuf as *const i32 as *const _,
+711:                                         4,
+712:                                     );
+713:                                 }
+714:                             }
+715: 
+716:                             // OUTPUT QUEUE
+717:                             let (out_tx, out_rx) = sync_channel::<Vec<u8>>(4);
+718:                             let write_stream = out_tx.clone();
+719:                             let mut write_tcp = match stream.try_clone() {
+720:                                 Ok(s) => s,
+721:                                 Err(_) => {
+722:                                     is_connected.store(false, Ordering::Release);
+723:                                     break 'viewer_loop;
+724:                                 }
+725:                             };
+726:                             let _ = write_tcp.set_write_timeout(None);
+727: 
+728:                             let write_connected = Arc::clone(&is_connected);
+729: 
+730:                             println!("[STREAM STATE] ACTIVE");
+731:                             println!("[VIDEO STATE] ACTIVE");
+732: 
+733:                             let writer_handle = thread::spawn(move || {
+734:                                 while write_connected.load(Ordering::Acquire) {
+735:                                     match out_rx.recv_timeout(Duration::from_millis(100)) {
+736:                                         Ok(packet) => {
+737:                                             match write_tcp.write_all(&packet) {
+738:                                                 Ok(_) => {}
+739:                                                 Err(e) => {
+740:                                                     if e.kind() == std::io::ErrorKind::WouldBlock
+741:                                                         || e.kind() == std::io::ErrorKind::TimedOut
+742:                                                     {
+743:                                                         continue;
+744:                                                     }
+745:                                                     eprintln!("[Writer] TCP error: {:?}", e);
+746:                                                     println!("[VIDEO STATE] WRITE_FAILED");
+747:                                                     write_connected.store(false, Ordering::Release);
+748:                                                     break;
+749:                                                 }
+750:                                             }
+751:                                         }
+752:                                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+753:                                         Err(_) => break,
+754:                                     }
+755:                                 }
+756:                             });
+757: 
+758:                             let write_stream_clip = write_stream.clone();
+759:                             let write_stream_frames = write_stream.clone();
+760:                             let write_stream_audio = write_stream.clone();
+761:                             let write_stream_ping = write_stream.clone();
+762: 
+763:                             let current_rtt_ms = Arc::new(AtomicU64::new(10));
+764:                             let current_rtt_in = Arc::clone(&current_rtt_ms);
+765: 
+766:                             let active_screen_idx = Arc::new(AtomicUsize::new(0));
+767:                             let active_idx_input = Arc::clone(&active_screen_idx);
+768:                             let active_idx_capture = Arc::clone(&active_screen_idx);
+769: 
+770:                             let shared_frame = Arc::new((Mutex::new(None::<FrameData>), Condvar::new()));
+771:                             let shared_frame_cap = Arc::clone(&shared_frame);
+772: 
+773:                             let last_clipboard_text = Arc::new(Mutex::new(String::new()));
+774:                             let last_clip_recv = Arc::clone(&last_clipboard_text);
+775:                             let last_clip_send = Arc::clone(&last_clipboard_text);
+776: 
+777:                             // INPUT THREAD
+778:                             let input_handle = thread::spawn(move || {
+779:                                 println!("[INPUT THREAD] Started native input processing loop");
+780:                                 let mut clip = Clipboard::new().ok();
+781:                                 let mut current_file: Option<File> = None;
+782:                                 let mut total_file_size: u64 = 0;
+783:                                 let mut received_bytes: u64 = 0;
+784:                                 let drop_dir = PathBuf::from("RemoteDrop");
+785:                                 let _ = fs::create_dir_all(&drop_dir);
+786: 
+787:                                 while is_conn_read.load(Ordering::SeqCst) {
+788:                                     let mut pkt_type_buf = [0u8; 1];
+789:                                     if read_stream.read_exact(&mut pkt_type_buf).is_err() {
+790:                                         is_conn_read.store(false, Ordering::SeqCst);
+791:                                         break;
+792:                                     }
+793: 
+794:                                     match pkt_type_buf[0] {
+795:                                         0..=10 => {
+796:                                             let mut data = [0u8; 8];
+797:                                             if read_stream.read_exact(&mut data).is_err() {
+798:                                                 is_conn_read.store(false, Ordering::SeqCst);
+799:                                                 break;
+800:                                             }
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

@@ -122,14 +122,35 @@ if ($pdo) {
 }
 
 // Device ID strictly from physical device registration
-$hostUid = $hostDevice['system_id'] ?? $hostDevice['device_uid'] ?? 'Connecting...';
+$isHostOnline = !empty($hostDevice['is_live_online']);
+if ($hostDevice) {
+    $hostUid = $hostDevice['system_id'] ?? $hostDevice['device_uid'];
+    if (empty($hostUid)) {
+        $hostUid = 'ID unavailable';
+    }
+} else {
+    $hostUid = 'ID unavailable';
+}
+
 $hostAlias = $hostDevice['name'] ?? ($currentUsername . '-PC');
 $hostIp = $hostDevice['ip_address'] ?? '127.0.0.1';
-$isHostOnline = !empty($hostDevice['is_online']);
+
+// [DEVICE DEBUG] Temporary Debugging for the Dashboard
+error_log("[DEVICE DEBUG] Logged-in Account ID = " . ($currentUserId ?? 'null'));
+error_log("[DEVICE DEBUG] Current Device UUID = " . ($hostDevice['device_uid'] ?? 'null'));
+error_log("[DEVICE DEBUG] Current System ID = " . ($hostDevice['system_id'] ?? 'null'));
+error_log("[DEVICE DEBUG] Current Device Alias = " . ($hostDevice['name'] ?? 'null'));
+error_log("[DEVICE DEBUG] Device DB row = " . ($hostDevice ? 'FOUND' : 'NOT FOUND'));
+error_log("[DEVICE DEBUG] Dashboard ID rendered = " . $hostUid);
+
 
 function formatDeviceId($id)
 {
+    if (empty($id) || $id === 'ID unavailable' || $id === 'Agent Not Installed') return 'ID unavailable';
+    
     $clean = preg_replace('/[^0-9]/', '', (string) $id);
+    if (empty($clean)) return $id; // Return as-is if not numeric
+    
     if (strlen($clean) === 9) {
         return substr($clean, 0, 3) . ' ' . substr($clean, 3, 3) . ' ' . substr($clean, 6, 3);
     }
@@ -747,6 +768,32 @@ function getRelativeTime($timestamp)
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 12px;
+        }
+
+        .btn-connect-local {
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            padding: 0 20px;
+            height: 42px;
+            font-weight: 600;
+            font-size: 0.88rem;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 10px rgba(239, 68, 68, 0.25);
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        .btn-connect-local:hover {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 14px rgba(239, 68, 68, 0.35);
         }
 
         .mode-option-card {
@@ -1552,10 +1599,19 @@ function getRelativeTime($timestamp)
                         </div>
                     </div>
 
-                    <div class="connection-ready-badge" id="hostStatusBadge">
-                        <!-- Content dynamically populated by JS -->
-                    </div>
-                </div>
+                         <div class="connection-ready-badge" id="hostStatusBadge">
+                             <!-- Content dynamically populated by JS -->
+                         </div>
+
+                         <button class="btn-connect-local" type="button" id="connectToLocalBtn"
+                             onclick="connectToLocalHost()">
+                             Connect to This Device
+                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                 stroke-width="2">
+                                 <path d="M12 19V5M5 12l7 7 7-7" />
+                             </svg>
+                         </button>
+                     </div>
 
                 <!-- Panel 2: Connect to Remote Device -->
                 <div class="panel-card">
@@ -1877,13 +1933,39 @@ function getRelativeTime($timestamp)
 
     <!-- Client-side Realtime Engine & Modal Controller -->
     <script>
-        // State variables
+        // ============================================================
+        // State variables — seeded by PHP from the devices database row
+        // NOTE: currentHostUid MUST be the physical machine's System ID.
+        //       It is NEVER the logged-in account/user ID.
+        // ============================================================
+        const PHP_ACCOUNT_ID   = '<?= (int)($currentUserId ?? 0) ?>';   // account id (must NOT be used as device id)
+        const PHP_SYSTEM_ID    = '<?= htmlspecialchars($hostDevice['system_id'] ?? '') ?>'; // raw 9-digit system id from DB
+        const PHP_DEVICE_UUID  = '<?= htmlspecialchars($hostDevice['device_uid'] ?? '') ?>'; // device_uid from DB
+        const PHP_DEVICE_ALIAS = '<?= htmlspecialchars($hostDevice['name'] ?? '') ?>';       // device name from DB
+        const PHP_HOST_UID     = '<?= htmlspecialchars($hostUid) ?>';     // resolved display value
+
+        // [DEVICE DEBUG] Console dump — check these immediately in browser DevTools
+        console.log('[DEVICE DEBUG] Logged-in Account ID   =', PHP_ACCOUNT_ID);
+        console.log('[DEVICE DEBUG] Current Device UUID    =', PHP_DEVICE_UUID);
+        console.log('[DEVICE DEBUG] Current System ID (DB) =', PHP_SYSTEM_ID);
+        console.log('[DEVICE DEBUG] Current Device Alias   =', PHP_DEVICE_ALIAS);
+        console.log('[DEVICE DEBUG] Dashboard hostUid PHP  =', PHP_HOST_UID);
+
         let selectedMode = 'desktop';
-        let currentTargetUid = '<?= htmlspecialchars($hostUid) ?>';
-        let currentHostUid = '<?= htmlspecialchars($hostUid) ?>';
+        // Seed from PHP DB row — the authoritative System ID.
+        // If agent is offline the id is still shown (just status badge changes).
+        let currentHostUid = PHP_SYSTEM_ID || PHP_DEVICE_UUID || PHP_HOST_UID;
+        let currentTargetUid = currentHostUid;
         let currentRequestToken = null;
         let pendingPollInterval = null;
         let registeredDevicesList = [];
+
+        console.log('[DEVICE DEBUG] Dashboard ID rendered  =', currentHostUid);
+        // Safety: if currentHostUid equals account id, clear it — something is wrong
+        if (currentHostUid && currentHostUid === PHP_ACCOUNT_ID) {
+            console.error('[DEVICE DEBUG] ERROR: System ID equals account ID! Clearing to prevent misrouting.');
+            currentHostUid = '';
+        }
 
         // 1. Connection Mode Selector
         function selectMode(mode) {
@@ -1894,8 +1976,9 @@ function getRelativeTime($timestamp)
 
         // 2. Format Device ID into neat 3-3-3 chunks
         function formatId(raw) {
-            if (!raw) return '------';
+            if (!raw || raw === 'ID unavailable' || raw === 'Agent Not Installed') return 'ID unavailable';
             const clean = raw.toString().replace(/[^0-9]/g, '');
+            if (!clean) return raw; // Return as-is if no digits
             if (clean.length === 9) {
                 return clean.slice(0, 3) + ' ' + clean.slice(3, 6) + ' ' + clean.slice(6);
             }
@@ -2219,20 +2302,74 @@ function getRelativeTime($timestamp)
                         Download Installer
                     </a>
                 `;
+            } else if (state === 'starting') {
+                badge.innerHTML = `
+                    <span style="color:#f59e0b; display:inline-flex; align-items:center; gap:6px;">
+                        <div class="spinner-small" style="width:12px; height:12px; border:2px solid #f59e0b; border-top:2px solid transparent; border-radius:50%; animation: spin 1s linear infinite;"></div>
+                        Agent Starting...
+                    </span>
+                `;
             }
         }
 
-        async function startDesktopAgent() {
+        let agentLaunchPending = false;
+
+        async function startDesktopAgent(deviceId) {
+            if (window.__agentLaunchPending) {
+                showToast("Agent launch already in progress...");
+                return;
+            }
+            window.__agentLaunchPending = true;
+
             console.log("[AGENT UI] Triggering DeskStream native launcher...");
             showToast("Opening DeskStream Agent...");
 
-            // Invoke the custom protocol registered by the installer on the local Windows machine
-            window.location.href = 'deskstream://open';
+            let uri = 'deskstream://open';
+            if (deviceId) {
+                uri = 'deskstream://open?device=' + encodeURIComponent(deviceId);
+            }
 
-            setTimeout(() => {
-                showToast("If nothing happens, ensure the DeskStream Agent is installed.");
-                fetchAllDevices(true);
-            }, 3000);
+            try {
+                const iframe = document.createElement('iframe');
+                iframe.style.display = 'none';
+                iframe.src = uri;
+                document.body.appendChild(iframe);
+                setTimeout(() => { try { iframe.remove(); } catch(e) {} }, 2000);
+                console.log("[AGENT UI] Protocol launch dispatched:", uri);
+            } catch(e) {
+                console.warn("[AGENT UI] Protocol launch attempt failed:", e);
+            }
+
+            updateHostBadge('starting');
+            console.log("[AGENT UI] Waiting for agent startup...");
+
+            let attempts = 0;
+            const maxAttempts = 10;
+            const poll = async () => {
+                attempts++;
+                console.log("[AGENT UI] Checking local agent... (attempt " + attempts + "/" + maxAttempts + ")");
+                const localAgent = await checkLocalAgentStatus();
+                if (localAgent && localAgent.system_id) {
+                    console.log("[AGENT UI] Agent detected! System ID:", localAgent.system_id, "Status:", localAgent.status);
+                    currentHostUid = localAgent.system_id;
+                    document.cookie = "local_device_id=" + currentHostUid + "; path=/; max-age=31536000";
+                    showToast("Agent detected — waiting for backend registration...");
+                    console.log("[AGENT UI] Waiting for backend registration...");
+                    setTimeout(() => {
+                        window.__agentLaunchPending = false;
+                        fetchAllDevices(true);
+                        console.log("[AGENT UI] Agent ONLINE (or registered).");
+                    }, 5000);
+                } else if (attempts < maxAttempts) {
+                    setTimeout(poll, 2000);
+                } else {
+                    window.__agentLaunchPending = false;
+                    console.warn("[AGENT UI] Native launcher failed: agent did not appear on port 49182 after " + maxAttempts + " attempts.");
+                    showToast("Agent not detected. Ensure DeskStream Agent is installed.");
+                    fetchAllDevices(true);
+                }
+            };
+            setTimeout(poll, 3000);
         }
 
         // 10. Live Polling Engine (Queries Database via API every 3 seconds)
@@ -2253,21 +2390,29 @@ function getRelativeTime($timestamp)
 
                     // 1. Ask the local agent who it REALLY is to prevent account-level hijacking
                     const localAgent = await checkLocalAgentStatus();
-                    console.log('[DEVICE TRACE] Step 1 - Local agent response:', localAgent);
-                    console.log('[DEVICE TRACE] Step 2 - currentHostUid BEFORE agent check:', currentHostUid);
-                    if (localAgent && localAgent.system_id) {
-                        currentHostUid = localAgent.system_id;
-                        document.cookie = "local_device_id=" + currentHostUid + "; path=/; max-age=31536000"; // 1 year
+                    let agentSystemId = localAgent ? localAgent.system_id : null;
+                    
+                    if (agentSystemId) {
+                        // The LOCAL AGENT'S system_id is AUTHORITATIVE. Never overwrite it with a stale
+                        // cookie or a DB row that may have been cloned from another machine.
+                        currentHostUid = agentSystemId;
+                        document.cookie = "local_device_id=" + currentHostUid + "; path=/; max-age=31536000";
+                        if (localAgent.status) {
+                            updateHostBadge(localAgent.status === 'offline' ? 'offline' : 'online');
+                        }
                     }
-                    console.log('[DEVICE TRACE] Step 3 - currentHostUid AFTER agent check:', currentHostUid);
-                    console.log('[DEVICE TRACE] Step 4 - All devices from API:', data.devices.map(d => ({ id: d.system_id, name: d.name, online: d.is_online })));
 
-                    // 2. Fetch the true presence from the database payload for whichever device is 'This Device'
+                    // 2. Fetch the true presence from the database for whichever device is 'This Device'
                     const dbHostDev = currentHostUid ? data.devices.find(d => cleanId(d.system_id) === cleanId(currentHostUid) || cleanId(d.device_uid) === cleanId(currentHostUid)) : null;
-
+                    
                     if (dbHostDev) {
-                        // The device exists in the database
-                        currentHostUid = dbHostDev.system_id || dbHostDev.device_uid;
+                        // The device exists in the database. Update UI from DB but keep
+                        // the authoritative System ID from the agent (or DB if agent was offline).
+                        // DO NOT overwrite currentHostUid with a potentially stale DB value
+                        // if the agent already provided the authoritative ID.
+                        if (!agentSystemId && dbHostDev.system_id) {
+                            currentHostUid = dbHostDev.system_id;
+                        }
                         document.getElementById('mainHostId').innerText = formatId(currentHostUid);
                         document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
 
@@ -2276,8 +2421,10 @@ function getRelativeTime($timestamp)
                         document.getElementById('hostAliasInput').value = alias;
 
                         isOnline = (dbHostDev.is_online === 1 || dbHostDev.is_online === true);
-                        updateHostBadge(isOnline ? 'online' : 'offline');
-                    } else if (currentHostUid && currentHostUid !== 'Connecting...') {
+                        if (!agentSystemId) {
+                            updateHostBadge(isOnline ? 'online' : 'offline');
+                        }
+                    } else if (currentHostUid && currentHostUid !== 'Connecting...' && currentHostUid !== 'ID unavailable') {
                         // The agent provided an ID, but it hasn't registered in the DB yet (or we haven't fetched it)
                         document.getElementById('mainHostId').innerText = formatId(currentHostUid);
                         document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
@@ -2286,8 +2433,8 @@ function getRelativeTime($timestamp)
                         updateHostBadge('online');
                     } else {
                         // No local agent, no cookie, nothing.
-                        document.getElementById('mainHostId').innerText = 'Not Installed';
-                        document.getElementById('sidebarIdDisplay').innerText = 'Not Installed';
+                        document.getElementById('mainHostId').innerText = 'ID unavailable';
+                        document.getElementById('sidebarIdDisplay').innerText = 'ID unavailable';
                         document.getElementById('mainHostAlias').innerText = 'Agent Not Installed';
                         isOnline = false;
                         updateHostBadge('not_installed');
@@ -2318,7 +2465,7 @@ function getRelativeTime($timestamp)
                             promptIncomingModal(
                                 req.requester_name || 'Remote User',
                                 req.requester_system_id,
-                                '127.0.0.1',
+                                req.requester_ip || 'Remote IP',
                                 'Just now',
                                 req.request_token
                             );
@@ -2404,6 +2551,44 @@ function getRelativeTime($timestamp)
                     </div>
                 `;
             }).join('');
+        }
+
+        async function connectToLocalHost() {
+            if (!currentHostUid || currentHostUid === 'Connecting...' || currentHostUid === 'ID unavailable') {
+                showToast('This device is not available for local connection yet');
+                return;
+            }
+            const cleanId = currentHostUid.replace(/[^0-9]/g, '');
+            showToast('Establishing local session...');
+
+            try {
+                const res = await fetch('../backend/api/connections/request.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        target_system_id: cleanId,
+                        requester_system_id: cleanId,
+                        requester_name: '<?= htmlspecialchars($hostAlias) ?>',
+                        local_loopback: true
+                    })
+                });
+
+                const data = await res.json();
+
+                if (data.status !== 'success') {
+                    showToast(data.message || 'Failed to initiate local connection');
+                    return;
+                }
+
+                const token = data.request.request_token;
+                showToast('Local session ready! Launching...');
+                setTimeout(() => {
+                    window.location.href = `remote/session.php?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                }, 500);
+
+            } catch (err) {
+                showToast('Server error initiating local connection');
+            }
         }
 
         function populateRecentDropdown(devices) {

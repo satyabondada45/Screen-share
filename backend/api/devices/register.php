@@ -66,14 +66,15 @@ try {
 
     // 2. If not found by machine_identifier but provided a system_id/device_uid
     if (!$existing && !empty($providedUid)) {
-        $stmt = $pdo->prepare("SELECT * FROM devices WHERE device_uid = ? OR system_id = ? LIMIT 1");
-        $stmt->execute([$providedUid, $providedUid]);
+        $stmt = $pdo->prepare("SELECT * FROM devices WHERE (device_uid = ? OR system_id = ?) AND (machine_identifier IS NULL OR machine_identifier = '' OR machine_identifier = ?) LIMIT 1");
+        $stmt->execute([$providedUid, $providedUid, $machineId]);
         $existing = $stmt->fetch(PDO::FETCH_ASSOC);
     }
 
     if ($existing) {
-        // Reuse existing permanent Device System ID (NEVER overwrite with user ID)
-        $systemId = $existing['system_id'] ?: $existing['device_uid'];
+        // The Agent's provided System ID is authoritative.
+        // Update the DB record to match the Agent, safely migrating the stale DB record.
+        $systemId = (!empty($providedUid) && strlen($providedUid) === 9) ? $providedUid : ($existing['system_id'] ?: $existing['device_uid']);
         if (empty($systemId) && !empty($providedUid)) {
             $systemId = $providedUid;
         }

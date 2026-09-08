@@ -24,6 +24,7 @@ $targetSystemId = preg_replace('/[^0-9]/', '', (string)($data['target_system_id'
 $requesterSystemId = preg_replace('/[^0-9]/', '', (string)($data['requester_system_id'] ?? $data['requester_id'] ?? ''));
 $requesterName = trim($data['requester_name'] ?? 'Dashboard Viewer');
 $requesterUserId = !empty($data['requester_user_id']) ? (int)$data['requester_user_id'] : null;
+$localLoopback = !empty($data['local_loopback']);
 
 if (empty($targetSystemId)) {
     http_response_code(400);
@@ -31,7 +32,7 @@ if (empty($targetSystemId)) {
     exit();
 }
 
-if (!empty($requesterSystemId) && $requesterSystemId === $targetSystemId) {
+if (!$localLoopback && !empty($requesterSystemId) && $requesterSystemId === $targetSystemId) {
     http_response_code(400);
     echo json_encode(["status" => "error", "message" => "Cannot initiate a remote connection to your own computer."]);
     exit();
@@ -72,11 +73,13 @@ try {
     // 3. Generate unique request token
     $requestToken = bin2hex(random_bytes(16));
 
-    // 4. Create pending connection request record (expires in 60s)
+    // 4. Create connection request record (expires in 60s)
+    // For local loopback, auto-accept since the requester IS the target
+    $initialStatus = $localLoopback ? 'accepted' : 'pending';
     $insertStmt = $pdo->prepare("
         INSERT INTO connection_requests 
         (request_token, requester_user_id, requester_system_id, requester_name, target_user_id, target_system_id, status, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW(), NOW() + INTERVAL 60 SECOND)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW() + INTERVAL 60 SECOND)
     ");
 
     $insertStmt->execute([
@@ -85,21 +88,22 @@ try {
         $requesterSystemId ?: '000000000',
         $requesterName,
         $targetSystem['user_id'],
-        $targetSystemId
+        $targetSystemId,
+        $initialStatus
     ]);
 
     $requestId = $pdo->lastInsertId();
 
     echo json_encode([
         "status" => "success",
-        "message" => "Connection request created. Awaiting approval from target computer.",
+        "message" => $localLoopback ? "Local connection request auto-accepted." : "Connection request created. Awaiting approval from target computer.",
         "request" => [
             "id" => $requestId,
             "request_token" => $requestToken,
             "target_system_id" => $targetSystemId,
             "target_name" => $targetSystem['name'],
             "target_ip" => $targetSystem['ip_address'],
-            "status" => "pending",
+            "status" => $initialStatus,
             "expires_in_seconds" => 60
         ]
     ]);

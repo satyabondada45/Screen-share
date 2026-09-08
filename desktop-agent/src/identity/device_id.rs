@@ -5,6 +5,23 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ServerConfig {
+    pub backend_url: String,
+    pub relay_url: String,
+    pub server_addr: String,
+}
+
+/// Reads /Program Files/Screen Share/server-config.json (written by the installer)
+/// to discover the production server address. Returns None if the file is not found
+/// or is malformed.
+pub fn read_server_config() -> Option<ServerConfig> {
+    let pf = env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+    let path = Path::new(&pf).join("Screen Share").join("server-config.json");
+    let contents = fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<ServerConfig>(&contents).ok()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
     pub device_uuid: String,
@@ -17,6 +34,10 @@ pub struct AgentConfig {
     pub relay_port: u16,
     #[serde(default = "default_server_bind_addr")]
     pub server_bind_addr: String,
+    #[serde(default)]
+    pub backend_url: String,
+    #[serde(default)]
+    pub environment: String,
     pub pin: String,
 }
 
@@ -49,7 +70,18 @@ impl AgentConfig {
         let combined_hardware = format!("{}-{}", hardware_uuid, hostname);
         let deterministic_id = generate_deterministic_system_id(&combined_hardware);
 
-        // Support forced identity reset via environment variable (repair second laptop)
+        // Read environment variables for production configuration
+        let env_relay_url = env::var("SCREENSHARE_RELAY_URL").ok();
+        let env_backend_url = env::var("SCREENSHARE_BACKEND_URL").ok();
+        let env_relay_addr = env::var("SCREENSHARE_RELAY_ADDR").ok();
+
+        // Determine relay address: env var > arg > default
+        let resolved_relay = env_relay_addr
+            .clone()
+            .or(env_relay_url.clone())
+            .unwrap_or_else(|| default_relay.to_string());
+
+        // Support forced identity reset via environment variable
         let force_reset = env::var("AGENT_RESET_IDENTITY").map(|v| v == "1").unwrap_or(false);
 
         // 2. Load existing config if present and not force-resetting
@@ -59,10 +91,6 @@ impl AgentConfig {
                     let mut dirty = false;
 
                     // --- CLONED / CORRUPTED CONFIG DETECTION ---
-                    // If the stored device_uuid does not match THIS machine's actual hardware UUID,
-                    // the config was cloned from another machine, manually overwritten (e.g. by a
-                    // repair script), or copied during development. In that case we MUST regenerate
-                    // system_id so each physical laptop has its own unique identity.
                     let uuid_mismatch = !cfg.device_uuid.is_empty() && cfg.device_uuid != hardware_uuid;
                     if uuid_mismatch {
                         eprintln!("[IDENTITY] *** MISMATCH: stored device_uuid ({}) != hardware MachineGuid ({}).", cfg.device_uuid, hardware_uuid);
@@ -80,10 +108,36 @@ impl AgentConfig {
                         cfg.system_id = generate_deterministic_system_id(&format!("{}-{}", cfg.device_uuid, hostname));
                         dirty = true;
                     }
-                    if cfg.relay_addr.is_empty() || cfg.relay_addr == "127.0.0.1:9001" {
-                        cfg.relay_addr = default_relay.to_string();
+
+                    // Apply env overrides for relay/backend
+                    if let Some(env_val) = &env_relay_addr {
+                        if cfg.relay_addr != *env_val {
+                            cfg.relay_addr = env_val.clone();
+                            dirty = true;
+                        }
+                    } else if let Some(env_val) = &env_relay_url {
+                        if cfg.relay_addr != *env_val {
+                            cfg.relay_addr = env_val.clone();
+                            dirty = true;
+                        }
+                    } else if cfg.relay_addr.is_empty() {
+                        cfg.relay_addr = resolved_relay.clone();
                         dirty = true;
                     }
+
+                    // Apply env override for backend URL
+                    if let Some(env_val) = &env_backend_url {
+                        if cfg.backend_url != *env_val {
+                            cfg.backend_url = env_val.clone();
+                            dirty = true;
+                        }
+                    } else if cfg.backend_url.is_empty() {
+                        // Derive backend from relay host if not explicitly configured
+                        let host_ip = cfg.relay_addr.split(':').next().unwrap_or("127.0.0.1");
+                        cfg.backend_url = format!("http://{}/Screen%20Share/backend/api", host_ip);
+                        dirty = true;
+                    }
+
                     if cfg.app_mode.is_empty() {
                         cfg.app_mode = "client".to_string();
                         dirty = true;
@@ -96,6 +150,14 @@ impl AgentConfig {
                         cfg.server_bind_addr = "0.0.0.0:9001".to_string();
                         dirty = true;
                     }
+                    if cfg.environment.is_empty() {
+                        cfg.environment = if env_relay_url.is_some() && !env_relay_url.as_deref().unwrap_or("").contains("localhost") {
+                            "Production".to_string()
+                        } else {
+                            "Development".to_string()
+                        };
+                        dirty = true;
+                    }
                     if dirty {
                         let _ = cfg.save("");
                     }
@@ -103,6 +165,9 @@ impl AgentConfig {
                     println!("[IDENTITY] Device ID:   {}", cfg.system_id);
                     println!("[IDENTITY] MachineGuid: {}", cfg.device_uuid);
                     println!("[IDENTITY] Hostname:    {}", hostname);
+                    println!("[IDENTITY] Relay Addr:  {}", cfg.relay_addr);
+                    println!("[IDENTITY] Backend URL: {}", cfg.backend_url);
+                    println!("[IDENTITY] Environment:  {}", cfg.environment);
                     println!("[IDENTITY] Identity source: {}", if uuid_mismatch { "regenerated_hardware_mismatch" } else { "persisted" });
                     return cfg;
                 }
@@ -110,6 +175,25 @@ impl AgentConfig {
         } else {
             eprintln!("[IDENTITY] AGENT_RESET_IDENTITY=1 — forcing identity regeneration from hardware.");
         }
+
+        // Resolve relay address for new config
+        let config_relay = env_relay_addr
+            .clone()
+            .or(env_relay_url.clone())
+            .unwrap_or_else(|| default_relay.to_string());
+
+        // Resolve backend URL for new config
+        let config_backend = env_backend_url.clone().unwrap_or_else(|| {
+            let host_ip = config_relay.split(':').next().unwrap_or("127.0.0.1");
+            format!("http://{}/Screen%20Share/backend/api", host_ip)
+        });
+
+        // Determine environment
+        let config_env = if env_relay_url.is_some() && !env_relay_url.as_deref().unwrap_or("").contains("localhost") {
+            "Production".to_string()
+        } else {
+            "Development".to_string()
+        };
 
         // 3. First launch on this machine (or forced reset)
         println!("[IDENTITY] Generating new device identity from hardware...");
@@ -122,10 +206,12 @@ impl AgentConfig {
             device_uuid: hardware_uuid,
             system_id: deterministic_id,
             name: hostname,
-            relay_addr: default_relay.to_string(),
+            relay_addr: config_relay,
             app_mode: "client".to_string(),
             relay_port: 9001,
             server_bind_addr: "0.0.0.0:9001".to_string(),
+            backend_url: config_backend,
+            environment: config_env,
             pin: String::new(),
         };
 

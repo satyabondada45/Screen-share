@@ -1,6 +1,6 @@
-CREATE DATABASE IF NOT EXISTS screen_share_db;
+-- CREATE DATABASE IF NOT EXISTS screen_share_db;
 
-USE screen_share_db;
+-- USE screen_share_db;
 
 
 -- ==========================================

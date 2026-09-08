@@ -1,11 +1,32 @@
 <?php
-$host = '127.0.0.1';
-$db   = 'screen_share_db';
-$user = 'root';
-$pass = '3141';
+// Simple .env loader fallback if a .env file exists (e.g. for local dev/VPS)
+$envFile = __DIR__ . '/../../.env';
+if (file_exists($envFile)) {
+    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#') === 0) continue;
+        if (strpos($line, '=') !== false) {
+            list($name, $value) = explode('=', $line, 2);
+            $name = trim($name);
+            $value = trim($value);
+            if (!array_key_exists($name, $_SERVER) && !array_key_exists($name, $_ENV)) {
+                $value = trim($value, "\"'");
+                putenv(sprintf('%s=%s', $name, $value));
+                $_ENV[$name] = $value;
+                $_SERVER[$name] = $value;
+            }
+        }
+    }
+}
+
+$host = getenv('DB_HOST') ?: '127.0.0.1';
+$port = getenv('DB_PORT') ?: '3306';
+$db   = getenv('DB_NAME') ?: 'screen_share_db';
+$user = getenv('DB_USER') ?: 'root';
+$pass = getenv('DB_PASSWORD') !== false ? getenv('DB_PASSWORD') : '3141';
 $charset = 'utf8mb4';
 
-$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
+$dsn = "mysql:host=$host;port=$port;dbname=$db;charset=$charset";
 $options = [
     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,

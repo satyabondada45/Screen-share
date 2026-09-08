@@ -3,6 +3,12 @@
 header("Content-Type: application/json");
 header("Access-Control-Allow-Origin: *");
 
+// Safe diagnostics: log real errors to the server error log ONLY.
+// display_errors is kept OFF so JSON responses are never corrupted by HTML/notices.
+error_reporting(E_ALL);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -16,7 +22,18 @@ $currentUserId = (int)$_SESSION['user_id'];
 
 require_once __DIR__ . '/../../config/database.php';
 
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    error_log("[DEVICE API ERROR] database connection unavailable");
+    http_response_code(500);
+    echo json_encode(["status" => "error", "message" => "Database connection failed"]);
+    exit();
+}
+
+error_log("[DEVICE API] account_id=$currentUserId");
+
 try {
+    error_log("[DEVICE API] query started");
+
     // 1. Mark offline if heartbeat is older than 30s
     $pdo->exec("
         UPDATE devices 
@@ -25,7 +42,8 @@ try {
     ");
 
     // 2. Fetch all registered devices/systems with dynamically calculated online status
-    $stmt = $pdo->query("
+    // NOTE: use prepare() + execute() — query() executes immediately and cannot bind :user_id.
+    $stmt = $pdo->prepare("
         SELECT 
             id, 
             user_id,
@@ -49,12 +67,16 @@ try {
 
     $devices = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+    error_log("[DEVICE API] devices found=" . count($devices));
+
     echo json_encode([
         "status" => "success",
         "count" => count($devices),
         "devices" => $devices
     ]);
+    error_log("[DEVICE API] returning JSON successfully");
 } catch (\PDOException $e) {
+    error_log("[DEVICE API ERROR] " . $e->getMessage());
     http_response_code(500);
-    echo json_encode(["status" => "error", "message" => $e->getMessage()]);
+    echo json_encode(["status" => "error", "message" => "Device list query failed"]);
 }

@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::env;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+use crate::status;
+use crate::status::AgentStatus;
 
 pub struct BackendClient {
     base_url: String,
@@ -38,43 +42,39 @@ impl BackendClient {
         println!("  System ID:   {}", if self.system_id.is_empty() { "Pending..." } else { &self.system_id });
 
         let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(5))
             .build()
         {
             Ok(c) => c,
-            Err(_) => reqwest::blocking::Client::new(),
+            Err(e) => {
+                eprintln!("[System Registration][ERROR] Failed to create HTTP client: {:?}", e);
+                return None;
+            }
         };
 
-        let candidate_bases = vec![
-            self.base_url.clone(),
-            "http://127.0.0.1/Screen%20Share/backend/api".to_string(),
-            "http://localhost/Screen%20Share/backend/api".to_string(),
-        ];
+        let url = format!("{}/devices/register.php", self.base_url.trim_end_matches('/'));
+        println!("  Attempting Backend URL: {}", url);
 
-        for base in &candidate_bases {
-            let url = format!("{}/devices/register.php", base.trim_end_matches('/'));
-            println!("  Attempting Backend URL: {}", url);
-
-            match client.post(&url).json(&payload).send() {
-                Ok(res) => {
-                    let status = res.status();
-                    if status.is_success() {
-                        if let Ok(json) = res.json::<serde_json::Value>() {
-                            if let Some(sys) = json.get("system") {
-                                if let Some(sid) = sys.get("system_id").and_then(|v| v.as_str()) {
-                                    self.system_id = sid.to_string();
-                                    self.base_url = base.clone();
-                                    println!("[System Registration] SUCCESS -> Assigned System ID: {}", sid);
-                                    return Some(sid.to_string());
-                                }
+        match client.post(&url).json(&payload).send() {
+            Ok(res) => {
+                let status = res.status();
+                if status.is_success() {
+                    if let Ok(json) = res.json::<serde_json::Value>() {
+                        if let Some(sys) = json.get("system") {
+                            if let Some(sid) = sys.get("system_id").and_then(|v| v.as_str()) {
+                                self.system_id = sid.to_string();
+                                println!("[System Registration] SUCCESS -> Assigned System ID: {}", sid);
+                                return Some(sid.to_string());
                             }
                         }
+                        eprintln!("[System Registration][ERROR] Response missing 'system.system_id' field");
                     }
+                } else {
                     eprintln!("[System Registration][ERROR] HTTP {}", status);
                 }
-                Err(e) => {
-                    eprintln!("[System Registration][ERROR] Failed for {}: {:?}", url, e);
-                }
+            }
+            Err(e) => {
+                eprintln!("[System Registration][ERROR] Failed for {}: {:?}", url, e);
             }
         }
 
@@ -82,7 +82,9 @@ impl BackendClient {
     }
 
     /// Spawns a background heartbeat thread that pings MySQL every 3 seconds.
-    pub fn start_heartbeat_thread(&self) {
+    /// Publishes the backend connection state into the shared live status so the
+    /// Screen Share GUI can display it.
+    pub fn start_heartbeat_thread(&self, status: Arc<Mutex<AgentStatus>>) {
         let base_url = self.base_url.clone();
         let machine_id = self.machine_identifier.clone();
         let sys_id = self.system_id.clone();
@@ -97,29 +99,34 @@ impl BackendClient {
             payload.insert("machine_identifier", machine_id.clone());
             payload.insert("system_id", sys_id.clone());
 
-            let candidate_urls = vec![
-                format!("{}/devices/heartbeat.php", base_url.trim_end_matches('/')),
-                "http://127.0.0.1/Screen%20Share/backend/api/devices/heartbeat.php".to_string(),
-                "http://localhost/Screen%20Share/backend/api/devices/heartbeat.php".to_string(),
-            ];
+            let url = format!("{}/devices/heartbeat.php", base_url.trim_end_matches('/'));
 
             let mut count: u64 = 0;
             loop {
-                for url in &candidate_urls {
-                    match client.post(url).json(&payload).send() {
-                        Ok(res) if res.status().is_success() => {
-                            count += 1;
-                            if count == 1 {
-                                println!("[HEARTBEAT] Active for device_id: {}, machine: {} -> HTTP {}", sys_id, machine_id, res.status());
-                                println!("[HEARTBEAT] device_id={}", sys_id);
-                            }
-                            if count % 10 == 0 {
-                                println!("[HEARTBEAT] device_id={} (ping #{})", sys_id, count);
-                            }
-                            break;
+                match client.post(&url).json(&payload).send() {
+                    Ok(res) if res.status().is_success() => {
+                        if let Ok(mut g) = status.lock() {
+                            g.backend_connected = true;
                         }
-                        _ => {}
+                        count += 1;
+                        if count == 1 {
+                            println!("[HEARTBEAT] Active for device_id: {}, machine: {} -> HTTP {}", sys_id, machine_id, res.status());
+                            println!("[HEARTBEAT] device_id={}", sys_id);
+                        }
+                        if count % 10 == 0 {
+                            println!("[HEARTBEAT] device_id={} (ping #{})", sys_id, count);
+                        }
+                        status::touch_heartbeat();
                     }
+                    Err(e) => {
+                        if count < 3 {
+                            eprintln!("[HEARTBEAT][ERROR] Failed for {}: {:?}", url, e);
+                        }
+                        if let Ok(mut g) = status.lock() {
+                            g.backend_connected = false;
+                        }
+                    }
+                    _ => {}
                 }
                 thread::sleep(Duration::from_secs(3));
             }

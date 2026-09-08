@@ -701,6 +701,57 @@ fn main() {
 
             match packet_type[0] {
                 /* ==================================================
+                   H.264 VIDEO (TYPE 13)
+                   ================================================== */
+                13 => {
+                    let mut header = [0u8; 20];
+                    if read_exact_interruptible(&mut read_stream, &mut header, &connected_read).is_err() {
+                        break;
+                    }
+
+                    let width = match read_u32_be(&header[0..4]) {
+                        Some(v) => v as usize,
+                        None => continue,
+                    };
+                    let height = match read_u32_be(&header[4..8]) {
+                        Some(v) => v as usize,
+                        None => continue,
+                    };
+                    let data_size = match read_u32_be(&header[8..12]) {
+                        Some(v) => v as usize,
+                        None => continue,
+                    };
+                    let _timestamp_ms = match read_u64_be(&header[12..20]) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
+                    frame_number += 1;
+                    if frame_number <= 3 || frame_number % 120 == 0 {
+                        println!("[Frame] #{} {}x{} H264={} bytes", frame_number, width, height, data_size);
+                    }
+
+                    if width == 0 || height == 0 || data_size == 0 || data_size > 50 * 1024 * 1024 {
+                        eprintln!("[Frame] Invalid H.264 header.");
+                        continue;
+                    }
+
+                    let mut h264_data = vec![0u8; data_size];
+                    if read_exact_interruptible(&mut read_stream, &mut h264_data, &connected_read).is_err() {
+                        break;
+                    }
+
+                    // Decode H.264 to RGB
+                    if let Some(frame) = decode_h264_to_rgb32(&h264_data, &mut h264_decoder) {
+                        if let Ok(mut guard) = inbound_shared_frame.lock() {
+                            *guard = Some(frame);
+                        }
+                    } else {
+                        eprintln!("[Viewer] H.264 decode failed for frame #{}", frame_number);
+                    }
+                }
+
+                /* ==================================================
                    H.264 VIDEO (TYPE 15)
                    ================================================== */
                 15 => {
@@ -1034,15 +1085,15 @@ fn main() {
         for key in win.get_keys_pressed(KeyRepeat::No) {
             match key {
                 Key::F1 => {
-                    let packet = make_key_packet(7, 0);
+                    let packet = make_key_packet(10, 0);
                     let _ = out_input.send(packet);
                 }
                 Key::F2 => {
-                    let packet = make_key_packet(7, 1);
+                    let packet = make_key_packet(10, 1);
                     let _ = out_input.send(packet);
                 }
                 Key::F3 => {
-                    let packet = make_key_packet(7, 2);
+                    let packet = make_key_packet(10, 2);
                     let _ = out_input.send(packet);
                 }
                 Key::F5 => {
@@ -1156,7 +1207,7 @@ fn main() {
                 if sy.abs() > 0.01 {
                     let scroll = (sy * 120.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
                     let mut packet = Vec::with_capacity(9);
-                    packet.push(8);
+                    packet.push(9);
                     packet.extend_from_slice(&0i16.to_be_bytes());
                     packet.extend_from_slice(&scroll.to_be_bytes());
                     packet.extend_from_slice(&[0u8; 4]);

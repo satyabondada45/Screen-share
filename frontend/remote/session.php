@@ -60,29 +60,20 @@ $systemId = $device['system_id'] ?: $device['device_uid'];
     console.log("Requested Device ID = <?= htmlspecialchars($requestedId) ?>");
     console.log("Registered System ID = <?= htmlspecialchars($systemId) ?>");
 </script>
+<?php
 $sessionCode = strlen($cleanId) === 9
     ? substr($cleanId, 0, 3) . ' ' . substr($cleanId, 3, 3) . ' ' . substr($cleanId, 6, 3)
     : (strlen($cleanId) > 3 ? substr($cleanId, 0, 3) . '-' . substr($cleanId, 3) : $cleanId);
 
-// ─── Relay Host Resolution ────────────────────────────────────────────────────
-// 1. Try explicitly configured host
-$relayConfigPath = __DIR__ . '/../../backend/config/relay.php';
-if (file_exists($relayConfigPath)) {
-    require_once $relayConfigPath;
-}
-
-if (defined('RELAY_SERVER_HOST')) {
-    $relayServerAddr = RELAY_SERVER_HOST;
-} else {
-    // 2. Dynamic discovery from web server
-    $relayServerAddr = $_SERVER['SERVER_ADDR'] ?? '';
-    if (empty($relayServerAddr) || $relayServerAddr === '::1' || $relayServerAddr === '127.0.0.1') {
-        $httpHost = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $relayServerAddr = strtok($httpHost, ':');
+    // The relay WebSocket URL is configurable via the RELAY_WS_URL environment variable.
+    // In production, this is set to wss://your-domain.com:9001 (or ws://server-ip:9001 for LAN).
+    // In development/local testing, it defaults to ws://localhost:9001.
+    $relayWsUrl = getenv('RELAY_WS_URL') ?: 'ws://localhost:9001';
+    // Allow override via query parameter for testing (dev only)
+    if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
+        $relayWsUrl = $_GET['relay'];
     }
-}
-$relayWsHost = $relayServerAddr; // PHP string injected into JS
-?>
+    ?>
 <!DOCTYPE html>
 
 <html lang="en">
@@ -664,7 +655,7 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                 </div>
                 <div class="info-row">
                     <span class="info-label">IP Address</span>
-                    <span class="info-val"><?= htmlspecialchars($device['ip_address'] ?? '192.168.1.120') ?></span>
+                    <span class="info-val"><?= htmlspecialchars($device['ip_address'] ?? 'Unknown') ?></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">Operating System</span>
@@ -721,19 +712,7 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                 JSON_UNESCAPED_SLASHES
             ) ?>;
 
-        const WS_PORT = "9001";
-        // Get the real relay IP injected from PHP configuration
-        const WS_HOST_PHP = <?= json_encode($relayWsHost) ?>;
-        
-        // Use the configured/detected server IP. We never want "localhost" 
-        // if this is a remote viewer.
-        const WS_HOST = (WS_HOST_PHP && WS_HOST_PHP !== 'localhost' && WS_HOST_PHP !== '::1') 
-            ? WS_HOST_PHP 
-            : location.hostname;
-
-        const WS_URL = location.protocol === "https:"
-            ? `wss://${WS_HOST}:${WS_PORT}`
-            : `ws://${WS_HOST}:${WS_PORT}`;
+        const WS_URL = <?= json_encode($relayWsUrl) ?>;
 
 
         /* ============================================================
@@ -742,6 +721,9 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
 
         let ws = null;
         let wsRxBuffer = new Uint8Array(0);
+        let webrtcPeerConnection = null;
+        let webrtcDataChannel = null;
+        let activeTransport = "WS"; // "WS" or "WEBRTC"
 
         let isStreaming = false;
 
@@ -1409,9 +1391,11 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
 
         const DecoderState = {
             UNCONFIGURED: "UNCONFIGURED",
-            CONFIGURED_WAITING_FOR_KEYFRAME: "CONFIGURED_WAITING_FOR_KEYFRAME",
-            DECODING: "DECODING",
-            ERROR: "ERROR"
+            CONFIGURING: "CONFIGURING",
+            WAITING_FOR_KEYFRAME: "WAITING_FOR_KEYFRAME",
+            CONFIGURED: "CONFIGURED",
+            ERROR: "ERROR",
+            CLOSED: "CLOSED"
         };
 
         let decoderState = DecoderState.UNCONFIGURED;
@@ -1496,6 +1480,17 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
 
         let cachedSPS = null;
         let cachedPPS = null;
+        let lastVideoNalInfo = null;
+
+        function logDecodeErrorDetail(error) {
+            console.error(
+                "[BROWSER DECODE ERROR DETAIL]\n" +
+                "error=" + (error && error.message ? error.message : error) + "\n" +
+                "decoderState=" + decoderState + "\n" +
+                "videoDecoderState=" + (videoDecoder ? videoDecoder.state : "none") + "\n" +
+                "lastNAL=" + JSON.stringify(lastVideoNalInfo)
+            );
+        }
 
         function parseH264Nals(dataBytes) {
             let nalTypes = [];
@@ -1568,29 +1563,37 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
 
         function prepareAnnexBKeyframe(dataBytes, sps, pps) {
             const nals = parseH264Nals(dataBytes);
-            if (nals.hasSPS && nals.hasPPS) {
-                return dataBytes;
-            }
+            
+            // WebCodecs (without an AVCC description) requires the very first NAL units
+            // of the keyframe chunk to be the SPS and PPS. If the encoder placed a PPS,
+            // SEI, or AUD before the SPS, the decoder will fail with "Decoding error".
+            // Therefore, we ALWAYS prepend the active SPS and PPS to the beginning of the
+            // Annex-B payload for keyframes, guaranteeing correct decoder configuration.
+            const effectiveSPS = sps || nals.spsUnit;
+            const effectivePPS = pps || nals.ppsUnit;
+
             let extraLen = 0;
-            if (!nals.hasSPS && sps) extraLen += 4 + sps.length;
-            if (!nals.hasPPS && pps) extraLen += 4 + pps.length;
+            if (effectiveSPS) extraLen += 4 + effectiveSPS.length;
+            if (effectivePPS) extraLen += 4 + effectivePPS.length;
 
             if (extraLen === 0) return dataBytes;
 
             const combined = new Uint8Array(extraLen + dataBytes.length);
             let offset = 0;
-            if (!nals.hasSPS && sps) {
+            
+            if (effectiveSPS) {
                 combined.set([0, 0, 0, 1], offset);
                 offset += 4;
-                combined.set(sps, offset);
-                offset += sps.length;
+                combined.set(effectiveSPS, offset);
+                offset += effectiveSPS.length;
             }
-            if (!nals.hasPPS && pps) {
+            if (effectivePPS) {
                 combined.set([0, 0, 0, 1], offset);
                 offset += 4;
-                combined.set(pps, offset);
-                offset += pps.length;
+                combined.set(effectivePPS, offset);
+                offset += effectivePPS.length;
             }
+            
             combined.set(dataBytes, offset);
             return combined;
         }
@@ -1606,13 +1609,17 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             try {
                 videoDecoder = new VideoDecoder({
                     output(frame) {
-                        if (decoderState === DecoderState.CONFIGURED_WAITING_FOR_KEYFRAME) {
-                            decoderState = DecoderState.DECODING;
-                            console.log("[DECODER STATE] DECODING (Keyframe decoded)");
+                        if (decoderState === DecoderState.WAITING_FOR_KEYFRAME) {
+                            decoderState = DecoderState.CONFIGURED;
+                            console.log("[DECODER STATE] CONFIGURED (Keyframe decoded)");
                             console.log("[WEBCODECS] KEYFRAME DECODED");
                         }
                         browserPerf.decodedFrames++;
                         videoFrameCount++;
+
+                        if (videoFrameCount <= 5) {
+                            console.log(`[DECODER] output received (frame #${videoFrameCount}, state = ${videoDecoder ? videoDecoder.state : 'none'})`);
+                        }
 
                         console.log(`[WEBCODECS OUTPUT]\nwidth=${frame.displayWidth}\nheight=${frame.displayHeight}\ntimestamp=${frame.timestamp}`);
 
@@ -1678,14 +1685,26 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                         frame.close();
                     },
                     error(error) {
+                        // A decode error must NOT tear down the stream or close the WebSocket.
+                        // Log the exact frame/NAL context and recover by waiting for the next
+                        // valid SPS/PPS/IDR keyframe. The host keeps streaming; the viewer stays open.
                         console.error("[BROWSER DECODE ERROR]", error);
-                        decoderState = DecoderState.ERROR;
-                        setStreamState("ERROR");
+                        console.log("[DECODER] decode error");
+                        logDecodeErrorDetail(error);
+                        logDecodeErrorDetail(error);
+                        if (decoderState !== DecoderState.UNCONFIGURED) {
+                            console.warn("[WEBCODECS RECOVER] Decoder error recovered. Resetting decoder. Waiting for next keyframe.");
+                            decoderState = DecoderState.UNCONFIGURED;
+                            setStreamState("WAITING_FOR_KEYFRAME");
+                            // We MUST completely close/recreate the decoder because a decode error puts it into a permanently closed/error state.
+                            initVideoDecoder();
+                        }
                     }
                 });
                 
                 if (window._rx_count <= 5) {
-                    console.log(`[DECODER]\nconfigured = ${videoDecoder ? 'YES' : 'NO'}\nstate = ${decoderState}\ndecodeQueueSize = ${videoDecoder ? videoDecoder.decodeQueueSize : 0}`);
+                    const realState = videoDecoder ? videoDecoder.state : "none";
+                    console.log(`[DECODER]\nconfigured = ${videoDecoder ? 'YES' : 'NO'}\nstate = ${realState}\ndecoderState = ${decoderState}\ndecodeQueueSize = ${videoDecoder ? videoDecoder.decodeQueueSize : 0}`);
                 }
                 return true;
             } catch (err) {
@@ -1696,6 +1715,7 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
         }
 
         async function handleVideoPacket(buffer) {
+            try {
             const bytes = new Uint8Array(buffer);
             const length = bytes.length;
             window._rx_count = (window._rx_count || 0) + 1;
@@ -1740,10 +1760,29 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             browserPerf.rxPackets++;
 
             const receiveTime = Date.now();
-            const networkLatency = receiveTime - captureTimestamp;
+
+            // The agent capture timestamp is a Unix-epoch value in MILLISECONDS, the same
+            // base as Date.now(). Only compute latency when it is a plausible epoch value AND
+            // the result is sane. If the agent/relay did not populate the timestamp (or used
+            // an incompatible base such as mixing performance.now()), DO NOT subtract it and
+            // emit a nonsense value like 1.78e12 ms. Log the raw values for diagnosis instead.
+            const EPOCH_MIN = 1577836800000;  // 2020-01-01 UTC (ms)
+            const EPOCH_MAX = 4102444800000;  // 2100-01-01 UTC (ms)
+            let latencyValid = captureTimestamp >= EPOCH_MIN && captureTimestamp <= EPOCH_MAX;
+            let networkLatency = -1;
+            if (latencyValid) {
+                networkLatency = receiveTime - captureTimestamp;
+                if (networkLatency < 0 || networkLatency > 60000) {
+                    latencyValid = false; // implausible for a LAN screen-share -> incompatible base
+                }
+            }
             const decodeQueue = videoDecoder ? videoDecoder.decodeQueueSize : 0;
-            
-            console.log(`[LATENCY] Capture->Browser: ${networkLatency}ms | DecodeQueue: ${decodeQueue}`);
+
+            if (latencyValid) {
+                console.log(`[LATENCY] Capture->Browser: ${networkLatency}ms | DecodeQueue: ${decodeQueue}`);
+            } else {
+                console.log(`[LATENCY] Capture->Browser: n/a (incompatible capture timestamp) | rawCaptureTs=${captureTimestamp} receiveTs=${receiveTime} | DecodeQueue: ${decodeQueue}`);
+            }
             console.log(`[BROWSER VIDEO] width=${width} height=${height} h264_size=${actualPayloadSize}`);
 
             // Capability Detection BEFORE using VideoDecoder
@@ -1762,12 +1801,6 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             // STEP 2: NAL Parsing & Parameter Set Caching
             const nals = parseH264Nals(h264Payload);
             
-            if (window._rx_count <= 5) {
-                console.log(`[VIDEO] SPS received = ${nals.hasSPS ? 'YES' : 'NO'}`);
-                console.log(`[VIDEO] PPS received = ${nals.hasPPS ? 'YES' : 'NO'}`);
-                console.log(`[VIDEO] IDR received = ${nals.hasIDR ? 'YES' : 'NO'}`);
-            }
-
             if (nals.hasSPS && nals.spsUnit) {
                 cachedSPS = nals.spsUnit;
             }
@@ -1775,14 +1808,48 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                 cachedPPS = nals.ppsUnit;
             }
 
-            // STEP 3: Keyframe State & Evaluation
-            const hasSPS = (cachedSPS !== null || nals.hasSPS);
-            const hasPPS = (cachedPPS !== null || nals.hasPPS);
-            const hasIDR = nals.hasIDR;
-            const isKey = (hasIDR || (nals.hasSPS && nals.hasPPS)) && hasSPS && hasPPS;
+            // STEP 3: Keyframe State & Evaluation with PERSISTENT SPS/PPS caching.
+            // SPS/PPS may arrive in an earlier packet; cache them and reuse for later IDR frames.
+            const currentSPS = nals.hasSPS;
+            const currentPPS = nals.hasPPS;
+            const currentIDR = nals.hasIDR;
+            const cachedSPSExists = cachedSPS !== null;
+            const cachedPPSExists = cachedPPS !== null;
 
-            const keyDeltaStr = isKey ? "key" : "delta";
-            console.log(`[BROWSER H264]\npacket_size=${length}\nreassembled_size=${actualPayloadSize}\nNAL types=[${nals.nalTypes.join(',')}]\nSPS=${hasSPS}\nPPS=${hasPPS}\nIDR=${hasIDR}\nkey/delta=${keyDeltaStr}`);
+            const hasSPS = currentSPS || cachedSPSExists;
+            const hasPPS = currentPPS || cachedPPSExists;
+            const hasIDR = currentIDR;
+
+            // Classification:
+            //   KEY                        -> IDR + (current or cached) SPS + (current or cached) PPS
+            //   WAITING_FOR_PARAMETER_SETS -> IDR present but required SPS/PPS not yet available
+            //   DELTA                      -> non-IDR frame (only decodable after a keyframe)
+            let classification;
+            if (hasIDR && hasSPS && hasPPS) {
+                classification = "KEY";
+            } else if (hasIDR) {
+                classification = "WAITING_FOR_PARAMETER_SETS";
+            } else {
+                classification = "DELTA";
+            }
+
+            const isKey = classification === "KEY";
+
+            // keyDeltaStr MUST be initialized before any log/reference to it (fixes TDZ ReferenceError).
+            const keyDeltaStr = isKey ? "key" : (classification === "DELTA" ? "delta" : "waiting");
+            console.log('[VIDEO] key/delta =', keyDeltaStr);
+
+            if (window._rx_count <= 5) {
+                console.log(`[VIDEO] NAL types=[${nals.nalTypes.join(',')}]`);
+                console.log(`[VIDEO] currentSPS=${currentSPS}`);
+                console.log(`[VIDEO] cachedSPS=${cachedSPSExists}`);
+                console.log(`[VIDEO] currentPPS=${currentPPS}`);
+                console.log(`[VIDEO] cachedPPS=${cachedPPSExists}`);
+                console.log(`[VIDEO] IDR=${currentIDR}`);
+                console.log(`[VIDEO] classification=${classification}`);
+            }
+
+            console.log(`[BROWSER H264]\npacket_size=${length}\nreassembled_size=${actualPayloadSize}\nNAL types=[${nals.nalTypes.join(',')}]\ncurrentSPS=${currentSPS}\ncachedSPS=${cachedSPSExists}\ncurrentPPS=${currentPPS}\ncachedPPS=${cachedPPSExists}\nIDR=${currentIDR}\nclassification=${classification}\nkey/delta=${keyDeltaStr}`);
 
             for (const n of nals.nalTypes) {
                 if (n === 7) {
@@ -1807,8 +1874,18 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                 }
             }
 
-            // Configure decoder when in UNCONFIGURED state
-            if (decoderState === DecoderState.UNCONFIGURED) {
+            // Keep the JS-side tracking in sync with the real decoder state.
+            if (videoDecoder && videoDecoder.state === 'closed') {
+                decoderState = DecoderState.UNCONFIGURED;
+            }
+
+            // Configure decoder when it is genuinely unconfigured. configure() is synchronous:
+            // immediately after it returns, videoDecoder.state === 'configured'. We must not call
+            // decode() until that is true, otherwise Chrome throws and the frame is lost.
+            if (decoderState === DecoderState.UNCONFIGURED || (videoDecoder && videoDecoder.state === 'unconfigured')) {
+                console.log(`[DECODER] current state = ${videoDecoder ? videoDecoder.state : 'none'}`);
+                console.log(`[DECODER] configured = ${videoDecoder ? 'YES' : 'NO'}`);
+                console.log(`[DECODER] configure() starting`);
                 try {
                     videoDecoder.configure({
                         codec: codecString,
@@ -1816,12 +1893,14 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                         codedHeight: height,
                         optimizeForLatency: true
                     });
-                    decoderState = DecoderState.CONFIGURED_WAITING_FOR_KEYFRAME;
+                    console.log(`[DECODER] configure() completed (state = ${videoDecoder.state})`);
+                    decoderState = DecoderState.WAITING_FOR_KEYFRAME;
                     setStreamState("WAITING_FOR_KEYFRAME");
                     console.log(`[WEBCODECS CONFIG]\ncodec=${codecString}\nwidth=${width}\nheight=${height}\ndescriptionBytes=0\nformat=AnnexB`);
                 } catch (e) {
                     console.error("[BROWSER DECODER CONFIG ERROR]", e);
-                    decoderState = DecoderState.ERROR;
+                    logDecodeErrorDetail(e);
+                    decoderState = DecoderState.WAITING_FOR_KEYFRAME;
                     return;
                 }
             }
@@ -1829,15 +1908,54 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             // Monotonic timestamp in microseconds
             const timestamp = Math.round(performance.now() * 1000);
 
-            // State Handling: CONFIGURED_WAITING_FOR_KEYFRAME
-            if (decoderState === DecoderState.CONFIGURED_WAITING_FOR_KEYFRAME) {
+            // Defensive: never decode while the decoder is not actually configured.
+            if (!videoDecoder || videoDecoder.state !== 'configured') {
+                console.warn("[WEBCODECS] Skipping decode: decoder not in 'configured' state (state=" + (videoDecoder ? videoDecoder.state : "none") + "). Waiting for configure.");
+                return;
+            }
+
+            // Track NAL context for diagnostics on any decode error.
+            lastVideoNalInfo = {
+                isKey: isKey,
+                nalTypes: nals.nalTypes,
+                hasSPS: nals.hasSPS,
+                hasPPS: nals.hasPPS,
+                hasIDR: nals.hasIDR,
+                bytes: actualPayloadSize,
+                width: width,
+                height: height,
+                codec: codecString
+            };
+
+            // State Handling: WAITING_FOR_KEYFRAME
+            if (decoderState === DecoderState.WAITING_FOR_KEYFRAME) {
                 if (!isKey) {
                     console.warn("[BROWSER VIDEO] Waiting for first keyframe (SPS/PPS/IDR) before decoding delta frames.");
                     return;
                 }
 
                 const annexBKeyframe = prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS);
-                console.log(`[WEBCODECS DECODE]\ntype=key\ntimestamp=${timestamp}\nbytes=${annexBKeyframe.byteLength}\nNAL types=[${nals.nalTypes.join(',')}]`);
+                
+                // Diagnostic logging immediately before decode (Requirement 7)
+                const first32 = Array.from(annexBKeyframe.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                const has4ByteStart = annexBKeyframe[0] === 0 && annexBKeyframe[1] === 0 && annexBKeyframe[2] === 0 && annexBKeyframe[3] === 1;
+                const has3ByteStart = annexBKeyframe[0] === 0 && annexBKeyframe[1] === 0 && annexBKeyframe[2] === 1;
+                
+                // Check if it might look like AVCC length prefixes instead of start codes
+                const potentialAvccLen = (annexBKeyframe[0] << 24) | (annexBKeyframe[1] << 16) | (annexBKeyframe[2] << 8) | annexBKeyframe[3];
+                
+                console.log(`[WEBCODECS DECODE]
+type=key
+timestamp=${timestamp}
+bytes=${annexBKeyframe.byteLength}
+NAL types=[${nals.nalTypes.join(',')}]`);
+                console.log(`[DECODE PAYLOAD FORMAT]
+first_32_hex: ${first32}
+starts_with_00_00_00_01: ${has4ByteStart}
+starts_with_00_00_01: ${has3ByteStart}
+potential_avcc_length: ${potentialAvccLen}`);
+
+                console.log(`[DECODER] decode() starting (state = ${videoDecoder ? videoDecoder.state : 'none'})`);
 
                 try {
                     const chunk = new EncodedVideoChunk({
@@ -1846,15 +1964,20 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                         data: annexBKeyframe
                     });
                     videoDecoder.decode(chunk);
+                    console.log("[DECODER] decode() submitted");
                     console.log("[DECODER] First keyframe submitted");
+                    decoderState = DecoderState.CONFIGURED;
                 } catch (e) {
                     console.error("[BROWSER DECODER ERROR] decode(key) exception:", e);
-                    decoderState = DecoderState.ERROR;
+                    logDecodeErrorDetail(e);
+                    // Recover: Reset decoder and keep waiting for next valid keyframe. Do NOT close the WebSocket.
+                    decoderState = DecoderState.UNCONFIGURED;
+                    initVideoDecoder();
                 }
                 return;
             }
 
-            if (decoderState === DecoderState.DECODING) {
+            if (decoderState === DecoderState.CONFIGURED) {
                 const chunkType = isKey ? 'key' : 'delta';
                 const chunkData = isKey ? prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS) : h264Payload;
 
@@ -1865,6 +1988,7 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                 }
 
                 console.log(`[WEBCODECS DECODE]\ntype=${chunkType}\ntimestamp=${timestamp}\nbytes=${chunkData.byteLength}\nNAL types=[${nals.nalTypes.join(',')}]`);
+                console.log(`[DECODER] decode() starting (state = ${videoDecoder ? videoDecoder.state : 'none'})`);
 
                 try {
                     const chunk = new EncodedVideoChunk({
@@ -1873,16 +1997,25 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                         data: chunkData
                     });
                     videoDecoder.decode(chunk);
+                    console.log(`[DECODER] decode() submitted (${chunkType})`);
                 } catch (e) {
                     console.error(`[BROWSER DECODER ERROR] decode(${chunkType}) exception:`, e);
-                    decoderState = DecoderState.ERROR;
+                    logDecodeErrorDetail(e);
+                    // Recover: wait for the next keyframe instead of killing the stream.
+                    decoderState = DecoderState.WAITING_FOR_KEYFRAME;
                 }
+            }
+            } catch (e) {
+                // A single malformed/exception-throwing frame must NOT terminate the video
+                // WebSocket or the whole stream. Log it and skip the frame; decoding continues
+                // with the next packet. (Primary fix is the keyDeltaStr init order above.)
+                console.error("[VIDEO] handleVideoPacket() unexpected error (frame skipped, stream continues):", e);
             }
         }
 
-
         /* ============================================================
            AUDIO PACKET
+
         ============================================================ */
 
         function handleAudioPacket(buffer) {
@@ -2282,7 +2415,7 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
            START STREAM
         ============================================================ */
 
-        function startWebStream() {
+        async function startWebStream() {
             console.log(`[SESSION] page loaded`);
             console.log(`[SESSION] authenticated user = <?= json_encode($_SESSION['user_id'] ?? null) ?>`);
             console.log(`[SESSION] session id = <?= json_encode(session_id()) ?>`);
@@ -2382,28 +2515,37 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             startRenderLoop();
 
 
+            let targetUrl = WS_URL;
             try {
+                const cleanId = String(DEVICE_ID).replace(/[^0-9a-zA-Z_\-]/g, '');
+                const discRes = await fetch(`http://127.0.0.1:49182/discover?target=${cleanId}`, { method: 'GET' });
+                if (discRes.ok) {
+                    const discJson = await discRes.json();
+                    if (discJson.status === "found" && discJson.ip && discJson.port) {
+                        targetUrl = `ws://${discJson.ip}:${discJson.port}`;
+                        console.log("[DIRECT] Discovered local agent at " + targetUrl);
+                    }
+                }
+            } catch (e) {
+                console.log("[DIRECT] Local agent not running or discovery failed.", e);
+            }
 
-                ws =
-                    new WebSocket(
-                        WS_URL
-                    );
+            if (targetUrl !== WS_URL) {
+                setHud("DIRECT P2P CONNECTING...");
+                // Add a small HUD indicator for Direct connection
+                const resEl = document.getElementById("resDisplay");
+                if (resEl) {
+                    resEl.innerHTML += " <span style='color: var(--online); font-weight: bold;'>[DIRECT]</span>";
+                }
+            }
 
+            try {
+                ws = new WebSocket(targetUrl);
             } catch (error) {
-
-                console.error(
-                    "[WS] Creation failed:",
-                    error
-                );
-
+                console.error("[WS] Creation failed:", error);
                 stopWebStream();
-
-                alert(
-                    "Could not create WebSocket."
-                );
-
+                alert("Could not create WebSocket.");
                 return;
-
             }
 
 
@@ -2437,9 +2579,10 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
                 function (error) {
 
                     console.error(
-                        "[WS] Error:",
+                        "[WS] Error event fired (point: ws.onerror handler)",
                         error
                     );
+                    console.error(`[WS] state: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount}`);
 
                     setHud(
                         "CONNECTION ERROR"
@@ -2451,12 +2594,17 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             ws.onclose =
                 function (event) {
 
-                    console.log(`[AUTH DEBUG] WebSocket CLOSED\ncode: ${event.code}\nreason: ${event.reason || 'none'}\nwasClean: ${event.wasClean}`);
+                    // event.wasClean === false + a 1xxx code means the REMOTE (relay/agent) closed
+                    // the socket, NOT this browser. A browser-initiated close sets ws.close() itself
+                    // (see stopWebStream) and would be wasClean=true with code 1000/1001.
+                    const closer = event.wasClean ? "BROWSER (local close)" : "REMOTE (relay/agent)";
+                    console.log(`[AUTH DEBUG] WebSocket CLOSED\ncode: ${event.code}\nreason: ${event.reason || 'none'}\nwasClean: ${event.wasClean}\ninitiatedBy: ${closer}\npoint: ws.onclose handler`);
                     console.log(
                         "[WS] Closed:",
                         event.code,
                         event.reason
                     );
+                    console.log(`[WS] state at close: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount} rxPackets=${browserPerf.rxPackets}`);
 
                     if (isStreaming) {
 
@@ -2471,22 +2619,11 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
         }
 
 
-        /* ============================================================
-           STOP STREAM
-        ============================================================ */
-
         function stopWebStream() {
-
             isStreaming = false;
-
             stopRenderLoop();
-
             videoDecodeBusy = false;
-
             safeCloseImage();
-
-            renderWidth = 0;
-            renderHeight = 0;
 
             if (videoDecoder && videoDecoder.state !== 'closed') {
                 try { videoDecoder.close(); } catch (e) { }
@@ -2496,40 +2633,29 @@ $relayWsHost = $relayServerAddr; // PHP string injected into JS
             cachedSPS = null;
             cachedPPS = null;
 
-
-            if (
-                mediaRecorder &&
-                mediaRecorder.state ===
-                "recording"
-            ) {
-
-                try {
-
-                    mediaRecorder.stop();
-
-                } catch (e) { }
-
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                try { mediaRecorder.stop(); } catch (e) { }
             }
 
+            if (webrtcDataChannel) {
+                webrtcDataChannel.close();
+                webrtcDataChannel = null;
+            }
+            if (webrtcPeerConnection) {
+                webrtcPeerConnection.close();
+                webrtcPeerConnection = null;
+            }
 
             if (ws) {
-
                 try {
-
+                    console.log(`[WS] BROWSER explicitly closing WebSocket (point: stopWebStream). isStreaming=${isStreaming} videoFrameCount=${videoFrameCount}`);
                     ws.onopen = null;
-
                     ws.onmessage = null;
-
                     ws.onerror = null;
-
                     ws.onclose = null;
-
                     ws.close();
-
                 } catch (e) { }
-
                 ws = null;
-
             }
 
 

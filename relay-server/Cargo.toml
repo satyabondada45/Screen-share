@@ -1,6 +1,6 @@
 [package]
 name = "relay-server"
-version = "0.1.0"
+version = "1.1.1"
 edition = "2021"
 
 [[bin]]
@@ -10,6 +10,8 @@ path = "src/main.rs"
 [dependencies]
 tungstenite = "0.20"
 sha2 = "0.10"
+ctrlc = "3.2"
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_Registry"

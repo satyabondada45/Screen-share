@@ -523,16 +523,16 @@ fn handle_websocket_viewer(
 
             match packet_type {
                 13 | 15 => {
-                    let mut header = [0u8; 12];
+                    // Agent sends: type(1) + width(4) + height(4) + h264_size(4) + timestamp(8) = 21-byte header
+                    // Type byte already consumed above. We must read the remaining 20 bytes.
+                    let mut header = [0u8; 20];
                     if host_reader.read_exact(&mut header).is_err() {
                         break;
                     }
 
-                    let mut size_buf = [0u8; 4];
-                    size_buf.copy_from_slice(&header[8..12]);
-                    let payload_size = u32::from_be_bytes(size_buf) as usize;
                     let width = u32::from_be_bytes(header[0..4].try_into().unwrap_or([0;4]));
                     let height = u32::from_be_bytes(header[4..8].try_into().unwrap_or([0;4]));
+                    let payload_size = u32::from_be_bytes(header[8..12].try_into().unwrap_or([0;4])) as usize;
 
                     if payload_size == 0 || payload_size > 50 * 1024 * 1024 {
                         eprintln!("[RELAY RX] type={} INVALID payload_size={}", packet_type, payload_size);
@@ -544,7 +544,7 @@ fn handle_websocket_viewer(
                         break;
                     }
 
-                    let total_size = 1 + 12 + payload_size;
+                    let total_size = 1 + 20 + payload_size;
                     relay_frame_count += 1;
                     s_frames.fetch_add(1, Ordering::Relaxed);
 

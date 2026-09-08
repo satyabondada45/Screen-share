@@ -1,0 +1,27 @@
+[Unit]
+Description=Screen Share Relay Server
+After=network.target
+
+[Service]
+Type=simple
+User=deskstream
+Group=deskstream
+WorkingDirectory=/opt/deskstream/relay-server
+ExecStart=/opt/deskstream/relay-server/relay-server
+Restart=on-failure
+RestartSec=5
+
+# Environment Configuration
+Environment="RELAY_PORT=9001"
+Environment="SCREENSHARE_BACKEND_URL=http://localhost/backend/api"
+# Uncomment and update the following line if the PHP backend is on a different server:
+# Environment="SCREENSHARE_BACKEND_URL=https://your-api.com/backend/api"
+
+# Security Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -179,13 +179,16 @@ pub fn start_remote_viewer(relay_addr: &str, target_system_id: &str, pin: &str) 
                 }
             };
 
-            let mut header = [0u8; 13];
+            // TYPE 13 header: type(1) + width(4) + height(4) + h264_size(4) + timestamp(8) = 21 bytes
+            let mut header = [0u8; 21];
             while is_conn_in.load(Ordering::SeqCst) {
                 if read_exact_interruptible(&mut read_stream, &mut header, &is_conn_in).is_err() {
                     break;
                 }
 
                 let ptype = header[0];
+                let _width = u32::from_be_bytes(header[1..5].try_into().unwrap());
+                let _height = u32::from_be_bytes(header[5..9].try_into().unwrap());
                 let payload_len = u32::from_be_bytes(header[9..13].try_into().unwrap()) as usize;
 
                 if payload_len > 50 * 1024 * 1024 {
