@@ -9,11 +9,20 @@ if (empty($_SESSION['user_id'])) {
     exit();
 }
 
-$dbPath = __DIR__ . '/../../backend/config/database.php';
-if (!isset($pdo) || $pdo === null) {
-    if (file_exists($dbPath)) {
-        require $dbPath;
+$dbPath = __DIR__ . '/../config/database.php';
+
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    if (!file_exists($dbPath)) {
+        http_response_code(500);
+        exit('Database configuration file not found.');
     }
+
+    require_once $dbPath;
+}
+
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    http_response_code(500);
+    exit('Database connection unavailable.');
 }
 
 $deviceUid = $_GET['id'] ?? null;
@@ -68,7 +77,7 @@ $sessionCode = strlen($cleanId) === 9
     // The relay WebSocket URL is configurable via the RELAY_WS_URL environment variable.
     // In production, this is set to wss://your-domain.com:9001 (or ws://server-ip:9001 for LAN).
     // In development/local testing, it defaults to ws://localhost:9001.
-    $relayWsUrl = getenv('RELAY_WS_URL') ?: 'ws://localhost:9001';
+    $relayWsUrl = getenv('RELAY_WS_URL') ?: 'wss://admin.friendssoftwaresolutions.in';
     // Allow override via query parameter for testing (dev only)
     if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         $relayWsUrl = $_GET['relay'];
@@ -721,6 +730,10 @@ $sessionCode = strlen($cleanId) === 9
 
         let ws = null;
         let wsRxBuffer = new Uint8Array(0);
+        let wsRxProcessing = false;
+        let directConnection = false;
+        let directFallbackAttempted = false;
+        let websocketAuthenticated = false;
         let webrtcPeerConnection = null;
         let webrtcDataChannel = null;
         let activeTransport = "WS"; // "WS" or "WEBRTC"
@@ -744,6 +757,11 @@ $sessionCode = strlen($cleanId) === 9
         let videoDecodeBusy = false;
 
         let videoDecoder = null;
+        const MAX_DECODER_QUEUE = 2;
+        const MAX_RX_BUFFER_BYTES = 12 * 1024 * 1024;
+        const videoTimingByTimestamp = new Map();
+        let lastLatencyLogAt = 0;
+        let lastRenderedLatencyLogAt = 0;
 
 
         /* AUDIO */
@@ -1412,8 +1430,54 @@ $sessionCode = strlen($cleanId) === 9
             rxPackets: 0,
             decodedFrames: 0,
             renderedFrames: 0,
-            lastLog: performance.now()
+            receiveWindow: 0,
+            decodeWindow: 0,
+            renderWindow: 0,
+            captureRenderSamples: [],
+            receiveDecodeSamples: [],
+            decodeOutputSamples: [],
+            outputRenderSamples: [],
+            queueSum: 0,
+            queueSamples: 0,
+            maxQueue: 0,
+            staleFramesDiscarded: 0,
+            idrRecoveryCount: 0,
+            maxWsRxBuffer: 0,
+            lastReport: performance.now()
         };
+
+        function recordVideoMetrics(now) {
+            if (now - browserPerf.lastReport < 1000) {
+                return;
+            }
+
+            const average = (values) => values.length
+                ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
+                : 0;
+            const decoderQueue = videoDecoder ? videoDecoder.decodeQueueSize : 0;
+            console.log(
+                `[VIDEO METRICS] capture->render avg=${average(browserPerf.captureRenderSamples)}ms ` +
+                `receive->decode avg=${average(browserPerf.receiveDecodeSamples)}ms ` +
+                `decode->output avg=${average(browserPerf.decodeOutputSamples)}ms ` +
+                `output->render avg=${average(browserPerf.outputRenderSamples)}ms ` +
+                `receiveFPS=${browserPerf.receiveWindow} decodeFPS=${browserPerf.decodeWindow} ` +
+                `renderFPS=${browserPerf.renderWindow} avgDecodeQueue=${browserPerf.queueSamples ? Math.round(browserPerf.queueSum / browserPerf.queueSamples) : 0} ` +
+                `maxDecodeQueue=${browserPerf.maxQueue} wsRxBufferMax=${browserPerf.maxWsRxBuffer} ` +
+                `staleFrames=${browserPerf.staleFramesDiscarded} idrRecovery=${browserPerf.idrRecoveryCount} ` +
+                `currentDecodeQueue=${decoderQueue}`
+            );
+            browserPerf.receiveWindow = 0;
+            browserPerf.decodeWindow = 0;
+            browserPerf.renderWindow = 0;
+            browserPerf.captureRenderSamples = [];
+            browserPerf.receiveDecodeSamples = [];
+            browserPerf.decodeOutputSamples = [];
+            browserPerf.outputRenderSamples = [];
+            browserPerf.queueSum = 0;
+            browserPerf.queueSamples = 0;
+            browserPerf.maxQueue = 0;
+            browserPerf.lastReport = now;
+        }
 
         function addActivityLog(message) {
             const feed = document.getElementById("activityFeed");
@@ -1561,41 +1625,196 @@ $sessionCode = strlen($cleanId) === 9
             return 'avc1.42402a';
         }
 
-        function prepareAnnexBKeyframe(dataBytes, sps, pps) {
-            const nals = parseH264Nals(dataBytes);
-            
-            // WebCodecs (without an AVCC description) requires the very first NAL units
-            // of the keyframe chunk to be the SPS and PPS. If the encoder placed a PPS,
-            // SEI, or AUD before the SPS, the decoder will fail with "Decoding error".
-            // Therefore, we ALWAYS prepend the active SPS and PPS to the beginning of the
-            // Annex-B payload for keyframes, guaranteeing correct decoder configuration.
-            const effectiveSPS = sps || nals.spsUnit;
-            const effectivePPS = pps || nals.ppsUnit;
+        function stripH264StartCode(bytes) {
+            if (!bytes || bytes.length === 0) return new Uint8Array(0);
+            let start = 0;
+            if (bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 0 && bytes[3] === 1) {
+                start = 4;
+            } else if (bytes.length >= 3 && bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1) {
+                start = 3;
+            }
+            return bytes.slice(start);
+        }
 
-            let extraLen = 0;
-            if (effectiveSPS) extraLen += 4 + effectiveSPS.length;
-            if (effectivePPS) extraLen += 4 + effectivePPS.length;
+        function buildAvccDescription(sps, pps) {
+            const seqSps = sps ? stripH264StartCode(sps) : null;
+            const seqPps = pps ? stripH264StartCode(pps) : null;
+            if (!seqSps || seqSps.length === 0) {
+                return new Uint8Array(0);
+            }
 
-            if (extraLen === 0) return dataBytes;
-
-            const combined = new Uint8Array(extraLen + dataBytes.length);
+            let total = 8 + seqSps.length + 2 + (seqPps && seqPps.length ? 2 + seqPps.length : 0);
             let offset = 0;
-            
-            if (effectiveSPS) {
-                combined.set([0, 0, 0, 1], offset);
-                offset += 4;
-                combined.set(effectiveSPS, offset);
-                offset += effectiveSPS.length;
+            const out = new Uint8Array(total);
+
+            out[offset++] = 1; // configurationVersion
+            out[offset++] = seqSps[1] ?? 0x42;
+            out[offset++] = seqSps[2] ?? 0x00;
+            out[offset++] = seqSps[3] ?? 0x1a;
+            out[offset++] = 0xFF; // lengthSizeMinusOne + reserved
+            out[offset++] = 0xE1; // numOfSequenceParameterSets
+            out[offset++] = (seqSps.length >> 8) & 0xFF;
+            out[offset++] = seqSps.length & 0xFF;
+            out.set(seqSps, offset);
+            offset += seqSps.length;
+
+            if (seqPps && seqPps.length > 0) {
+                out[offset++] = 0x01; // numOfPictureParameterSets
+                out[offset++] = (seqPps.length >> 8) & 0xFF;
+                out[offset++] = seqPps.length & 0xFF;
+                out.set(seqPps, offset);
+                offset += seqPps.length;
             }
-            if (effectivePPS) {
-                combined.set([0, 0, 0, 1], offset);
-                offset += 4;
-                combined.set(effectivePPS, offset);
-                offset += effectivePPS.length;
+
+            return out.slice(0, offset);
+        }
+
+        function extractAnnexBNals(dataBytes) {
+            if (!dataBytes || dataBytes.length === 0) {
+                return [];
             }
-            
-            combined.set(dataBytes, offset);
-            return combined;
+
+            const nalUnits = [];
+            let i = 0;
+            const len = dataBytes.length;
+
+            while (i < len) {
+                let start = -1;
+
+                if (i + 3 < len && dataBytes[i] === 0 && dataBytes[i + 1] === 0 && dataBytes[i + 2] === 0 && dataBytes[i + 3] === 1) {
+                    start = i + 4;
+                } else if (i + 2 < len && dataBytes[i] === 0 && dataBytes[i + 1] === 0 && dataBytes[i + 2] === 1) {
+                    start = i + 3;
+                }
+
+                if (start < 0) {
+                    i++;
+                    continue;
+                }
+
+                let end = len;
+                for (let j = start; j + 2 < len; j++) {
+                    const nextStartCode4 = dataBytes[j] === 0 && dataBytes[j + 1] === 0 && dataBytes[j + 2] === 0 && dataBytes[j + 3] === 1;
+                    const nextStartCode3 = dataBytes[j] === 0 && dataBytes[j + 1] === 0 && dataBytes[j + 2] === 1;
+                    if (nextStartCode4 || nextStartCode3) {
+                        end = j;
+                        break;
+                    }
+                }
+
+                const nal = dataBytes.subarray(start, end);
+                if (nal.length > 0) {
+                    nalUnits.push(nal);
+                }
+
+                if (end === len) {
+                    break;
+                }
+
+                i = end;
+            }
+
+            if (nalUnits.length === 0) {
+                return [dataBytes];
+            }
+
+            return nalUnits;
+        }
+
+        function convertAnnexBToAvcc(dataBytes) {
+            const nals = extractAnnexBNals(dataBytes);
+            if (!nals || nals.length === 0) {
+                return new Uint8Array(0);
+            }
+
+            let totalSize = 0;
+            for (const nal of nals) {
+                totalSize += 4 + nal.length;
+            }
+
+            const out = new Uint8Array(totalSize);
+            let offset = 0;
+            for (const nal of nals) {
+                out[offset] = (nal.length >>> 24) & 0xFF;
+                out[offset + 1] = (nal.length >>> 16) & 0xFF;
+                out[offset + 2] = (nal.length >>> 8) & 0xFF;
+                out[offset + 3] = nal.length & 0xFF;
+                out.set(nal, offset + 4);
+                offset += 4 + nal.length;
+            }
+
+            return out;
+        }
+
+        function buildAvccFromNalUnits(nalUnits) {
+            if (!nalUnits || nalUnits.length === 0) {
+                return new Uint8Array(0);
+            }
+
+            let totalSize = 0;
+            for (const nal of nalUnits) {
+                if (!nal || nal.length === 0) continue;
+                totalSize += 4 + nal.length;
+            }
+
+            const out = new Uint8Array(totalSize);
+            let offset = 0;
+            for (const nal of nalUnits) {
+                if (!nal || nal.length === 0) continue;
+                out[offset] = (nal.length >>> 24) & 0xFF;
+                out[offset + 1] = (nal.length >>> 16) & 0xFF;
+                out[offset + 2] = (nal.length >>> 8) & 0xFF;
+                out[offset + 3] = nal.length & 0xFF;
+                out.set(nal, offset + 4);
+                offset += 4 + nal.length;
+            }
+
+            return out;
+        }
+
+        function prepareAnnexBKeyframe(dataBytes, sps, pps) {
+            const payloadNals = extractAnnexBNals(dataBytes);
+            const effectiveSPS = sps || payloadNals.find((nal) => (nal[0] & 0x1F) === 7) || null;
+            const effectivePPS = pps || payloadNals.find((nal) => (nal[0] & 0x1F) === 8) || null;
+            const idrNal = payloadNals.find((nal) => (nal[0] & 0x1F) === 5) || null;
+
+            if (!idrNal) {
+                return new Uint8Array(0);
+            }
+
+            const selected = [];
+            const seen = new Set();
+            const addIfUnique = (nal) => {
+                if (!nal || nal.length === 0) return;
+                const key = Array.from(nal).map((b) => b.toString(16).padStart(2, '0')).join('');
+                if (seen.has(key)) return;
+                seen.add(key);
+                selected.push(nal);
+            };
+
+            if (effectiveSPS) addIfUnique(effectiveSPS);
+            if (effectivePPS) addIfUnique(effectivePPS);
+            addIfUnique(idrNal);
+
+            if (selected.length === 0) {
+                return new Uint8Array(0);
+            }
+
+            const ordered = [];
+            for (const nal of selected) {
+                const type = nal[0] & 0x1F;
+                if (type === 7) ordered.push(nal);
+            }
+            for (const nal of selected) {
+                const type = nal[0] & 0x1F;
+                if (type === 8) ordered.push(nal);
+            }
+            for (const nal of selected) {
+                const type = nal[0] & 0x1F;
+                if (type === 5) ordered.push(nal);
+            }
+
+            return buildAvccFromNalUnits(ordered);
         }
 
         function initVideoDecoder() {
@@ -1615,13 +1834,20 @@ $sessionCode = strlen($cleanId) === 9
                             console.log("[WEBCODECS] KEYFRAME DECODED");
                         }
                         browserPerf.decodedFrames++;
+                        browserPerf.decodeWindow++;
                         videoFrameCount++;
+                        const outputAt = performance.now();
+                        const timing = videoTimingByTimestamp.get(frame.timestamp);
+                        if (timing) {
+                            videoTimingByTimestamp.delete(frame.timestamp);
+                            timing.decodeOutputTime = Date.now();
+                            browserPerf.receiveDecodeSamples.push(outputAt - timing.receivedAt);
+                            browserPerf.decodeOutputSamples.push(outputAt - timing.submittedAt);
+                        }
 
                         if (videoFrameCount <= 5) {
                             console.log(`[DECODER] output received (frame #${videoFrameCount}, state = ${videoDecoder ? videoDecoder.state : 'none'})`);
                         }
-
-                        console.log(`[WEBCODECS OUTPUT]\nwidth=${frame.displayWidth}\nheight=${frame.displayHeight}\ntimestamp=${frame.timestamp}`);
 
                         if (videoFrameCount === 1) {
                             console.log("[VIDEO RENDER] first visible frame");
@@ -1668,20 +1894,25 @@ $sessionCode = strlen($cleanId) === 9
 
                             ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
                             browserPerf.renderedFrames++;
-                            console.log(`[VIDEO RENDER]\nframe=${browserPerf.renderedFrames}`);
-                            setStreamState("DISPLAYING");
-
-                            if (browserPerf.renderedFrames % 100 === 0) {
-                                const now = performance.now();
-                                const elapsedSec = (now - browserPerf.lastLog) / 1000.0;
-                                const renderFps = elapsedSec > 0 ? (100 / elapsedSec).toFixed(1) : "0.0";
-                                browserPerf.lastLog = now;
-
-                                console.log(
-                                    `[VIDEO PERFORMANCE] Received: ${browserPerf.rxPackets}, Decoded: ${browserPerf.decodedFrames}, Rendered: ${browserPerf.renderedFrames}, Render FPS: ${renderFps}, Decoder Queue: ${videoDecoder.decodeQueueSize}`
-                                );
+                            browserPerf.renderWindow++;
+                            const renderedAt = performance.now();
+                            if (timing) {
+                                browserPerf.outputRenderSamples.push(renderedAt - outputAt);
+                                if (timing.captureTimestamp > 0) {
+                                    const captureRender = Date.now() - timing.captureTimestamp;
+                                    if (captureRender >= 0 && captureRender < 60000) {
+                                        browserPerf.captureRenderSamples.push(captureRender);
+                                        if (renderedAt - lastRenderedLatencyLogAt >= 1000) {
+                                            const renderTime = Date.now();
+                                            console.log(`[VIDEO LATENCY TRACE] capture=${timing.captureTimestamp} receive=${timing.receiveTime} decodeSubmit=${timing.decodeSubmitTime} decodeOutput=${timing.decodeOutputTime || "pending"} render=${renderTime} ageMs=${captureRender} decodeQueue=${videoDecoder ? videoDecoder.decodeQueueSize : 0}`);
+                                            lastRenderedLatencyLogAt = renderedAt;
+                                        }
+                                    }
+                                }
                             }
+                            setStreamState("DISPLAYING");
                         }
+                        recordVideoMetrics(outputAt);
                         frame.close();
                     },
                     error(error) {
@@ -1714,15 +1945,63 @@ $sessionCode = strlen($cleanId) === 9
             }
         }
 
-        async function handleVideoPacket(buffer) {
+        function compactVideoBacklogAtIdr() {
+            if (wsRxBuffer.length <= MAX_RX_BUFFER_BYTES &&
+                (!videoDecoder || videoDecoder.decodeQueueSize <= MAX_DECODER_QUEUE)) {
+                return false;
+            }
+
+            let offset = 0;
+            let latestIdrOffset = -1;
+            let discardedPackets = 0;
+            let packetsSeen = 0;
+            while (offset + 21 <= wsRxBuffer.length) {
+                const type = wsRxBuffer[offset];
+                if (type !== 13 && type !== 15) {
+                    break;
+                }
+
+                const payloadSize =
+                    ((wsRxBuffer[offset + 9] << 24) >>> 0) |
+                    (wsRxBuffer[offset + 10] << 16) |
+                    (wsRxBuffer[offset + 11] << 8) |
+                    wsRxBuffer[offset + 12];
+                const totalPacketSize = 21 + payloadSize;
+                if (payloadSize <= 0 || payloadSize > 20 * 1024 * 1024 ||
+                    offset + totalPacketSize > wsRxBuffer.length) {
+                    break;
+                }
+
+                const payload = wsRxBuffer.subarray(offset + 21, offset + totalPacketSize);
+                if (parseH264Nals(payload).hasIDR) {
+                    latestIdrOffset = offset;
+                    discardedPackets = packetsSeen;
+                }
+                packetsSeen++;
+                offset += totalPacketSize;
+            }
+
+            if (latestIdrOffset <= 0) {
+                return false;
+            }
+
+            wsRxBuffer = wsRxBuffer.subarray(latestIdrOffset);
+            browserPerf.staleFramesDiscarded += discardedPackets + 1;
+            console.warn(`[VIDEO RECOVERY] Discarded ${discardedPackets + 1} stale complete access units; resuming at a real IDR.`);
+            return true;
+        }
+
+        function handleVideoPacket(buffer) {
             try {
             const bytes = new Uint8Array(buffer);
             const length = bytes.length;
             window._rx_count = (window._rx_count || 0) + 1;
 
-            if (length < 21) {
-                console.warn("[VIDEO] Packet too small:", length);
-                return;
+            const nowMs = performance.now();
+            if (!window.__videoHexLogLast || (nowMs - window.__videoHexLogLast) > 3000) {
+                const hex = Array.from(bytes.slice(0, 32)).map((b) => b.toString(16).padStart(2, '0')).join(' ');
+                console.log(`[VIDEO HEX]\n${hex}`);
+                window.__videoHexLogLast = nowMs;
             }
 
             const view = new DataView(buffer);
@@ -1733,33 +2012,60 @@ $sessionCode = strlen($cleanId) === 9
                 return;
             }
 
+            const likelyLegacyH264Start =
+                packetType === 15 && length >= 13 && (
+                    length < 21 ||
+                    (
+                        bytes[13] === 0 &&
+                        ((bytes[14] === 0 && bytes[15] === 0 && bytes[16] === 1) ||
+                         (bytes[14] === 0 && bytes[15] === 1))
+                    )
+                );
+            const legacyFormat = likelyLegacyH264Start;
+            const headerBytes = legacyFormat ? 13 : 21;
+
+            if (length < headerBytes) {
+                console.warn("[VIDEO] Packet too small:", { packetType, length, required: headerBytes, legacyFormat });
+                return;
+            }
+
             const width = view.getUint32(1, false);
             const height = view.getUint32(5, false);
             const payloadSize = view.getUint32(9, false);
-            const captureTimestamp = Number(view.getBigUint64(13, false));
+            const captureTimestamp = legacyFormat ? 0 : Number(view.getBigUint64(13, false));
 
-            const available = length - 21;
+            const available = length - headerBytes;
 
-            if (window._rx_count <= 5) {
-                console.log(`[VIDEO PARSER]\ntype = ${packetType}\nwidth = ${width}\nheight = ${height}\npayloadSize = ${payloadSize}\navailable = ${available}\npacketSize = ${length}`);
+            const compatLogWindowMs = 3000;
+            if (!window.__videoCompatLastLog || (nowMs - window.__videoCompatLastLog) > compatLogWindowMs) {
+                console.log(`[VIDEO PARSER]\ntype = ${packetType}\nlegacy = ${legacyFormat}\nheaderBytes = ${headerBytes}\nwidth = ${width}\nheight = ${height}\npayloadSize = ${payloadSize}\navailable = ${available}\npacketSize = ${length}`);
+                console.log(`[VIDEO PACKET]\ntype=${packetType}\nwidth=${width}\nheight=${height}\npayloadSize=${payloadSize}\nlength=${length}\nheaderBytes=${headerBytes}`);
+                window.__videoCompatLastLog = nowMs;
             }
 
             if (payloadSize <= 0 || payloadSize > available) {
                 console.error(
                     "[VIDEO] Invalid H.264 payload size.",
-                    { payloadSize, available, packetSize: length }
+                    { packetType, legacyFormat, payloadSize, available, packetSize: length, headerBytes }
                 );
                 return;
             }
 
             const actualPayloadSize = (payloadSize > 0 && payloadSize <= available) ? payloadSize : available;
-            const h264Payload = bytes.slice(21, 21 + actualPayloadSize);
+            const h264Payload = bytes.slice(headerBytes, headerBytes + actualPayloadSize);
+
+            if (!window.__videoPayloadLogLast || (nowMs - window.__videoPayloadLogLast) > 3000) {
+                console.log(`[H264 RX]\npayloadBytes=${h264Payload.length}\nannexB=${h264Payload.length >= 3 && h264Payload[0] === 0 && h264Payload[1] === 0 && (h264Payload[2] === 1 || (h264Payload[2] === 0 && h264Payload[3] === 1))}\nnalCount=${parseH264Nals(h264Payload).nalTypes.length}\nnalTypes=[${parseH264Nals(h264Payload).nalTypes.join(',')}]`);
+                window.__videoPayloadLogLast = nowMs;
+            }
 
             streamStats.received_packets++;
             streamStats.received_bytes += actualPayloadSize;
             browserPerf.rxPackets++;
 
             const receiveTime = Date.now();
+            const receivedAt = performance.now();
+            browserPerf.receiveWindow++;
 
             // The agent capture timestamp is a Unix-epoch value in MILLISECONDS, the same
             // base as Date.now(). Only compute latency when it is a plausible epoch value AND
@@ -1777,13 +2083,18 @@ $sessionCode = strlen($cleanId) === 9
                 }
             }
             const decodeQueue = videoDecoder ? videoDecoder.decodeQueueSize : 0;
+            browserPerf.queueSum += decodeQueue;
+            browserPerf.queueSamples++;
+            browserPerf.maxQueue = Math.max(browserPerf.maxQueue, decodeQueue);
 
-            if (latencyValid) {
-                console.log(`[LATENCY] Capture->Browser: ${networkLatency}ms | DecodeQueue: ${decodeQueue}`);
-            } else {
-                console.log(`[LATENCY] Capture->Browser: n/a (incompatible capture timestamp) | rawCaptureTs=${captureTimestamp} receiveTs=${receiveTime} | DecodeQueue: ${decodeQueue}`);
+            if (receivedAt - lastLatencyLogAt >= 1000) {
+                if (latencyValid) {
+                    console.log(`[VIDEO LATENCY] capture=${captureTimestamp} receive=${receiveTime} render=pending ageMs=${networkLatency} decodeQueue=${decodeQueue}`);
+                } else {
+                    console.log(`[VIDEO LATENCY] capture=${captureTimestamp} receive=${receiveTime} render=pending ageMs=n/a decodeQueue=${decodeQueue}`);
+                }
+                lastLatencyLogAt = receivedAt;
             }
-            console.log(`[BROWSER VIDEO] width=${width} height=${height} h264_size=${actualPayloadSize}`);
 
             // Capability Detection BEFORE using VideoDecoder
             if (!("VideoDecoder" in window)) {
@@ -1800,7 +2111,6 @@ $sessionCode = strlen($cleanId) === 9
 
             // STEP 2: NAL Parsing & Parameter Set Caching
             const nals = parseH264Nals(h264Payload);
-            
             if (nals.hasSPS && nals.spsUnit) {
                 cachedSPS = nals.spsUnit;
             }
@@ -1849,8 +2159,6 @@ $sessionCode = strlen($cleanId) === 9
                 console.log(`[VIDEO] classification=${classification}`);
             }
 
-            console.log(`[BROWSER H264]\npacket_size=${length}\nreassembled_size=${actualPayloadSize}\nNAL types=[${nals.nalTypes.join(',')}]\ncurrentSPS=${currentSPS}\ncachedSPS=${cachedSPSExists}\ncurrentPPS=${currentPPS}\ncachedPPS=${cachedPPSExists}\nIDR=${currentIDR}\nclassification=${classification}\nkey/delta=${keyDeltaStr}`);
-
             for (const n of nals.nalTypes) {
                 if (n === 7) {
                     streamStats.received_sps++;
@@ -1866,6 +2174,24 @@ $sessionCode = strlen($cleanId) === 9
             // Codec string derivation from SPS
             const spsForCodec = nals.spsUnit || cachedSPS;
             const codecString = getCodecStringFromSps(spsForCodec);
+            const ppsForCodec = nals.hasPPS ? nals.ppsUnit : cachedPPS;
+            const avccDescription = buildAvccDescription(spsForCodec, ppsForCodec);
+            if (spsForCodec || ppsForCodec) {
+                console.log(`[VIDEO AVCC]\ncodec=${codecString}\nspsBytes=${spsForCodec ? spsForCodec.length : 0}\nppsBytes=${ppsForCodec ? ppsForCodec.length : 0}\ndescriptionBytes=${avccDescription.length}`);
+            }
+
+            if (isKey && videoDecoder && videoDecoder.decodeQueueSize > MAX_DECODER_QUEUE) {
+                console.warn(`[VIDEO RECOVERY] Resetting decoder at IDR; queue was ${videoDecoder.decodeQueueSize}.`);
+                videoTimingByTimestamp.clear();
+                try {
+                    videoDecoder.close();
+                } catch (e) {
+                    console.error("[VIDEO RECOVERY] Failed to close overloaded decoder:", e);
+                }
+                videoDecoder = null;
+                decoderState = DecoderState.UNCONFIGURED;
+                browserPerf.idrRecoveryCount++;
+            }
 
             // Initialize VideoDecoder if needed
             if (!videoDecoder || videoDecoder.state === 'closed' || decoderState === DecoderState.ERROR) {
@@ -1883,6 +2209,7 @@ $sessionCode = strlen($cleanId) === 9
             // immediately after it returns, videoDecoder.state === 'configured'. We must not call
             // decode() until that is true, otherwise Chrome throws and the frame is lost.
             if (decoderState === DecoderState.UNCONFIGURED || (videoDecoder && videoDecoder.state === 'unconfigured')) {
+                console.log(`[VIDEO DECODER CONFIG]\ncodec=${codecString}\nwidth=${width}\nheight=${height}\ndescriptionBytes=${avccDescription.length}\nstate=${videoDecoder ? videoDecoder.state : 'none'}`);
                 console.log(`[DECODER] current state = ${videoDecoder ? videoDecoder.state : 'none'}`);
                 console.log(`[DECODER] configured = ${videoDecoder ? 'YES' : 'NO'}`);
                 console.log(`[DECODER] configure() starting`);
@@ -1891,13 +2218,16 @@ $sessionCode = strlen($cleanId) === 9
                         codec: codecString,
                         codedWidth: width,
                         codedHeight: height,
+                        description: avccDescription,
                         optimizeForLatency: true
                     });
+                    console.log(`[VIDEO DECODER CONFIGURED]\nstate=${videoDecoder.state}\ncodec=${codecString}\nwidth=${width}\nheight=${height}`);
                     console.log(`[DECODER] configure() completed (state = ${videoDecoder.state})`);
                     decoderState = DecoderState.WAITING_FOR_KEYFRAME;
                     setStreamState("WAITING_FOR_KEYFRAME");
-                    console.log(`[WEBCODECS CONFIG]\ncodec=${codecString}\nwidth=${width}\nheight=${height}\ndescriptionBytes=0\nformat=AnnexB`);
+                    console.log(`[WEBCODECS CONFIG]\ncodec=${codecString}\nwidth=${width}\nheight=${height}\ndescriptionBytes=${avccDescription.length}\nformat=AVCC`);
                 } catch (e) {
+                    console.error("[VIDEO DECODER ERROR]", e);
                     console.error("[BROWSER DECODER CONFIG ERROR]", e);
                     logDecodeErrorDetail(e);
                     decoderState = DecoderState.WAITING_FOR_KEYFRAME;
@@ -1934,26 +2264,22 @@ $sessionCode = strlen($cleanId) === 9
                     return;
                 }
 
-                const annexBKeyframe = prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS);
-                
-                // Diagnostic logging immediately before decode (Requirement 7)
-                const first32 = Array.from(annexBKeyframe.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-                const has4ByteStart = annexBKeyframe[0] === 0 && annexBKeyframe[1] === 0 && annexBKeyframe[2] === 0 && annexBKeyframe[3] === 1;
-                const has3ByteStart = annexBKeyframe[0] === 0 && annexBKeyframe[1] === 0 && annexBKeyframe[2] === 1;
-                
-                // Check if it might look like AVCC length prefixes instead of start codes
-                const potentialAvccLen = (annexBKeyframe[0] << 24) | (annexBKeyframe[1] << 16) | (annexBKeyframe[2] << 8) | annexBKeyframe[3];
-                
-                console.log(`[WEBCODECS DECODE]
-type=key
-timestamp=${timestamp}
-bytes=${annexBKeyframe.byteLength}
-NAL types=[${nals.nalTypes.join(',')}]`);
-                console.log(`[DECODE PAYLOAD FORMAT]
-first_32_hex: ${first32}
-starts_with_00_00_00_01: ${has4ByteStart}
-starts_with_00_00_01: ${has3ByteStart}
-potential_avcc_length: ${potentialAvccLen}`);
+                const accessUnitNals = extractAnnexBNals(h264Payload);
+                const accessUnitTypes = accessUnitNals.map((nal) => nal[0] & 0x1F);
+                const containsIDR = accessUnitTypes.includes(5);
+                if (!containsIDR) {
+                    console.warn(`[VIDEO KEYFRAME VALIDATION]\ncontainsIDR=false\nactualNalTypes=[${accessUnitTypes.join(',')}]\nwaitingForRealIDR=true`);
+                    return;
+                }
+
+                const avccKeyframe = prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS);
+                const first32 = Array.from(avccKeyframe.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                const nalCount = accessUnitNals.length;
+                console.log(`[VIDEO KEYFRAME VALIDATION]\ncontainsIDR=${containsIDR}\nactualNalTypes=[${accessUnitTypes.join(',')}]\nhasSPS=${nals.hasSPS}\nhasPPS=${nals.hasPPS}\nhasIDR=${nals.hasIDR}\navccBytes=${avccKeyframe.byteLength}`);
+                console.log(`[KEYFRAME SUBMIT]\ndecoderState=${decoderState}\nvideoDecoderState=${videoDecoder ? videoDecoder.state : 'none'}\ncodec=${codecString}\nwidth=${width}\nheight=${height}\nnalTypes=[${accessUnitTypes.join(',')}]\nhasSPS=${nals.hasSPS}\nhasPPS=${nals.hasPPS}\nhasIDR=${nals.hasIDR}\navccBytes=${avccKeyframe.byteLength}`);
+                console.log(`[H264 AVCC]\nnalCount=${nalCount}\ntotalBytes=${avccKeyframe.byteLength}\nfirstBytes=${first32}`);
+                console.log(`[WEBCODECS DECODE]\ntype=key\ntimestamp=${timestamp}\nbytes=${avccKeyframe.byteLength}\nNAL types=[${accessUnitTypes.join(',')}]`);
+                console.log(`[DECODE PAYLOAD FORMAT]\nfirst_32_hex: ${first32}\nstarts_with_00_00_00_01: false\nstarts_with_00_00_01: false\nmode=AVCC`);
 
                 console.log(`[DECODER] decode() starting (state = ${videoDecoder ? videoDecoder.state : 'none'})`);
 
@@ -1961,16 +2287,20 @@ potential_avcc_length: ${potentialAvccLen}`);
                     const chunk = new EncodedVideoChunk({
                         type: 'key',
                         timestamp: timestamp,
-                        data: annexBKeyframe
+                        data: avccKeyframe
+                    });
+                    videoTimingByTimestamp.set(timestamp, {
+                        captureTimestamp,
+                        receiveTime,
+                        receivedAt,
+                        submittedAt: performance.now(),
+                        decodeSubmitTime: Date.now()
                     });
                     videoDecoder.decode(chunk);
-                    console.log("[DECODER] decode() submitted");
-                    console.log("[DECODER] First keyframe submitted");
                     decoderState = DecoderState.CONFIGURED;
                 } catch (e) {
                     console.error("[BROWSER DECODER ERROR] decode(key) exception:", e);
                     logDecodeErrorDetail(e);
-                    // Recover: Reset decoder and keep waiting for next valid keyframe. Do NOT close the WebSocket.
                     decoderState = DecoderState.UNCONFIGURED;
                     initVideoDecoder();
                 }
@@ -1979,29 +2309,45 @@ potential_avcc_length: ${potentialAvccLen}`);
 
             if (decoderState === DecoderState.CONFIGURED) {
                 const chunkType = isKey ? 'key' : 'delta';
-                const chunkData = isKey ? prepareAnnexBKeyframe(h264Payload, cachedSPS, cachedPPS) : h264Payload;
+                const avccChunk = convertAnnexBToAvcc(h264Payload);
 
-                // BACKPRESSURE: If the decoder is falling behind, drop stale delta frames to remain near-real-time.
-                if (videoDecoder && videoDecoder.decodeQueueSize > 5 && chunkType === 'delta') {
-                    console.warn(`[WEBCODECS BACKPRESSURE] Dropping delta frame. Queue size: ${videoDecoder.decodeQueueSize}`);
-                    return; // Skip decoding this frame
+                if (videoDecoder && videoDecoder.decodeQueueSize > MAX_DECODER_QUEUE && chunkType === 'delta') {
+                    browserPerf.staleFramesDiscarded++;
+                    console.warn(`[WEBCODECS RECOVERY] Decoder queue reached ${videoDecoder.decodeQueueSize}; dropping deltas until the next real IDR.`);
+                    videoTimingByTimestamp.clear();
+                    try {
+                        videoDecoder.close();
+                    } catch (e) {
+                        console.error("[WEBCODECS RECOVERY] Failed to close delayed decoder:", e);
+                    }
+                    videoDecoder = null;
+                    decoderState = DecoderState.UNCONFIGURED;
+                    browserPerf.idrRecoveryCount++;
+                    return;
                 }
-
-                console.log(`[WEBCODECS DECODE]\ntype=${chunkType}\ntimestamp=${timestamp}\nbytes=${chunkData.byteLength}\nNAL types=[${nals.nalTypes.join(',')}]`);
-                console.log(`[DECODER] decode() starting (state = ${videoDecoder ? videoDecoder.state : 'none'})`);
 
                 try {
                     const chunk = new EncodedVideoChunk({
                         type: chunkType,
                         timestamp: timestamp,
-                        data: chunkData
+                        data: avccChunk
+                    });
+                    videoTimingByTimestamp.set(timestamp, {
+                        captureTimestamp,
+                        receiveTime,
+                        receivedAt,
+                        submittedAt: performance.now(),
+                        decodeSubmitTime: Date.now()
                     });
                     videoDecoder.decode(chunk);
-                    console.log(`[DECODER] decode() submitted (${chunkType})`);
+                    if (videoTimingByTimestamp.size > MAX_DECODER_QUEUE + 8) {
+                        const oldestTimestamp = videoTimingByTimestamp.keys().next().value;
+                        videoTimingByTimestamp.delete(oldestTimestamp);
+                    }
                 } catch (e) {
+                    videoTimingByTimestamp.delete(timestamp);
                     console.error(`[BROWSER DECODER ERROR] decode(${chunkType}) exception:`, e);
                     logDecodeErrorDetail(e);
-                    // Recover: wait for the next keyframe instead of killing the stream.
                     decoderState = DecoderState.WAITING_FOR_KEYFRAME;
                 }
             }
@@ -2288,96 +2634,139 @@ potential_avcc_length: ${potentialAvccLen}`);
 
             if (chunk.length === 0) return;
 
-            // Append new chunk to persistent buffer
             const newBuf = new Uint8Array(wsRxBuffer.length + chunk.length);
             newBuf.set(wsRxBuffer);
             newBuf.set(chunk, wsRxBuffer.length);
             wsRxBuffer = newBuf;
+            browserPerf.maxWsRxBuffer = Math.max(browserPerf.maxWsRxBuffer, wsRxBuffer.length);
 
-            // Process fully formed packets in the buffer
-            while (wsRxBuffer.length > 0) {
-                const type = wsRxBuffer[0];
-                
-                if (type === 13 || type === 15) {
-                    // Video Packet (Type 13 / 15)
-                    // Header: 1 (type) + 4 (width) + 4 (height) + 4 (size) + 8 (timestamp) = 21 bytes
-                    if (wsRxBuffer.length < 21) {
-                        return; // Wait for full header
+            if (wsRxProcessing) {
+                return;
+            }
+
+            wsRxProcessing = true;
+            try {
+                while (wsRxBuffer.length > 0) {
+                    compactVideoBacklogAtIdr();
+                    const type = wsRxBuffer[0];
+                    const bufferLen = wsRxBuffer.length;
+
+                    if (type === 13 || type === 15) {
+                        if (bufferLen < 21) {
+                            return;
+                        }
+
+                        const width =
+                            ((wsRxBuffer[1] << 24) >>> 0) |
+                            (wsRxBuffer[2] << 16) |
+                            (wsRxBuffer[3] << 8) |
+                            wsRxBuffer[4];
+                        const height =
+                            ((wsRxBuffer[5] << 24) >>> 0) |
+                            (wsRxBuffer[6] << 16) |
+                            (wsRxBuffer[7] << 8) |
+                            wsRxBuffer[8];
+                        const payloadSize =
+                            ((wsRxBuffer[9] << 24) >>> 0) |
+                            (wsRxBuffer[10] << 16) |
+                            (wsRxBuffer[11] << 8) |
+                            wsRxBuffer[12];
+
+                        const totalPacketSize = 21 + payloadSize;
+
+                        const saneHeader =
+                            width > 0 && width <= 10000 &&
+                            height > 0 && height <= 10000 &&
+                            payloadSize > 0 && payloadSize <= 20 * 1024 * 1024 &&
+                            totalPacketSize >= 21;
+
+                        if (!saneHeader) {
+                            wsRxBuffer = wsRxBuffer.slice(1);
+                            continue;
+                        }
+
+                        if (bufferLen < totalPacketSize) {
+                            return;
+                        }
+
+                        if (!window.__videoParserLogLast || (performance.now() - window.__videoParserLogLast) > 3000) {
+                            console.log(`[VIDEO PARSER]\nfirstByte=${type}\nheaderSize=21\nwidth=${width}\nheight=${height}\npayloadSize=${payloadSize}\navailable=${bufferLen}\nexpected=${totalPacketSize}\nfirstBytes=${Array.from(wsRxBuffer.slice(0, 16)).map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+                            window.__videoParserLogLast = performance.now();
+                        }
+
+                        const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
+                        const packetBuffer = packetBytes.slice().buffer;
+                        handleVideoPacket(packetBuffer);
+                        wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
+                        continue;
                     }
-                    const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
-                    const payloadSize = view.getUint32(9, false);
-                    const totalPacketSize = 21 + payloadSize;
+                    else if (type === 17) {
+                        if (bufferLen < 11) {
+                            return;
+                        }
+                        const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                        const payloadSize = view.getUint32(1, false);
+                        const totalPacketSize = 11 + payloadSize;
 
-                    if (wsRxBuffer.length < totalPacketSize) {
-                        return; // Wait for full payload
+                        if (bufferLen < totalPacketSize) {
+                            return;
+                        }
+
+                        const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
+                        const packetBuffer = packetBytes.slice().buffer;
+                        handleAudioPacket(packetBuffer);
+                        wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
+                        continue;
                     }
+                    else if (type === 16) {
+                        if (bufferLen < 3) {
+                            return;
+                        }
+                        const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                        const payloadSize = (view.getUint8(1) << 8) | view.getUint8(2);
+                        const totalPacketSize = 3 + payloadSize;
 
-                    const packetBuffer = wsRxBuffer.buffer.slice(wsRxBuffer.byteOffset, wsRxBuffer.byteOffset + totalPacketSize);
-                    await handleVideoPacket(packetBuffer);
-                    
-                    wsRxBuffer = wsRxBuffer.slice(totalPacketSize);
-                    continue;
-                }
-                else if (type === 17) {
-                    // Audio Packet (Type 17)
-                    // Header: 1 (type) + 4 (size) + 4 (rate) + 2 (channels) = 11 bytes
-                    if (wsRxBuffer.length < 11) {
-                        return;
+                        if (bufferLen < totalPacketSize) {
+                            return;
+                        }
+
+                        const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
+                        const packetBuffer = packetBytes.slice().buffer;
+                        handleChatPacket(packetBuffer);
+                        wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
+                        continue;
                     }
-                    const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
-                    const payloadSize = view.getUint32(1, false);
-                    const totalPacketSize = 11 + payloadSize;
-
-                    if (wsRxBuffer.length < totalPacketSize) {
-                        return;
+                    else if (type === 1) {
+                        websocketAuthenticated = true;
+                        console.log("[WS] Session approved by host.");
+                        wsRxBuffer = wsRxBuffer.slice(1);
+                        continue;
                     }
-
-                    const packetBuffer = wsRxBuffer.buffer.slice(wsRxBuffer.byteOffset, wsRxBuffer.byteOffset + totalPacketSize);
-                    handleAudioPacket(packetBuffer);
-                    
-                    wsRxBuffer = wsRxBuffer.slice(totalPacketSize);
-                    continue;
-                }
-                else if (type === 16) {
-                    // Chat Packet (Type 16)
-                    // Header: 1 (type) + 2 (size) = 3 bytes
-                    if (wsRxBuffer.length < 3) {
-                        return;
-                    }
-                    const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
-                    const payloadSize = (view.getUint8(1) << 8) | view.getUint8(2);
-                    const totalPacketSize = 3 + payloadSize;
-
-                    if (wsRxBuffer.length < totalPacketSize) {
-                        return;
-                    }
-
-                    const packetBuffer = wsRxBuffer.buffer.slice(wsRxBuffer.byteOffset, wsRxBuffer.byteOffset + totalPacketSize);
-                    handleChatPacket(packetBuffer);
-                    
-                    wsRxBuffer = wsRxBuffer.slice(totalPacketSize);
-                    continue;
-                }
-                else if (type === 2) {
-                    // Stream Active
-                    setStreamState("STREAM_ACTIVE");
-                    wsRxBuffer = wsRxBuffer.slice(1);
-                    continue;
-                }
-                else if (type === 14) {
-                    // Heartbeat
-                    if (videoFrameCount === 0 && currentStreamState === "CONNECTING") {
+                    else if (type === 2) {
+                        websocketAuthenticated = true;
                         setStreamState("STREAM_ACTIVE");
+                        wsRxBuffer = wsRxBuffer.slice(1);
+                        continue;
                     }
-                    wsRxBuffer = wsRxBuffer.slice(1);
-                    continue;
+                    else if (type === 14) {
+                        if (videoFrameCount === 0 && currentStreamState === "CONNECTING") {
+                            setStreamState("STREAM_ACTIVE");
+                        }
+                        if (wsRxBuffer.length >= 9) {
+                            wsRxBuffer = wsRxBuffer.slice(9);
+                        } else {
+                            wsRxBuffer = new Uint8Array(0);
+                        }
+                        continue;
+                    }
+                    else {
+                        console.debug("[WS] Unknown packet type:", type);
+                        wsRxBuffer = wsRxBuffer.slice(1);
+                        continue;
+                    }
                 }
-                else {
-                    // Unknown packet. Discard the first byte and attempt to resync.
-                    console.debug("[WS] Unknown packet type:", type);
-                    wsRxBuffer = wsRxBuffer.slice(1);
-                    continue;
-                }
+            } finally {
+                wsRxProcessing = false;
             }
         }
 
@@ -2408,6 +2797,89 @@ potential_avcc_length: ${potentialAvccLen}`);
                 "Packet length:",
                 pkt.length
             );
+        }
+
+        function resetWebSocketState() {
+            wsRxBuffer = new Uint8Array(0);
+            websocketAuthenticated = false;
+        }
+
+        function fallbackToRelay() {
+            if (!directConnection || directFallbackAttempted || websocketAuthenticated || !isStreaming) {
+                return false;
+            }
+
+            directFallbackAttempted = true;
+            directConnection = false;
+            console.warn("[DIRECT] Connection failed");
+            console.log("[DIRECT] Falling back to relay");
+
+            const failedSocket = ws;
+            ws = null;
+            if (failedSocket) {
+                failedSocket.onopen = null;
+                failedSocket.onmessage = null;
+                failedSocket.onerror = null;
+                failedSocket.onclose = null;
+                try { failedSocket.close(); } catch (e) { }
+            }
+
+            resetWebSocketState();
+            setHud("CONNECTING...");
+            console.log("[RELAY] Connecting to " + WS_URL);
+            connectWebSocket(WS_URL, false);
+            return true;
+        }
+
+        function connectWebSocket(targetUrl, isDirect) {
+            directConnection = isDirect;
+            resetWebSocketState();
+
+            try {
+                ws = new WebSocket(targetUrl);
+            } catch (error) {
+                console.error("[WS] Creation failed:", error);
+                if (!fallbackToRelay()) {
+                    stopWebStream();
+                }
+                return;
+            }
+
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = function () {
+                console.log("[AUTH DEBUG] WebSocket OPEN");
+                console.log("[WS] OPEN");
+                setHud("AUTHENTICATING...");
+                console.log("[AUTH DEBUG] Sending auth");
+                sendInitializationPacket();
+                console.log("[AUTH DEBUG] Auth sent");
+                console.log("[AUTH DEBUG] Waiting for authentication response");
+            };
+
+            ws.onmessage = handleMessage;
+
+            ws.onerror = function (error) {
+                console.error("[WS] Error event fired (point: ws.onerror handler)", error);
+                console.error(`[WS] state: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount}`);
+                if (fallbackToRelay()) {
+                    return;
+                }
+                setHud("CONNECTION ERROR");
+            };
+
+            ws.onclose = function (event) {
+                const closer = event.wasClean ? "BROWSER (local close)" : "REMOTE (relay/agent)";
+                console.log(`[AUTH DEBUG] WebSocket CLOSED\ncode: ${event.code}\nreason: ${event.reason || 'none'}\nwasClean: ${event.wasClean}\ninitiatedBy: ${closer}\npoint: ws.onclose handler`);
+                console.log("[WS] Closed:", event.code, event.reason);
+                console.log(`[WS] state at close: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount} rxPackets=${browserPerf.rxPackets}`);
+                if (fallbackToRelay()) {
+                    return;
+                }
+                if (isStreaming) {
+                    setHud("DISCONNECTED");
+                }
+            };
         }
 
 
@@ -2464,6 +2936,9 @@ potential_avcc_length: ${potentialAvccLen}`);
             renderHeight = 0;
             videoDecodeBusy = false;
             safeCloseImage();
+            directConnection = false;
+            directFallbackAttempted = false;
+            resetWebSocketState();
 
             if (videoDecoder && videoDecoder.state !== 'closed') {
                 try { videoDecoder.close(); } catch (e) { }
@@ -2539,18 +3014,9 @@ potential_avcc_length: ${potentialAvccLen}`);
                 }
             }
 
-            try {
-                ws = new WebSocket(targetUrl);
-            } catch (error) {
-                console.error("[WS] Creation failed:", error);
-                stopWebStream();
-                alert("Could not create WebSocket.");
-                return;
-            }
-
-
-            ws.binaryType =
-                "arraybuffer";
+            directConnection = targetUrl !== WS_URL;
+            connectWebSocket(targetUrl, directConnection);
+            return;
 
 
             ws.onopen =
@@ -3077,9 +3543,30 @@ potential_avcc_length: ${potentialAvccLen}`);
             ws.send(pkt);
         }
 
-        /* ============================================================
-           KEYBOARD
-        ============================================================ */
+        // Track active keys to prevent stuck keys on blur/disconnect
+        const activeKeys = new Set();
+
+        function releaseAllKeys() {
+            if (activeKeys.size === 0) return;
+            console.log(`[INPUT KEYBOARD] Releasing ${activeKeys.size} stuck keys due to blur/disconnect`);
+            activeKeys.forEach(keyCode => {
+                if (isSocketOpen()) {
+                    const pkt = new Uint8Array(9);
+                    pkt[0] = 6; // KEY_UP
+                    pkt[1] = (keyCode >> 24) & 0xff;
+                    pkt[2] = (keyCode >> 16) & 0xff;
+                    pkt[3] = (keyCode >> 8) & 0xff;
+                    pkt[4] = keyCode & 0xff;
+                    ws.send(pkt);
+                }
+            });
+            activeKeys.clear();
+        }
+
+        window.addEventListener("blur", releaseAllKeys);
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) releaseAllKeys();
+        });
 
         function sendKeyboard(event, type) {
             if (!isSocketOpen()) {
@@ -3091,10 +3578,12 @@ potential_avcc_length: ${potentialAvccLen}`);
             const typeName = type === 5 ? "KEY_DOWN" : "KEY_UP";
 
             if (type === 5) {
+                activeKeys.add(keyCode);
                 console.log(`[INPUT KEYBOARD]\nevent=keydown\nkey=${event.key}\ncode=${event.code}\nkeyCode=${keyCode}\nctrl=${event.ctrlKey}\nshift=${event.shiftKey}\nalt=${event.altKey}`);
                 console.log(`[BROWSER INPUT] keydown`);
                 console.log(`[BROWSER CONTROL TX] KEY_DOWN`);
             } else {
+                activeKeys.delete(keyCode);
                 console.log(`[INPUT KEYBOARD]\nevent=keyup\nkey=${event.key}\ncode=${event.code}`);
                 console.log(`[BROWSER INPUT] keyup`);
                 console.log(`[BROWSER CONTROL TX] KEY_UP`);
@@ -3135,6 +3624,8 @@ potential_avcc_length: ${potentialAvccLen}`);
             });
 
             canvas.addEventListener("mouseup", sendMouseUp);
+            // Also handle mouse leaving canvas while dragging
+            canvas.addEventListener("mouseleave", sendMouseUp);
 
             canvas.addEventListener("contextmenu", event => {
                 event.preventDefault();
