@@ -31,11 +31,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // VIDEO SETTINGS (120 FPS Ultra-Low Latency)
 // ============================================================
 
-const TARGET_FPS: u32 = 120;
-const MAX_WIDTH: u32 = 1920;
-const MAX_HEIGHT: u32 = 1080;
+const TARGET_FPS: u32 = 30;
 const TARGET_BITRATE: u32 = 8_000_000;
-const FRAME_INTERVAL_MICROS: u64 = 8333; // 120 FPS ~ 8.333 ms per frame
+const FRAME_INTERVAL_MICROS: u64 = 33333; // 30 FPS ~ 33.333 ms per frame
 
 // ============================================================
 // DPI
@@ -685,7 +683,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             }
 
-                            let video_slot = Arc::new(Mutex::new(None::<Vec<u8>>));
+                            let video_slot = Arc::new(Mutex::new(std::collections::VecDeque::<Vec<u8>>::with_capacity(30)));
                             let video_slot_writer = Arc::clone(&video_slot);
                             let video_slot_capture = Arc::clone(&video_slot);
                             let video_recovery_needed = Arc::new(AtomicBool::new(false));
@@ -747,7 +745,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     let video_packet = video_slot_writer
                                         .lock()
                                         .ok()
-                                        .and_then(|mut slot| slot.take());
+                                        .and_then(|mut q| q.pop_front());
                                     if let Some(packet) = video_packet {
                                         if !write_packet(packet) {
                                             break;
@@ -1147,6 +1145,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             let mut frame_number: u64 = 0;
                             let mut hw_encoder: Option<HardwareH264Encoder> = None;
+                            let mut current_enc_width: u32 = 0;
+                            let mut current_enc_height: u32 = 0;
 
                             while is_conn_write.load(Ordering::SeqCst) {
                                 let frame_opt = {
@@ -1181,10 +1181,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     continue;
                                 }
 
-                                if hw_encoder.is_none() {
-                                    match HardwareH264Encoder::new(MAX_WIDTH, MAX_HEIGHT, TARGET_FPS, TARGET_BITRATE) {
+                                if hw_encoder.is_none() || current_enc_width != src_width as u32 || current_enc_height != src_height as u32 {
+                                    let dynamic_bitrate = ((src_width * src_height) as f64 * 4.5) as u32; 
+                                    let target_bitrate = dynamic_bitrate.clamp(8_000_000, 20_000_000); // 8 to 20 Mbps
+
+                                    match HardwareH264Encoder::new(src_width as u32, src_height as u32, TARGET_FPS, target_bitrate) {
                                         Ok(enc) => {
                                             hw_encoder = Some(enc);
+                                            current_enc_width = src_width as u32;
+                                            current_enc_height = src_height as u32;
                                         }
                                         Err(e) => {
                                             eprintln!("[H264 HW][FATAL] Hardware encoder initialization failed: {}", e);
@@ -1276,12 +1281,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     "AVC"
                                 };
                                 println!("[AGENT H264]\nencoder=hardware\nformat={}\nsize={}\nNAL types={:?}", format_str, h264_bytes.len(), nal_types);
-                                if frame_number <= 5 {
+                                if frame_number <= 5 || (frame_number % (TARGET_FPS as u64) == 0) {
                                     println!("[VIDEO TX]");
                                     println!("capture = YES");
                                     println!("encoded = YES");
-                                    println!("width = {}", MAX_WIDTH);
-                                    println!("height = {}", MAX_HEIGHT);
+                                    println!("width = {}", current_enc_width);
+                                    println!("height = {}", current_enc_height);
                                     println!("bytes = {}", h264_bytes.len());
                                     println!("keyframe = {}", if has_idr { "YES" } else { "NO" });
                                 }
@@ -1294,17 +1299,17 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let packet_size = 21 + h264_bytes.len();
                                 let mut packet = Vec::with_capacity(packet_size);
                                 packet.push(13u8);
-                                packet.extend_from_slice(&(MAX_WIDTH as u32).to_be_bytes());
-                                packet.extend_from_slice(&(MAX_HEIGHT as u32).to_be_bytes());
+                                packet.extend_from_slice(&current_enc_width.to_be_bytes());
+                                packet.extend_from_slice(&current_enc_height.to_be_bytes());
                                 packet.extend_from_slice(&(h264_bytes.len() as u32).to_be_bytes());
                                 packet.extend_from_slice(&timestamp_ms.to_be_bytes());
                                 packet.extend_from_slice(&h264_bytes);
 
-                                if frame_number <= 5 || (frame_number % 120 == 0) {
+                                if frame_number <= 5 || (frame_number % (TARGET_FPS as u64) == 0) {
                                     println!("[VIDEO TX PREP]");
                                     println!("type = 13");
-                                    println!("width = {}", MAX_WIDTH);
-                                    println!("height = {}", MAX_HEIGHT);
+                                    println!("width = {}", current_enc_width);
+                                    println!("height = {}", current_enc_height);
                                     println!("payload_size = {}", h264_bytes.len());
                                     println!("keyframe = {}", if has_idr { "true" } else { "false" });
                                     println!("packet_size = {}", packet.len());
@@ -1317,8 +1322,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     continue;
                                 }
 
-                                let mut slot = match video_slot_capture.lock() {
-                                    Ok(s) => s,
+                                let mut queue = match video_slot_capture.lock() {
+                                    Ok(q) => q,
                                     Err(_) => {
                                         println!("[VIDEO TX QUEUE ERROR]\nerror=slot_poisoned");
                                         is_conn_write.store(false, Ordering::SeqCst);
@@ -1326,8 +1331,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
                                 };
                                 
-                                if slot.is_some() {
-                                    slot.take();
+                                if queue.len() >= 30 {
+                                    queue.clear();
                                     if !has_idr {
                                         video_recovery_capture.store(true, Ordering::Release);
                                         println!("[VIDEO TX DROP] Queue full, dropped frames, requesting IDR");
@@ -1335,7 +1340,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
                                 }
 
-                                slot.replace(packet);
+                                queue.push_back(packet);
                             }
 
                             // SHUTDOWN OF SESSION

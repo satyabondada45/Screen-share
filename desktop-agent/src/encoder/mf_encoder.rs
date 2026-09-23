@@ -201,14 +201,16 @@ impl HardwareH264Encoder {
                 // Zero B-Frames
                 set_codec_u32(&codec_api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
 
-                // GOP Size = 60 (Periodic keyframe every 0.5s at 120 FPS / 1s at 60 FPS)
-                set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, 60);
+                // GOP Size = 2 seconds
+                set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, fps * 2);
 
-                // Bitrate = 8_000_000
+                // Bitrate
                 set_codec_u32(&codec_api, &CODECAPI_AVEncCommonMeanBitRate, bitrate);
 
-                // Rate Control: CBR
-                set_codec_u32(&codec_api, &CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR.0 as u32);
+                // Rate Control: Quality/VBR
+                set_codec_u32(&codec_api, &CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_Quality.0 as u32);
+                // Also set quality metric (0-100, 100 is best)
+                set_codec_u32(&codec_api, &CODECAPI_AVEncCommonQuality, 75);
                 println!("[H264 HW] ICodecAPI low-latency properties applied.");
             }
 

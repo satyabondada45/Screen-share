@@ -757,7 +757,7 @@ $sessionCode = strlen($cleanId) === 9
         let videoDecodeBusy = false;
 
         let videoDecoder = null;
-        const MAX_DECODER_QUEUE = 2;
+        const MAX_DECODER_QUEUE = 30;
         const MAX_RX_BUFFER_BYTES = 12 * 1024 * 1024;
         const videoTimingByTimestamp = new Map();
         let lastLatencyLogAt = 0;
