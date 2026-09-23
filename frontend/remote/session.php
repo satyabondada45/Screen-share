@@ -1817,6 +1817,61 @@ $sessionCode = strlen($cleanId) === 9
             return buildAvccFromNalUnits(ordered);
         }
 
+        let pendingWebCodecsFrame = null;
+        let webCodecsAnimationFrameId = null;
+
+        function renderPendingWebCodecsFrame() {
+            webCodecsAnimationFrameId = null;
+            if (!pendingWebCodecsFrame) return;
+
+            const { frame, timing, outputAt } = pendingWebCodecsFrame;
+            pendingWebCodecsFrame = null;
+
+            if (canvas && ctx) {
+                if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+                    canvas.width = frame.displayWidth;
+                    canvas.height = frame.displayHeight;
+                    renderWidth = frame.displayWidth;
+                    renderHeight = frame.displayHeight;
+                    
+                    const resEl = document.getElementById("resDisplay");
+                    if (resEl) {
+                        resEl.textContent = `${renderWidth} × ${renderHeight}`;
+                    }
+                    addActivityLog(`Resolution changed to ${renderWidth}x${renderHeight}`);
+                }
+
+                if (!window._display_logged) {
+                    console.log(`[DISPLAY]\nframeWidth = ${frame.displayWidth}\nframeHeight = ${frame.displayHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
+                    console.log("[DISPLAY] Frame rendered");
+                    window._display_logged = true;
+                }
+
+                ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                browserPerf.renderedFrames++;
+                browserPerf.renderWindow++;
+                
+                const renderedAt = performance.now();
+                if (timing) {
+                    browserPerf.outputRenderSamples.push(renderedAt - outputAt);
+                    if (timing.captureTimestamp > 0) {
+                        const captureRender = Date.now() - timing.captureTimestamp;
+                        if (captureRender >= 0 && captureRender < 60000) {
+                            browserPerf.captureRenderSamples.push(captureRender);
+                            if (renderedAt - lastRenderedLatencyLogAt >= 1000) {
+                                const renderTime = Date.now();
+                                console.log(`[VIDEO LATENCY TRACE] capture=${timing.captureTimestamp} receive=${timing.receiveTime} decodeSubmit=${timing.decodeSubmitTime} decodeOutput=${timing.decodeOutputTime || "pending"} render=${renderTime} ageMs=${captureRender} decodeQueue=${videoDecoder ? videoDecoder.decodeQueueSize : 0}`);
+                                lastRenderedLatencyLogAt = renderedAt;
+                            }
+                        }
+                    }
+                }
+                setStreamState("DISPLAYING");
+            }
+            recordVideoMetrics(outputAt);
+            frame.close();
+        }
+
         function initVideoDecoder() {
             if (videoDecoder && videoDecoder.state !== 'closed') {
                 try {
@@ -1853,67 +1908,16 @@ $sessionCode = strlen($cleanId) === 9
                             console.log("[VIDEO RENDER] first visible frame");
                         }
 
-                        if (canvas && ctx) {
-                            if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-                                canvas.width = frame.displayWidth;
-                                canvas.height = frame.displayHeight;
-                                renderWidth = frame.displayWidth;
-                                renderHeight = frame.displayHeight;
-                                
-                                const resEl = document.getElementById("resDisplay");
-                                if (resEl) {
-                                    resEl.textContent = `${renderWidth} × ${renderHeight}`;
-                                }
-                                addActivityLog(`Resolution changed to ${renderWidth}x${renderHeight}`);
-                            }
-
-                            if (!window._display_logged) {
-                                console.log(`[DISPLAY]\nframeWidth = ${frame.displayWidth}\nframeHeight = ${frame.displayHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
-                                console.log("[DISPLAY] Frame rendered");
-                                window._display_logged = true;
-                            }
-
-                            // Temporary Diagnostic: verify if decoded VideoFrame has non-black content
-                            if (videoFrameCount <= 3) {
-                                try {
-                                    const diagCanvas = document.createElement("canvas");
-                                    diagCanvas.width = 32;
-                                    diagCanvas.height = 32;
-                                    const diagCtx = diagCanvas.getContext("2d");
-                                    if (diagCtx) {
-                                        diagCtx.drawImage(frame, 0, 0, 32, 32);
-                                        const pData = diagCtx.getImageData(0, 0, 32, 32).data;
-                                        let nonBlack = 0;
-                                        for (let i = 0; i < pData.length; i += 4) {
-                                            if (pData[i] > 10 || pData[i + 1] > 10 || pData[i + 2] > 10) nonBlack++;
-                                        }
-                                        console.log(`[VIDEO DIAGNOSTIC] Frame #${videoFrameCount} sample pixels: ${nonBlack} / 1024 non-black`);
-                                    }
-                                } catch (diagErr) { }
-                            }
-
-                            ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-                            browserPerf.renderedFrames++;
-                            browserPerf.renderWindow++;
-                            const renderedAt = performance.now();
-                            if (timing) {
-                                browserPerf.outputRenderSamples.push(renderedAt - outputAt);
-                                if (timing.captureTimestamp > 0) {
-                                    const captureRender = Date.now() - timing.captureTimestamp;
-                                    if (captureRender >= 0 && captureRender < 60000) {
-                                        browserPerf.captureRenderSamples.push(captureRender);
-                                        if (renderedAt - lastRenderedLatencyLogAt >= 1000) {
-                                            const renderTime = Date.now();
-                                            console.log(`[VIDEO LATENCY TRACE] capture=${timing.captureTimestamp} receive=${timing.receiveTime} decodeSubmit=${timing.decodeSubmitTime} decodeOutput=${timing.decodeOutputTime || "pending"} render=${renderTime} ageMs=${captureRender} decodeQueue=${videoDecoder ? videoDecoder.decodeQueueSize : 0}`);
-                                            lastRenderedLatencyLogAt = renderedAt;
-                                        }
-                                    }
-                                }
-                            }
-                            setStreamState("DISPLAYING");
+                        if (pendingWebCodecsFrame) {
+                            pendingWebCodecsFrame.frame.close();
+                            browserPerf.staleFramesDiscarded = (browserPerf.staleFramesDiscarded || 0) + 1;
                         }
-                        recordVideoMetrics(outputAt);
-                        frame.close();
+                        
+                        pendingWebCodecsFrame = { frame, timing, outputAt };
+                        
+                        if (!webCodecsAnimationFrameId) {
+                            webCodecsAnimationFrameId = requestAnimationFrame(renderPendingWebCodecsFrame);
+                        }
                     },
                     error(error) {
                         // A decode error must NOT tear down the stream or close the WebSocket.

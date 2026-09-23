@@ -685,9 +685,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             }
 
-                            // OUTPUT QUEUE
-                            // The queue must not silently drop large video frames; use a bounded channel with blocking
-                            // sends so the writer can keep up instead of losing the whole video stream.
+                            let video_slot = Arc::new(Mutex::new(None::<Vec<u8>>));
+                            let video_slot_writer = Arc::clone(&video_slot);
+                            let video_slot_capture = Arc::clone(&video_slot);
+                            let video_recovery_needed = Arc::new(AtomicBool::new(false));
+                            let video_recovery_capture = Arc::clone(&video_recovery_needed);
+                            
                             let (out_tx, out_rx) = sync_channel::<Vec<u8>>(512);
                             let write_stream = out_tx.clone();
                             let mut write_tcp = match stream.try_clone() {
@@ -705,35 +708,55 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             println!("[VIDEO STATE] ACTIVE");
 
                             let writer_handle = thread::spawn(move || {
-                                while write_connected.load(Ordering::Acquire) {
-                                    match out_rx.recv_timeout(Duration::from_millis(100)) {
-                                        Ok(packet) => {
-                                            if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
-                                                println!("[VIDEO TCP TX]\ntype={}\nbytes={}\nfirst_bytes={:?}", packet[0], packet.len(), &packet[..std::cmp::min(16, packet.len())]);
-                                            }
-                                            match write_tcp.write_all(&packet) {
-                                                Ok(_) => {}
-                                                Err(e) => {
-                                                    if e.kind() == std::io::ErrorKind::WouldBlock
-                                                        || e.kind() == std::io::ErrorKind::TimedOut
-                                                    {
-                                                        continue;
-                                                    }
-                                                    eprintln!("[Writer] TCP error: {:?}", e);
-                                                    println!("[VIDEO STATE] WRITE_FAILED");
-                                                    write_connected.store(false, Ordering::Release);
-                                                    break;
-                                                }
+                                let mut write_packet = |packet: Vec<u8>| -> bool {
+                                    if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
+                                        let ts = u64::from_be_bytes(packet[13..21].try_into().unwrap_or([0; 8]));
+                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                                        if ts > 0 && now > ts {
+                                            println!("[VIDEO TRACE] send_timestamp={} ageMs={}", now, now - ts);
+                                        }
+                                    }
+                                    match write_tcp.write_all(&packet) {
+                                        Ok(_) => true,
+                                        Err(e) => {
+                                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                                || e.kind() == std::io::ErrorKind::TimedOut
+                                            {
+                                                true
+                                            } else {
+                                                eprintln!("[Writer] TCP error: {:?}", e);
+                                                println!("[VIDEO STATE] WRITE_FAILED");
+                                                write_connected.store(false, Ordering::Release);
+                                                false
                                             }
                                         }
-                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                                        Err(_) => break,
+                                    }
+                                };
+
+                                while write_connected.load(Ordering::Acquire) {
+                                    match out_rx.recv_timeout(Duration::from_millis(5)) {
+                                        Ok(packet) => {
+                                            if !write_packet(packet) {
+                                                break;
+                                            }
+                                        }
+                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                    }
+
+                                    let video_packet = video_slot_writer
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut slot| slot.take());
+                                    if let Some(packet) = video_packet {
+                                        if !write_packet(packet) {
+                                            break;
+                                        }
                                     }
                                 }
                             });
 
                             let write_stream_clip = write_stream.clone();
-                            let write_stream_frames = write_stream.clone();
                             let write_stream_audio = write_stream.clone();
                             let write_stream_ping = write_stream.clone();
 
@@ -1149,6 +1172,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     Some(f) => f,
                                     None => continue,
                                 };
+                                
+                                let recovery_req = video_recovery_capture.load(Ordering::Acquire);
 
                                 let src_width = frame.width;
                                 let src_height = frame.height;
@@ -1169,7 +1194,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
 
                                 let encoder = hw_encoder.as_mut().unwrap();
-                                let is_keyframe_request = frame_number == 0 || !encoder.has_produced_keyframe || (frame_number % (TARGET_FPS as u64) == 0);
+                                let is_keyframe_request = frame_number == 0 || !encoder.has_produced_keyframe || (frame_number % (TARGET_FPS as u64) == 0) || recovery_req;
                                 if is_keyframe_request {
                                     println!("[H264] KEYFRAME REQUESTED");
                                 }
@@ -1285,14 +1310,32 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     println!("packet_size = {}", packet.len());
                                 }
 
-                                let packet_len = packet.len();
-                                if write_stream_frames.send(packet).is_err() {
-                                    println!("[VIDEO TX QUEUE ERROR]\nerror=disconnected");
-                                    is_conn_write.store(false, Ordering::SeqCst);
-                                    break;
+                                if has_idr {
+                                    video_recovery_capture.store(false, Ordering::Release);
+                                } else if recovery_req {
+                                    // Encoder was requested to produce IDR, but didn't produce one yet
+                                    continue;
                                 }
 
-                                println!("[VIDEO TX QUEUED]\ntype=13\nbytes={}\nkeyframe={}", packet_len, if has_idr { "true" } else { "false" });
+                                let mut slot = match video_slot_capture.lock() {
+                                    Ok(s) => s,
+                                    Err(_) => {
+                                        println!("[VIDEO TX QUEUE ERROR]\nerror=slot_poisoned");
+                                        is_conn_write.store(false, Ordering::SeqCst);
+                                        break;
+                                    }
+                                };
+                                
+                                if slot.is_some() {
+                                    slot.take();
+                                    if !has_idr {
+                                        video_recovery_capture.store(true, Ordering::Release);
+                                        println!("[VIDEO TX DROP] Queue full, dropped frames, requesting IDR");
+                                        continue;
+                                    }
+                                }
+
+                                slot.replace(packet);
                             }
 
                             // SHUTDOWN OF SESSION
