@@ -34,10 +34,10 @@
         <li>Starts with Windows (optional)</li>
         <li>Clean uninstall via Windows Settings</li>
       </ul>
-      <a class="btn" href="downloads/ScreenShare-Setup.exe">Download Screen Share for Windows</a>
+      <a class="btn" href="https://friendssoftwaresolutions.in/DeskStream/api/agent/download.php">Download DeskStream Agent for Windows</a>
       <p class="muted" style="margin-top:18px;">
-        Legacy agent-only package:
-        <a href="downloads/DeskStream-Agent-Installer.zip">DeskStream-Agent-Installer.zip</a>
+        Direct executable download:
+        <a href="https://friendssoftwaresolutions.in/DeskStream/api/agent/download.php">DeskStream-Agent-v1.1.3-x64.exe</a>
       </p>
     </div>
   </div>

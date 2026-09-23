@@ -306,9 +306,10 @@ fn run_websocket_bridge(
 
     // WS writer thread
     let ws_writer_handle = thread::spawn(move || {
-        // Guarantee that the Viewer receives the Approval packet (Type 1) FIRST
+        // Guarantee that the Viewer receives the Approval packet (Type 1) AND Stream Active (Type 2) FIRST
         if let Ok(mut ws) = ws_arc_writer.lock() {
             let _ = ws.send(Message::Binary(vec![1u8]));
+            let _ = ws.send(Message::Binary(vec![2u8]));
         }
 
         while is_active_writer.load(Ordering::SeqCst) {
@@ -359,7 +360,7 @@ fn run_websocket_bridge(
                     let width  = u32::from_be_bytes(header[0..4].try_into().unwrap());
                     let height = u32::from_be_bytes(header[4..8].try_into().unwrap());
                     let psize  = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
-                    if width == 0 || width > 7680 || height == 0 || height > 4320 || psize == 0 || psize > 50 * 1024 * 1024 {
+                    if width == 0 || width > 7680 || height == 0 || height > 4320 || psize > 50 * 1024 * 1024 {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=invalid_video_dims w={} h={} p={} device={}", width, height, psize, session_id_for_thread);
                         break;
                     }
@@ -393,7 +394,7 @@ fn run_websocket_bridge(
                         break;
                     }
                     let psize = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
-                    if psize == 0 || psize > 10 * 1024 * 1024 { break; }
+                    if psize > 10 * 1024 * 1024 { break; }
                     let mut payload = vec![0u8; psize];
                     if let Err(e) = host_reader.read_exact(&mut payload) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=audio_payload_failed error={:?} device={}", e, session_id_for_thread);
@@ -774,24 +775,59 @@ fn handle_host(
             auth_request.push(3u8);
             auth_request.extend_from_slice(&req.auth_hash);
 
+            println!("[PAIR] Sending AUTH_REQUEST to HOST");
             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             if !send_all_pair("HOST", &mut stream, &auth_request) {
-                eprintln!("[PAIR][ERROR] Failed to send auth request to host: {}", session_id);
+                eprintln!("[PAIR][ERROR] Failed to send authentication request: {}", session_id);
                 let _ = req.response_tx.send(false);
                 continue;
             }
 
-            println!("[PAIR] Waiting for HOST authentication response...");
+            println!("[PAIR] Waiting for HOST authentication response");
             let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
-            let mut response = [0u8; 1];
-            if !read_exact_logged(&mut stream, &mut response, "Host authentication response") {
-                eprintln!("[PAIR][ERROR] Failed to read authentication response from HOST: {}", session_id);
-                let _ = req.response_tx.send(false);
-                continue;
-            }
+            let approved = loop {
+                let mut response = [0u8; 1];
+                if let Err(e) = stream.read_exact(&mut response) {
+                    eprintln!("[PAIR][ERROR] Authentication response read failed: {}", e);
+                    break false;
+                }
 
-            if response[0] != 1 {
-                println!("[APPROVAL] Host rejected or timed out: {}", session_id);
+                match response[0] {
+                    0x01 => {
+                        println!("[PAIR] HOST authentication response byte=0x01");
+                        break true;
+                    }
+                    0x00 => {
+                        println!("[PAIR] HOST authentication response byte=0x00");
+                        println!("[APPROVAL] Host rejected: {}", session_id);
+                        break false;
+                    }
+                    0x0E => {
+                        println!("[PAIR] Heartbeat received while waiting for authentication response");
+                        let mut heartbeat = [0u8; 8];
+                        if let Err(e) = stream.read_exact(&mut heartbeat) {
+                            eprintln!("[PAIR][ERROR] Authentication response read failed: {}", e);
+                            break false;
+                        }
+                        let mut ack = [0u8; 9];
+                        ack[0] = 0x0E;
+                        ack[1..].copy_from_slice(&heartbeat);
+                        if let Err(e) = stream.write_all(&ack) {
+                            eprintln!("[PAIR][ERROR] Failed to acknowledge heartbeat during authentication: {}", e);
+                            break false;
+                        }
+                    }
+                    other => {
+                        eprintln!(
+                            "[PAIR][ERROR] Unexpected byte 0x{:02X} while waiting for HOST authentication response",
+                            other
+                        );
+                        break false;
+                    }
+                }
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            if !approved {
                 let _ = req.response_tx.send(false);
                 continue;
             }

@@ -1,0 +1,26 @@
+RewriteEngine On
+
+# 1. Prevent rewriting if the request is a real file or directory
+RewriteCond %{REQUEST_FILENAME} -d [OR]
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# 2. Clean URL mapping to lowercase PHP files (Case-Insensitive)
+RewriteRule ^dashboard/?$ dashboard.php [L,NC]
+RewriteRule ^devices/?$ devices.php [L,NC]
+RewriteRule ^connections/?$ connections.php [L,NC]
+RewriteRule ^sessions/?$ sessions.php [L,NC]
+RewriteRule ^files/?$ files.php [L,NC]
+RewriteRule ^notifications/?$ notifications.php [L,NC]
+RewriteRule ^pricing/?$ pricing.php [L,NC]
+RewriteRule ^payment/?$ payment.php [L,NC]
+RewriteRule ^subscription/?$ subscription.php [L,NC]
+RewriteRule ^profile/?$ profile.php [L,NC]
+RewriteRule ^settings/?$ settings.php [L,NC]
+RewriteRule ^help/?$ help.php [L,NC]
+RewriteRule ^contact/?$ contact.php [L,NC]
+RewriteRule ^register/?$ register.php [L,NC]
+RewriteRule ^forgot-password/?$ forgot-password.php [L,NC]
+RewriteRule ^reset-password/?$ reset-password.php [L,NC]
+RewriteRule ^login/?$ index.php [L,NC]
+RewriteRule ^logout/?$ logout.php [L,NC]

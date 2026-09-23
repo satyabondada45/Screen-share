@@ -90,14 +90,13 @@ impl AgentConfig {
                 if let Some(mut cfg) = Self::try_read_config(canonical_path.to_str().unwrap_or_default()) {
                     let mut dirty = false;
 
-                    // --- CLONED / CORRUPTED CONFIG DETECTION ---
+                    // Report a copied configuration, but never silently replace its
+                    // persisted identity. The configured system_id is part of the
+                    // device identity used by the viewer and relay.
                     let uuid_mismatch = !cfg.device_uuid.is_empty() && cfg.device_uuid != hardware_uuid;
                     if uuid_mismatch {
                         eprintln!("[IDENTITY] *** MISMATCH: stored device_uuid ({}) != hardware MachineGuid ({}).", cfg.device_uuid, hardware_uuid);
-                        eprintln!("[IDENTITY] *** Config was cloned or manually overwritten. Regenerating identity for this hardware.");
-                        cfg.device_uuid = hardware_uuid.clone();
-                        cfg.system_id = deterministic_id.clone();
-                        dirty = true;
+                        eprintln!("[IDENTITY] *** Preserving the configured device identity; no automatic reset was performed.");
                     }
 
                     if cfg.device_uuid.is_empty() {

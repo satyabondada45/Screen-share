@@ -6,6 +6,8 @@ pub mod registration {
 }
 pub mod encoder;
 pub mod identity;
+pub mod network;
+pub mod status;
 
 use arboard::Clipboard;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -428,6 +430,10 @@ fn start_audio_capture(
                 }
 
                 let byte_len = data.len() * std::mem::size_of::<f32>();
+                if byte_len == 0 {
+                    return;
+                }
+
 
                 let mut packet = Vec::with_capacity(11 + byte_len);
                 packet.push(17u8);
@@ -457,8 +463,7 @@ fn start_audio_capture(
 
 fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) {
     let host_ip = relay_addr.split(':').next().unwrap_or("127.0.0.1");
-    let backend_url = format!("http://{}/Screen%20Share/backend/api", host_ip);
-
+    let backend_url = "https://friendssoftwaresolutions.in/DeskStream/api".to_string(); 
     // Use persistent device UUID as the machine identifier
     // Use the config system_id (deterministic from UUID) as the initial system_id hint
     let mut backend = registration::backend_client::BackendClient::new(
@@ -496,7 +501,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
     agent_log!("[IDENTITY] System ID:    {}", system_id);
     agent_log!("[IDENTITY] Display ID:   {}", id_str);
 
-    backend.start_heartbeat_thread();
+    let global_status = Arc::new(Mutex::new(crate::status::AgentStatus::new(&system_id, "Windows Device")));
+    backend.start_heartbeat_thread(global_status.clone());
 
     let mut backoff_secs = 1;
 
@@ -549,10 +555,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
         println!("[RELAY] Registration ACK received");
         agent_log!("[AGENT] Registration acknowledged");
-        let mut display_id = vec![0u8; 12];
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-        if stream.read(&mut display_id).is_ok() {}
-        
         agent_log!("[AGENT] Registration sent");
         agent_log!("[AGENT] ACTUAL DEVICE ID = {}", id_str);
 
@@ -626,10 +628,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             is_in_session.store(true, Ordering::SeqCst);
 
-                            // Send approval response [1u8]
-                            if let Ok(mut writer) = idle_write_stream.lock() {
-                                let _ = writer.set_write_timeout(Some(Duration::from_secs(5)));
-                                let _ = writer.write_all(&[1u8]);
+                            // The approval byte is a one-byte ACK in the type-3 auth flow and must be
+                            // written on the active control socket, not via the idle heartbeat writer.
+                            // This keeps the host relay state machine aligned with the relay's idle-loop
+                            // heartbeat handling and avoids a stray '1' being treated as an unexpected idle byte.
+                            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                            if stream.write_all(&[1u8]).is_err() {
+                                eprintln!("[Agent] Failed to send approval ACK to relay.");
+                                break 'viewer_loop;
                             }
 
                             println!("[Host] Approval response sent successfully (APPROVED)");
@@ -680,7 +686,9 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             }
 
                             // OUTPUT QUEUE
-                            let (out_tx, out_rx) = sync_channel::<Vec<u8>>(4);
+                            // The queue must not silently drop large video frames; use a bounded channel with blocking
+                            // sends so the writer can keep up instead of losing the whole video stream.
+                            let (out_tx, out_rx) = sync_channel::<Vec<u8>>(512);
                             let write_stream = out_tx.clone();
                             let mut write_tcp = match stream.try_clone() {
                                 Ok(s) => s,
@@ -700,6 +708,9 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 while write_connected.load(Ordering::Acquire) {
                                     match out_rx.recv_timeout(Duration::from_millis(100)) {
                                         Ok(packet) => {
+                                            if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
+                                                println!("[VIDEO TCP TX]\ntype={}\nbytes={}\nfirst_bytes={:?}", packet[0], packet.len(), &packet[..std::cmp::min(16, packet.len())]);
+                                            }
                                             match write_tcp.write_all(&packet) {
                                                 Ok(_) => {}
                                                 Err(e) => {
@@ -1177,6 +1188,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let mut has_sps = false;
                                 let mut has_pps = false;
                                 let mut has_idr = false;
+
+                                let (parsed_nals, sps_found, pps_found, idr_found) = encoder::mf_encoder::inspect_nals(&h264_bytes);
+                                nal_types = parsed_nals;
+                                has_sps = sps_found;
+                                has_pps = pps_found;
+                                has_idr = idr_found;
                                 let mut i = 0;
                                 while i + 3 < h264_bytes.len() {
                                     if (h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 1)
@@ -1219,6 +1236,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     has_idr,
                                     pts
                                 );
+                                println!("[VIDEO ENCODE]\nframe={}\nbytes={}\nkeyframe={}\nSPS={}\nPPS={}\nIDR={}",
+                                    frame_number,
+                                    h264_bytes.len(),
+                                    if has_idr { "true" } else { "false" },
+                                    if has_sps { "true" } else { "false" },
+                                    if has_pps { "true" } else { "false" },
+                                    if has_idr { "true" } else { "false" }
+                                );
 
                                 let format_str = if h264_bytes.starts_with(&[0, 0, 0, 1]) || h264_bytes.starts_with(&[0, 0, 1]) {
                                     "AnnexB"
@@ -1250,26 +1275,24 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 packet.extend_from_slice(&timestamp_ms.to_be_bytes());
                                 packet.extend_from_slice(&h264_bytes);
 
-                                if frame_number <= 5 {
-                                    println!("[VIDEO SEND]");
+                                if frame_number <= 5 || (frame_number % 120 == 0) {
+                                    println!("[VIDEO TX PREP]");
                                     println!("type = 13");
-                                    println!("bytes = {}", packet.len());
+                                    println!("width = {}", MAX_WIDTH);
+                                    println!("height = {}", MAX_HEIGHT);
+                                    println!("payload_size = {}", h264_bytes.len());
+                                    println!("keyframe = {}", if has_idr { "true" } else { "false" });
+                                    println!("packet_size = {}", packet.len());
                                 }
 
-                                let is_first_key = frame_number == 1;
-                                let send_res = write_stream_frames.try_send(packet);
-
-                                if let Err(std::sync::mpsc::TrySendError::Full(_)) = send_res {
-                                    // Channel full — drop this frame to maintain live streaming
-                                    // For live desktop, latest frame is more important than every frame
-                                    continue;
-                                }
-
-                                if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = send_res {
-                                    // Writer thread has stopped — session is over
+                                let packet_len = packet.len();
+                                if write_stream_frames.send(packet).is_err() {
+                                    println!("[VIDEO TX QUEUE ERROR]\nerror=disconnected");
                                     is_conn_write.store(false, Ordering::SeqCst);
                                     break;
                                 }
+
+                                println!("[VIDEO TX QUEUED]\ntype=13\nbytes={}\nkeyframe={}", packet_len, if has_idr { "true" } else { "false" });
                             }
 
                             // SHUTDOWN OF SESSION
@@ -1367,17 +1390,15 @@ fn main() {
     let relay_addr = if args.len() > 1 {
         args[1].clone()
     } else {
-        "192.168.29.229:9001".to_string()
+        "34.229.20.54:9001".to_string()
     };
 
     // Load persistent identity from %LOCALAPPDATA%\DeskStream\agent_config.json
     // This uses the Windows MachineGuid as the permanent device UUID
     let config = identity::device_id::AgentConfig::load_or_create("", &relay_addr);
-
-    hide_console_window();
+    let relay_addr = config.relay_addr.clone();
 
     let current_exe_path = env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    let _ = enable_autostart("ScreenShareAgent");
 
     agent_log!("========================================");
     agent_log!("       REMOTE DESKTOP AGENT STARTING");
@@ -1392,9 +1413,22 @@ fn main() {
                 if let Ok(n) = stream.read(&mut buf) {
                     let request = String::from_utf8_lossy(&buf[..n]);
                     let is_options = request.starts_with("OPTIONS");
+                    
+                    let mut is_discover = false;
+                    let mut target_id = String::new();
+                    if let Some(path_start) = request.find("GET /") {
+                        let path_part = &request[path_start + 4..];
+                        if let Some(space_idx) = path_part.find(' ') {
+                            let path = &path_part[..space_idx];
+                            if path.starts_with("/discover?target=") {
+                                is_discover = true;
+                                target_id = path.trim_start_matches("/discover?target=").to_string();
+                            }
+                        }
+                    }
 
                     let response = if is_options {
-                        // CORS preflight response — no body needed
+                        // CORS preflight response
                         "HTTP/1.1 204 No Content\r\n\
                          Access-Control-Allow-Origin: *\r\n\
                          Access-Control-Allow-Methods: GET, OPTIONS\r\n\
@@ -1403,6 +1437,31 @@ fn main() {
                          Access-Control-Max-Age: 86400\r\n\
                          Connection: close\r\n\
                          \r\n".to_string()
+                    } else if is_discover {
+                        if let Some((ip, port)) = crate::network::discovery::discover_target_agent(&target_id) {
+                            format!(
+                                "HTTP/1.1 200 OK\r\n\
+                                 Content-Type: application/json\r\n\
+                                 Access-Control-Allow-Origin: *\r\n\
+                                 Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                                 Access-Control-Allow-Headers: Content-Type\r\n\
+                                 Access-Control-Allow-Private-Network: true\r\n\
+                                 Connection: close\r\n\
+                                 \r\n\
+                                 {{\"status\": \"found\", \"ip\": \"{}\", \"port\": {}}}",
+                                ip, port
+                            )
+                        } else {
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/json\r\n\
+                             Access-Control-Allow-Origin: *\r\n\
+                             Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                             Access-Control-Allow-Headers: Content-Type\r\n\
+                             Access-Control-Allow-Private-Network: true\r\n\
+                             Connection: close\r\n\
+                             \r\n\
+                             {\"status\": \"not_found\"}".to_string()
+                        }
                     } else {
                         // Normal GET response with JSON body
                         format!(
@@ -1435,6 +1494,9 @@ fn main() {
     println!("  Video: 1920x1080 @ 120 FPS");
     println!("  Codec: Hardware H.264 (Low Latency)");
     println!("========================================");
+
+    crate::network::discovery::start_discovery_listener(config.system_id.clone());
+    // crate::network::direct_ws::start_direct_ws_server(config.system_id.clone());
 
     run_agent_loop(relay_addr, config);
 }

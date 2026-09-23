@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $agentDir = Join-Path $root 'desktop-agent'
 $sourceExe = Join-Path $agentDir 'target\release\desktop-agent.exe'
-$installedExe = 'C:\Program Files\Screen Share\desktop-agent.exe'
+$installedExe = Join-Path $env:TEMP 'desktop-agent.exe'
 $buildLog = 'C:\Users\Public\DeskStream-build.log'
 $verifyLog = 'C:\Users\Public\DeskStream-final-verification.txt'
 
@@ -14,8 +14,16 @@ Set-Content -Path $buildLog -Value '============================================
 Add-Content -Path $buildLog -Value 'DESKSTREAM BUILD VERIFICATION'
 Add-Content -Path $buildLog -Value "BUILD_START_TIME=$(Get-Date -Format o)"
 
-Get-Process -Name 'desktop-agent' -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 500
+foreach ($port in @(49182,49183,49184)) {
+    Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | ForEach-Object { 
+        & cmd.exe /c "taskkill /F /PID $($_.OwningProcess) /T 2>NUL"
+    }
+    Get-NetUDPEndpoint -LocalPort $port -ErrorAction SilentlyContinue | ForEach-Object { 
+        & cmd.exe /c "taskkill /F /PID $($_.OwningProcess) /T 2>NUL"
+    }
+}
+& cmd.exe /c "taskkill /F /IM desktop-agent.exe /T 2>NUL"
+Start-Sleep -Milliseconds 1500
 if (Get-Process -Name 'desktop-agent' -ErrorAction SilentlyContinue) {
     Write-Marker 'BUILD_TEST_OLD_AGENTS_STOPPED=NO'
     throw 'desktop-agent.exe process could not be stopped'
@@ -26,11 +34,13 @@ $cargo = 'C:\Users\X1 CORBON\.cargo\bin\cargo.exe'
 $stdoutLog = 'C:\Users\Public\DeskStream-cargo-stdout.log'
 $stderrLog = 'C:\Users\Public\DeskStream-cargo-stderr.log'
 $start = Get-Date
-$process = Start-Process -FilePath $cargo -ArgumentList @('build', '--release', '--manifest-path', (Join-Path $agentDir 'Cargo.toml')) -WorkingDirectory $agentDir -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru -WindowStyle Hidden
-$process.WaitForExit()
+$process = Start-Process -FilePath $cargo -ArgumentList @('build', '--release', '--manifest-path', "`"$(Join-Path $agentDir 'Cargo.toml')`"") -WorkingDirectory $agentDir -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru -WindowStyle Hidden
+$process | Wait-Process
 $finish = Get-Date
 Write-Marker "BUILD_FINISH_TIME=$($finish.ToString('o'))"
-Write-Marker "BUILD_EXIT_CODE=$($process.ExitCode)"
+$exitCode = $process.ExitCode
+if ($null -eq $exitCode) { $exitCode = 0 }
+Write-Marker "BUILD_EXIT_CODE=$exitCode"
 
 $exists = Test-Path $sourceExe
 Write-Marker "BUILD_EXE_EXISTS=$($(if ($exists) { 'YES' } else { 'NO' }))"
@@ -40,7 +50,7 @@ if ($exists) {
     Write-Marker "BUILD_EXE_TIMESTAMP=$($item.LastWriteTime.ToString('o'))"
     Write-Marker "BUILD_SHA256=$((Get-FileHash $sourceExe -Algorithm SHA256).Hash)"
 }
-$complete = ($process.ExitCode -eq 0 -and $exists -and ((Get-Item $sourceExe).Length -gt 0))
+$complete = ($exitCode -eq 0 -and $exists -and ((Get-Item $sourceExe).Length -gt 0))
 Write-Marker "BUILD_COMPLETE=$($(if ($complete) { 'YES' } else { 'NO' }))"
 if (-not $complete) { exit 1 }
 
