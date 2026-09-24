@@ -1,5 +1,19 @@
 <?php
 // Simple .env loader fallback if a .env file exists (e.g. for local dev/VPS)
+
+// Handle CORS for Desktop Agent Custom Protocol
+if (isset($_SERVER['HTTP_ORIGIN'])) {
+    $origin = $_SERVER['HTTP_ORIGIN'];
+    if ($origin === 'deskstream://localhost' || strpos($origin, 'friendssoftwaresolutions.in') !== false || $origin === 'http://localhost') {
+        header("Access-Control-Allow-Origin: $origin");
+        header("Access-Control-Allow-Credentials: true");
+        header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+        header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
+    }
+}
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    exit(0);
+}
 $envFile = __DIR__ . '/../../.env';
 if (file_exists($envFile)) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);

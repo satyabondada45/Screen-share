@@ -244,7 +244,41 @@
         <div class="login-err" id="loginErr">Invalid credentials. Please try again.</div>
         <button class="btn-login" onclick="doLogin()">Sign In</button>
         <div class="login-register-link">
-            Don't have an account? <a href="https://friendssoftwaresolutions.in/DeskStream/register.php" target="_blank">Register</a>
+            Don't have an account? <a href="#" onclick="showRegisterOverlay(); return false;">Register</a>
+        </div>
+    </div>
+</div>
+
+<div class="login-overlay" id="registerOverlay" style="display: none;">
+    <div class="login-card">
+        <div class="login-logo">
+            <div class="brand-logo">
+                <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
+                    <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
+                    <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
+                    <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" opacity="0.8" />
+                </svg>
+            </div>
+            <div class="brand-name">DeskStream</div>
+        </div>
+        <div class="login-heading">Create an account</div>
+        <p class="login-sub">Join DeskStream today</p>
+        <div class="login-field">
+            <label for="regUsername">Username</label>
+            <input type="text" id="regUsername" placeholder="johndoe">
+        </div>
+        <div class="login-field">
+            <label for="regEmail">Email</label>
+            <input type="email" id="regEmail" placeholder="you@example.com">
+        </div>
+        <div class="login-field">
+            <label for="regPassword">Password</label>
+            <input type="password" id="regPassword" placeholder="••••••••" onkeydown="if(event.key==='Enter') doRegister()">
+        </div>
+        <div class="login-err" id="regErr" style="display: none;"></div>
+        <button class="btn-login" onclick="doRegister()">Sign Up</button>
+        <div class="login-register-link">
+            Already have an account? <a href="#" onclick="showLoginOverlay(); return false;">Login</a>
         </div>
     </div>
 </div>
@@ -633,7 +667,12 @@
     }
 
     function showLoginOverlay() {
+        document.getElementById('registerOverlay').style.display = 'none';
         document.getElementById('loginOverlay').style.display = 'flex';
+    }
+    function showRegisterOverlay() {
+        document.getElementById('loginOverlay').style.display = 'none';
+        document.getElementById('registerOverlay').style.display = 'flex';
     }
 
     async function doLogin() {
@@ -651,8 +690,9 @@
         try {
             const res = await fetch(`${BACKEND}/api/auth/login.php`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: `email=${encodeURIComponent(email)}&password=${encodeURIComponent(pass)}`
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ email: email, password: pass })
             });
             const data = await res.json();
             if (data.status === 'success' || data.token || data.user_id) {
@@ -666,7 +706,47 @@
                 errEl.style.display = 'block';
             }
         } catch(e) {
-            errEl.textContent = 'Connection error. Please check your internet connection.';
+            console.error("Login fetch error:", e);
+            errEl.textContent = 'Connection error: ' + e.message;
+            errEl.style.display = 'block';
+        }
+    }
+
+    async function doRegister() {
+        const username = document.getElementById('regUsername').value.trim();
+        const email = document.getElementById('regEmail').value.trim();
+        const pass = document.getElementById('regPassword').value;
+        const errEl = document.getElementById('regErr');
+        errEl.style.display = 'none';
+
+        if (!username || !email || !pass) {
+            errEl.textContent = 'Please fill all fields.';
+            errEl.style.display = 'block';
+            return;
+        }
+
+        try {
+            const res = await fetch(`${BACKEND}/api/auth/register.php`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ username, email, password: pass })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showLoginOverlay();
+                document.getElementById('loginEmail').value = email;
+                document.getElementById('loginErr').textContent = 'Registration successful! Please sign in.';
+                document.getElementById('loginErr').style.display = 'block';
+                document.getElementById('loginErr').style.color = '#10b981'; // Green for success
+                document.getElementById('loginPassword').focus();
+            } else {
+                errEl.textContent = data.message || 'Registration failed.';
+                errEl.style.display = 'block';
+            }
+        } catch(e) {
+            console.error("Register fetch error:", e);
+            errEl.textContent = 'Connection error: ' + e.message;
             errEl.style.display = 'block';
         }
     }
