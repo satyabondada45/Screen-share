@@ -358,9 +358,13 @@
         </div>
     </aside>
 
-    <!-- Main Content -->
-    <main class="content">
-        <div class="top-panels-grid">
+    <!-- Main Content Area -->
+    <main class="content" id="mainContentArea" style="position: relative;">
+        <!-- Integrated Remote Session Iframe -->
+        <iframe id="remoteSessionIframe" style="display: none; width: 100%; height: 100%; border: none; position: absolute; top: 0; left: 0; z-index: 50; background: #fff;" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+
+        <div id="dashboardInnerContent">
+            <div class="top-panels-grid">
             <!-- Panel 1: This Device -->
             <div class="panel-card">
                 <div>
@@ -458,6 +462,7 @@
             <div class="workstations-grid" id="workstationsContainer">
                 <div class="empty-grid-box">Loading devices...</div>
             </div>
+        </div>
         </div>
     </main>
 </div>
@@ -866,8 +871,8 @@
             const data = await res.json();
             if (data.status === 'success' && data.request) {
                 const token = data.request.request_token;
-                // Navigate to the remote session page on the backend
-                window.open(`${BACKEND}/remote/session.php?id=${encodeURIComponent(targetId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`, '_blank');
+                const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
+                openIntegratedSession(sessionUrl);
             } else {
                 showToast(data.message || 'Connection request failed');
             }
@@ -890,7 +895,8 @@
             const data = await res.json();
             if (data.status === 'success' && data.request) {
                 const token = data.request.request_token;
-                window.open(`${BACKEND}/remote/session.php?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`, '_blank');
+                const sessionUrl = `session.html?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                openIntegratedSession(sessionUrl);
             } else {
                 showToast(data.message || 'Failed to initiate local connection');
             }
@@ -1029,6 +1035,31 @@
     document.addEventListener('click', (e) => {
         const dd = document.getElementById('recentDropdown');
         if (!e.target.closest('.input-with-dropdown')) dd.classList.remove('open');
+    });
+
+    // Integrated Remote Session Support
+    function openIntegratedSession(url) {
+        const inner = document.getElementById('dashboardInnerContent');
+        const iframe = document.getElementById('remoteSessionIframe');
+        
+        if (inner && iframe) {
+            inner.style.display = 'none';
+            iframe.style.display = 'block';
+            iframe.src = url + "&integrated=1";
+        }
+    }
+    
+    window.addEventListener('message', function(e) {
+        if (e.data === 'end_integrated_session') {
+            const inner = document.getElementById('dashboardInnerContent');
+            const iframe = document.getElementById('remoteSessionIframe');
+            if (inner && iframe) {
+                iframe.src = 'about:blank';
+                iframe.style.display = 'none';
+                inner.style.display = 'block';
+                fetchAllDevices();
+            }
+        }
     });
 </script>
 </body>
