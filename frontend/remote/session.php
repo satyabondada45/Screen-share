@@ -629,6 +629,7 @@ $sessionCode = strlen($cleanId) === 9
             <div class="panel-tabs">
                 <div class="panel-tab active" id="tabSession" onclick="switchPanelTab('session')">Session</div>
                 <div class="panel-tab" id="tabActivity" onclick="switchPanelTab('activity')">Activity</div>
+                <div class="panel-tab" id="tabTransfers" onclick="switchPanelTab('transfers')">Transfers</div>
             </div>
             <div class="panel-content" id="panelContentSession">
                 <div class="info-row">
@@ -681,6 +682,16 @@ $sessionCode = strlen($cleanId) === 9
             </div>
             <div class="panel-content" id="panelContentActivity" style="display:none; height: 350px; overflow-y: auto;">
                 <div id="activityFeed" style="display:flex; flex-direction:column; gap:8px; font-size:0.75rem;">
+                </div>
+            </div>
+            
+            <div class="panel-content" id="panelContentTransfers" style="display:none; height: 350px; overflow-y: auto;">
+                <div style="margin-bottom: 15px;">
+                    <button onclick="document.getElementById('fileUploadInput').click()" style="width: 100%; padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                        Send File to Host
+                    </button>
+                </div>
+                <div id="transferFeed" style="display:flex; flex-direction:column; gap:8px; font-size:0.75rem;">
                 </div>
             </div>
 
@@ -2752,6 +2763,43 @@ $sessionCode = strlen($cleanId) === 9
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
+                    else if (type >= 20 && type <= 24) {
+                        let totalPacketSize = 0;
+                        let headerLen = 0;
+                        if (type === 20) {
+                            headerLen = 19;
+                            if (bufferLen < headerLen) return;
+                            const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                            const nameLen = view.getUint16(17, false);
+                            totalPacketSize = headerLen + nameLen;
+                        } else if (type === 21) {
+                            headerLen = 17;
+                            if (bufferLen < headerLen) return;
+                            const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                            const payloadLen = view.getUint32(13, false);
+                            totalPacketSize = headerLen + payloadLen;
+                        } else if (type === 22) {
+                            totalPacketSize = 49;
+                        } else if (type === 23) {
+                            totalPacketSize = 9;
+                        } else if (type === 24) {
+                            headerLen = 13;
+                            if (bufferLen < headerLen) return;
+                            const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
+                            const msgLen = view.getUint16(11, false);
+                            totalPacketSize = headerLen + msgLen;
+                        }
+                        
+                        if (bufferLen < totalPacketSize) return;
+
+                        const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
+                        const packetBuffer = packetBytes.slice().buffer;
+                        if (typeof handleFilePacket === 'function') {
+                            handleFilePacket(packetBuffer);
+                        }
+                        wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
+                        continue;
+                    }
                     else if (type === 14) {
                         if (videoFrameCount === 0 && currentStreamState === "CONNECTING") {
                             setStreamState("STREAM_ACTIVE");
@@ -3222,134 +3270,160 @@ $sessionCode = strlen($cleanId) === 9
         }
 
 
-        async function sendSingleFile(file) {
+        let incomingFiles = {};
 
-            const nameBytes =
-                new TextEncoder().encode(
-                    file.name
-                );
+        function addTransferUI(transferId, filename, isUpload) {
+            const feed = document.getElementById("transferFeed");
+            const el = document.createElement("div");
+            el.id = `transfer-${transferId}`;
+            el.style = "padding: 8px; background: #2a2d35; border-radius: 4px; border-left: 3px solid #007bff;";
+            el.innerHTML = `
+                <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                    <span style="font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${isUpload ? '↗' : '↙'} ${filename}</span>
+                    <span id="transfer-pct-${transferId}">0%</span>
+                </div>
+                <div style="background:#1a1d24; height:4px; border-radius:2px; overflow:hidden;">
+                    <div id="transfer-bar-${transferId}" style="background:#007bff; width:0%; height:100%; transition:width 0.1s;"></div>
+                </div>
+                <div id="transfer-status-${transferId}" style="margin-top:4px; color:#aaa;">Starting...</div>
+            `;
+            feed.prepend(el);
+        }
 
-            if (
-                nameBytes.length > 65535
-            ) {
+        function updateTransferUI(transferId, pct, status) {
+            const pctEl = document.getElementById(`transfer-pct-${transferId}`);
+            const barEl = document.getElementById(`transfer-bar-${transferId}`);
+            const statEl = document.getElementById(`transfer-status-${transferId}`);
+            if (pctEl) pctEl.innerText = `${pct}%`;
+            if (barEl) barEl.style.width = `${pct}%`;
+            if (statEl) statEl.innerText = status;
+        }
 
-                throw new Error(
-                    "Filename too long."
-                );
+        function handleFilePacket(buffer) {
+            const bytes = new Uint8Array(buffer);
+            const type = bytes[0];
+            const view = new DataView(buffer);
+            const transferId = view.getBigUint64(1, false).toString();
 
+            if (type === 20) {
+                const fileSize = view.getBigUint64(9, false);
+                const nameLen = view.getUint16(17, false);
+                const nameBytes = bytes.subarray(19, 19 + nameLen);
+                const filename = new TextDecoder().decode(nameBytes);
+                
+                incomingFiles[transferId] = {
+                    filename: filename,
+                    size: Number(fileSize),
+                    chunks: [],
+                    receivedBytes: 0
+                };
+                console.log(`[FILE] Incoming file start: ${filename}`);
+                addTransferUI(transferId, filename, false);
+                updateTransferUI(transferId, 0, "Receiving...");
+            } else if (type === 21) {
+                if (!incomingFiles[transferId]) return;
+                const chunkLen = view.getUint32(13, false);
+                const payload = bytes.slice(17, 17 + chunkLen);
+                incomingFiles[transferId].chunks.push(payload);
+                incomingFiles[transferId].receivedBytes += chunkLen;
+                
+                const pct = Math.floor((incomingFiles[transferId].receivedBytes / incomingFiles[transferId].size) * 100);
+                updateTransferUI(transferId, pct, "Receiving...");
+            } else if (type === 22) {
+                if (!incomingFiles[transferId]) return;
+                console.log(`[FILE] Transfer complete: ${incomingFiles[transferId].filename}`);
+                updateTransferUI(transferId, 100, "Complete");
+                
+                const blob = new Blob(incomingFiles[transferId].chunks);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = incomingFiles[transferId].filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                delete incomingFiles[transferId];
+            } else if (type === 23 || type === 24) {
+                if (incomingFiles[transferId]) {
+                    console.log(`[FILE] Transfer cancelled/error: ${incomingFiles[transferId].filename}`);
+                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : "Error");
+                    document.getElementById(`transfer-bar-${transferId}`).style.background = "#dc3545";
+                    delete incomingFiles[transferId];
+                }
             }
+        }
 
+        async function sendSingleFile(file) {
+            const nameBytes = new TextEncoder().encode(file.name);
+            if (nameBytes.length > 4096) throw new Error("Filename too long.");
+            
+            const transferIdBytes = new Uint8Array(8);
+            crypto.getRandomValues(transferIdBytes);
+            const transferIdStr = new DataView(transferIdBytes.buffer).getBigUint64(0, false).toString();
+            
+            addTransferUI(transferIdStr, file.name, true);
+            updateTransferUI(transferIdStr, 0, "Sending...");
 
-            /*
-             * TYPE 20
-             */
-
-            const metaPkt =
-                new Uint8Array(
-                    11 + nameBytes.length
-                );
-
+            // TYPE 20: 1 + 8 + 8 + 2 + nameBytes.length = 19 + nameBytes.length
+            const metaPkt = new Uint8Array(19 + nameBytes.length);
             metaPkt[0] = 20;
-
-            metaPkt[1] =
-                (nameBytes.length >> 8) & 0xff;
-
-            metaPkt[2] =
-                nameBytes.length & 0xff;
-
-            const metaView =
-                new DataView(
-                    metaPkt.buffer
-                );
-
-            metaView.setBigUint64(
-                3,
-                BigInt(file.size),
-                false
-            );
-
-            metaPkt.set(
-                nameBytes,
-                11
-            );
-
+            metaPkt.set(transferIdBytes, 1);
+            const metaView = new DataView(metaPkt.buffer);
+            metaView.setBigUint64(9, BigInt(file.size), false);
+            metaView.setUint16(17, nameBytes.length, false);
+            metaPkt.set(nameBytes, 19);
             ws.send(metaPkt);
 
+            // Calculate Hash
+            const hashBuffer = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+            const hashBytes = new Uint8Array(hashBuffer);
 
-            /*
-             * TYPE 21
-             */
-
-            const chunkSize =
-                32768;
-
+            // TYPE 21
+            const chunkSize = 256 * 1024; // 256 KB
             let offset = 0;
+            let chunkIndex = 0;
 
-            while (
-                offset < file.size
-            ) {
-
+            while (offset < file.size) {
                 if (!isSocketOpen()) {
-
-                    throw new Error(
-                        "WebSocket disconnected."
-                    );
-
+                    updateTransferUI(transferIdStr, 0, "Failed: Disconnected");
+                    document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#dc3545";
+                    throw new Error("WebSocket disconnected.");
                 }
-
-                const end =
-                    Math.min(
-                        offset + chunkSize,
-                        file.size
-                    );
-
-                const slice =
-                    file.slice(
-                        offset,
-                        end
-                    );
-
-                const arrayBuffer =
-                    await slice.arrayBuffer();
-
-                const chunkBytes =
-                    new Uint8Array(
-                        arrayBuffer
-                    );
-
-                const pkt =
-                    new Uint8Array(
-                        5 + chunkBytes.length
-                    );
-
+                const end = Math.min(offset + chunkSize, file.size);
+                const chunkBytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+                
+                // TYPE 21: 1 + 8 + 4 + 4 + chunkBytes.length = 17 + chunkBytes.length
+                const pkt = new Uint8Array(17 + chunkBytes.length);
                 pkt[0] = 21;
-
-                const view =
-                    new DataView(
-                        pkt.buffer
-                    );
-
-                view.setUint32(
-                    1,
-                    chunkBytes.length,
-                    false
-                );
-
-                pkt.set(
-                    chunkBytes,
-                    5
-                );
-
+                pkt.set(transferIdBytes, 1);
+                const view = new DataView(pkt.buffer);
+                view.setUint32(9, chunkIndex, false);
+                view.setUint32(13, chunkBytes.length, false);
+                pkt.set(chunkBytes, 17);
                 ws.send(pkt);
 
-                offset = end;
-
+                offset += chunkBytes.length;
+                chunkIndex++;
+                
+                const pct = Math.floor((offset / file.size) * 100);
+                updateTransferUI(transferIdStr, pct, "Sending...");
+                
+                // Yield to allow UI updates and prevent blocking
+                await new Promise(r => setTimeout(r, 10)); 
             }
 
-            alert(
-                `File "${file.name}" sent successfully.`
-            );
+            // TYPE 22: 1 + 8 + 8 + 32 = 49
+            const endPkt = new Uint8Array(49);
+            endPkt[0] = 22;
+            endPkt.set(transferIdBytes, 1);
+            const endView = new DataView(endPkt.buffer);
+            endView.setBigUint64(9, BigInt(file.size), false);
+            endPkt.set(hashBytes, 17);
+            ws.send(endPkt);
 
+            updateTransferUI(transferIdStr, 100, "Complete");
+            document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#28a745";
         }
 
 
@@ -3745,19 +3819,29 @@ $sessionCode = strlen($cleanId) === 9
         function switchPanelTab(tabName) {
             const tabSession = document.getElementById("tabSession");
             const tabActivity = document.getElementById("tabActivity");
+            const tabTransfers = document.getElementById("tabTransfers");
+            
             const contentSession = document.getElementById("panelContentSession");
             const contentActivity = document.getElementById("panelContentActivity");
+            const contentTransfers = document.getElementById("panelContentTransfers");
+
+            // Reset all
+            tabSession.classList.remove("active");
+            tabActivity.classList.remove("active");
+            tabTransfers.classList.remove("active");
+            contentSession.style.display = "none";
+            contentActivity.style.display = "none";
+            contentTransfers.style.display = "none";
 
             if (tabName === 'session') {
                 tabSession.classList.add("active");
-                tabActivity.classList.remove("active");
                 contentSession.style.display = "block";
-                contentActivity.style.display = "none";
             } else if (tabName === 'activity') {
                 tabActivity.classList.add("active");
-                tabSession.classList.remove("active");
                 contentActivity.style.display = "block";
-                contentSession.style.display = "none";
+            } else if (tabName === 'transfers') {
+                tabTransfers.classList.add("active");
+                contentTransfers.style.display = "block";
             }
         }
 

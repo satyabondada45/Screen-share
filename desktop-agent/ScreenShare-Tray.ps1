@@ -40,6 +40,7 @@ $tray.Text = "Screen Share - Running"
 # --- Context menu ---
 $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 
+$sendFileItem = $contextMenu.Items.Add("Send File to Viewer")
 $dashItem = $contextMenu.Items.Add("Open Dashboard")
 $toggleItem = $contextMenu.Items.Add("")
 $exitItem = $contextMenu.Items.Add("Exit")
@@ -62,6 +63,19 @@ if (-not (Test-ProcessRunning "desktop-agent")) {
 }
 
 # --- Event handlers ---
+$sendFileItem.Add_Click({
+    Add-Type -AssemblyName System.Windows.Forms
+    $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $openFileDialog.Title = "Select File to Send to Viewer"
+    $openFileDialog.Filter = "All Files (*.*)|*.*"
+    if ($openFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $filePath = $openFileDialog.FileName
+        $targetDir = "$env:LOCALAPPDATA\DeskStream"
+        if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir | Out-Null }
+        $filePath | Out-File -FilePath "$targetDir\send_file.txt" -Encoding utf8
+    }
+})
+
 $dashItem.Add_Click({
     Start-Process "http://localhost:8080/dashboard.php"
 })

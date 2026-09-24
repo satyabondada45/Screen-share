@@ -458,6 +458,66 @@ fn run_websocket_bridge(
                     msg.extend_from_slice(&payload);
                     let _ = ws_tx_fwd.try_send(msg);
                 }
+                20 => {
+                    let mut hdr = [0u8; 18];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(_) = host_reader.read_exact(&mut hdr) { break; }
+                    let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
+                    if name_len > 4096 { break; }
+                    let mut payload = vec![0u8; name_len];
+                    if let Err(_) = host_reader.read_exact(&mut payload) { break; }
+                    let mut msg = Vec::with_capacity(1 + 18 + name_len);
+                    msg.push(20u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                21 => {
+                    let mut hdr = [0u8; 16];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(_) = host_reader.read_exact(&mut hdr) { break; }
+                    let payload_len = u32::from_be_bytes(hdr[12..16].try_into().unwrap()) as usize;
+                    if payload_len > 10 * 1024 * 1024 { break; }
+                    let mut payload = vec![0u8; payload_len];
+                    if let Err(_) = host_reader.read_exact(&mut payload) { break; }
+                    let mut msg = Vec::with_capacity(1 + 16 + payload_len);
+                    msg.push(21u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                22 => {
+                    let mut hdr = [0u8; 48];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(_) = host_reader.read_exact(&mut hdr) { break; }
+                    let mut msg = Vec::with_capacity(1 + 48);
+                    msg.push(22u8);
+                    msg.extend_from_slice(&hdr);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                23 => {
+                    let mut hdr = [0u8; 8];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(_) = host_reader.read_exact(&mut hdr) { break; }
+                    let mut msg = Vec::with_capacity(1 + 8);
+                    msg.push(23u8);
+                    msg.extend_from_slice(&hdr);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
+                24 => {
+                    let mut hdr = [0u8; 12];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(_) = host_reader.read_exact(&mut hdr) { break; }
+                    let msg_len = u16::from_be_bytes([hdr[10], hdr[11]]) as usize;
+                    if msg_len > 4096 { break; }
+                    let mut payload = vec![0u8; msg_len];
+                    if let Err(_) = host_reader.read_exact(&mut payload) { break; }
+                    let mut msg = Vec::with_capacity(1 + 12 + msg_len);
+                    msg.push(24u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    let _ = ws_tx_fwd.try_send(msg);
+                }
                 99 => {
                     println!("[WS CLOSE] component=host_to_ws reason=host_sent_99 device={}", session_id_for_thread);
                     break;

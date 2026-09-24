@@ -651,6 +651,37 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let is_conn_clip = Arc::clone(&is_connected);
                             let is_conn_audio = Arc::clone(&is_connected);
                             let is_conn_ping = Arc::clone(&is_connected);
+                            
+                            // ====================================================
+                            // REMOTE SESSION INDICATOR
+                            // ====================================================
+                            let ind_in_session = Arc::clone(&is_in_session);
+                            let ind_conn = Arc::clone(&is_connected);
+                            thread::spawn(move || {
+                                let width = 300;
+                                let height = 50;
+                                let mut opts = minifb::WindowOptions::default();
+                                opts.topmost = true;
+                                opts.title = true;
+                                opts.resize = false;
+                                if let Ok(mut window) = minifb::Window::new(
+                                    "DeskStream: REMOTE SESSION ACTIVE",
+                                    width,
+                                    height,
+                                    opts
+                                ) {
+                                    // A simple red banner background
+                                    let buffer: Vec<u32> = vec![0xFFFF0000; width * height];
+                                    while ind_in_session.load(Ordering::SeqCst) && window.is_open() {
+                                        let _ = window.update_with_buffer(&buffer, width, height);
+                                        thread::sleep(Duration::from_millis(50));
+                                    }
+                                    if !window.is_open() {
+                                        // User clicked "X" to end the session
+                                        ind_conn.store(false, Ordering::SeqCst);
+                                    }
+                                }
+                            });
 
                             if let Err(e) = stream.set_nodelay(true) {
                                 eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
@@ -757,6 +788,72 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let write_stream_clip = write_stream.clone();
                             let write_stream_audio = write_stream.clone();
                             let write_stream_ping = write_stream.clone();
+                            let write_stream_file = write_stream.clone();
+
+                            let is_conn_file = Arc::clone(&is_connected);
+                            thread::spawn(move || {
+                                let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\temp".to_string());
+                                let trigger_file = std::path::Path::new(&local_app_data).join("DeskStream").join("send_file.txt");
+                                while is_conn_file.load(Ordering::SeqCst) {
+                                    if trigger_file.exists() {
+                                        if let Ok(file_path_str) = std::fs::read_to_string(&trigger_file) {
+                                            let file_path_str = file_path_str.trim();
+                                            let _ = std::fs::remove_file(&trigger_file);
+                                            
+                                            if let Ok(mut f) = std::fs::File::open(file_path_str) {
+                                                if let Ok(meta) = f.metadata() {
+                                                    let file_size = meta.len();
+                                                    let path = std::path::Path::new(file_path_str);
+                                                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                                    
+                                                    // Send Type 20
+                                                    use sha2::{Sha256, Digest};
+                                                    let mut hasher = Sha256::new();
+                                                    
+                                                    let mut hdr = vec![20u8];
+                                                    let transfer_id: u64 = rand::random();
+                                                    hdr.extend_from_slice(&transfer_id.to_be_bytes());
+                                                    hdr.extend_from_slice(&file_size.to_be_bytes());
+                                                    let name_bytes = filename.as_bytes();
+                                                    let name_len = name_bytes.len() as u16;
+                                                    hdr.extend_from_slice(&name_len.to_be_bytes());
+                                                    hdr.extend_from_slice(name_bytes);
+                                                    let _ = write_stream_file.send(hdr);
+                                                    
+                                                    // Type 21
+                                                    let mut buffer = [0u8; 256 * 1024]; // 256 KB
+                                                    let mut chunk_idx = 0u32;
+                                                    use std::io::Read;
+                                                    
+                                                    while let Ok(bytes_read) = f.read(&mut buffer) {
+                                                        if bytes_read == 0 { break; }
+                                                        hasher.update(&buffer[..bytes_read]);
+                                                        
+                                                        let mut pkt = vec![21u8];
+                                                        pkt.extend_from_slice(&transfer_id.to_be_bytes());
+                                                        pkt.extend_from_slice(&chunk_idx.to_be_bytes());
+                                                        pkt.extend_from_slice(&(bytes_read as u32).to_be_bytes());
+                                                        pkt.extend_from_slice(&buffer[..bytes_read]);
+                                                        if write_stream_file.send(pkt).is_err() { break; }
+                                                        
+                                                        chunk_idx += 1;
+                                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                                    }
+                                                    
+                                                    // Type 22
+                                                    let hash = hasher.finalize();
+                                                    let mut end_pkt = vec![22u8];
+                                                    end_pkt.extend_from_slice(&transfer_id.to_be_bytes());
+                                                    end_pkt.extend_from_slice(&file_size.to_be_bytes());
+                                                    end_pkt.extend_from_slice(&hash);
+                                                    let _ = write_stream_file.send(end_pkt);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                }
+                            });
 
                             let current_rtt_ms = Arc::new(AtomicU64::new(10));
                             let current_rtt_in = Arc::clone(&current_rtt_ms);
@@ -975,53 +1072,72 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         }
 
                                         20 => {
-                                            let mut meta_hdr = [0u8; 10];
-                                            if read_stream.read_exact(&mut meta_hdr).is_err() {
-                                                break;
-                                            }
-                                            let name_len = u16::from_be_bytes(meta_hdr[0..2].try_into().unwrap()) as usize;
-                                            total_file_size = u64::from_be_bytes(meta_hdr[2..10].try_into().unwrap());
+                                            let mut hdr = [0u8; 18];
+                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            let _transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                                            total_file_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+                                            let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
+                                            if name_len > 4096 { break; }
                                             let mut name_buf = vec![0u8; name_len];
-                                            if read_stream.read_exact(&mut name_buf).is_err() {
-                                                break;
-                                            }
-                                            let current_filename = String::from_utf8_lossy(&name_buf).to_string();
+                                            if read_stream.read_exact(&mut name_buf).is_err() { break; }
+                                            let mut current_filename = String::from_utf8_lossy(&name_buf).to_string();
+                                            current_filename = current_filename.replace("/", "_").replace("\\", "_").replace("..", "_");
                                             let target_path = drop_dir.join(&current_filename);
                                             match File::create(&target_path) {
                                                 Ok(f) => {
                                                     current_file = Some(f);
                                                     received_bytes = 0;
+                                                    println!("[File Transfer] Started: {}", current_filename);
                                                 }
                                                 Err(e) => {
-                                                    eprintln!("[File] Failed to create file: {:?}", e);
+                                                    eprintln!("[File Transfer] Failed to create file: {:?}", e);
                                                     current_file = None;
                                                 }
                                             }
                                         }
 
                                         21 => {
-                                            let mut chunk_len_buf = [0u8; 4];
-                                            if read_stream.read_exact(&mut chunk_len_buf).is_err() {
-                                                break;
-                                            }
-                                            let chunk_len = u32::from_be_bytes(chunk_len_buf) as usize;
-                                            if chunk_len > 100 * 1024 * 1024 {
-                                                break;
-                                            }
+                                            let mut hdr = [0u8; 16];
+                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            let chunk_len = u32::from_be_bytes(hdr[12..16].try_into().unwrap()) as usize;
+                                            if chunk_len > 10 * 1024 * 1024 { break; }
                                             let mut chunk_buf = vec![0u8; chunk_len];
-                                            if read_stream.read_exact(&mut chunk_buf).is_err() {
-                                                break;
-                                            }
+                                            if read_stream.read_exact(&mut chunk_buf).is_err() { break; }
                                             if let Some(ref mut file) = current_file {
                                                 if file.write_all(&chunk_buf).is_err() {
                                                     current_file = None;
                                                     continue;
                                                 }
                                                 received_bytes += chunk_len as u64;
-                                                if received_bytes >= total_file_size {
-                                                    let _ = file.flush();
-                                                    current_file = None;
-                                                }
+                                            }
+                                        }
+
+                                        22 => {
+                                            let mut hdr = [0u8; 48];
+                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Some(mut file) = current_file.take() {
+                                                let _ = file.flush();
+                                                println!("[File Transfer] Completed.");
+                                            }
+                                        }
+
+                                        23 => {
+                                            let mut hdr = [0u8; 8];
+                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            current_file = None;
+                                            println!("[File Transfer] Cancelled.");
+                                        }
+
+                                        24 => {
+                                            let mut hdr = [0u8; 12];
+                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            let msg_len = u16::from_be_bytes([hdr[10], hdr[11]]) as usize;
+                                            if msg_len > 4096 { break; }
+                                            let mut msg_buf = vec![0u8; msg_len];
+                                            if read_stream.read_exact(&mut msg_buf).is_err() { break; }
+                                            current_file = None;
+                                            if let Ok(msg) = String::from_utf8(msg_buf) {
+                                                println!("[File Transfer] Error: {}", msg);
                                             }
                                         }
 
