@@ -210,7 +210,7 @@ impl HardwareH264Encoder {
                 // Rate Control: Quality/VBR
                 set_codec_u32(&codec_api, &CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_Quality.0 as u32);
                 // Also set quality metric (0-100, 100 is best)
-                set_codec_u32(&codec_api, &CODECAPI_AVEncCommonQuality, 75);
+                set_codec_u32(&codec_api, &CODECAPI_AVEncCommonQuality, 100);
                 println!("[H264 HW] ICodecAPI low-latency properties applied.");
             }
 

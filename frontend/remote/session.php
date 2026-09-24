@@ -1828,11 +1828,11 @@ $sessionCode = strlen($cleanId) === 9
             pendingWebCodecsFrame = null;
 
             if (canvas && ctx) {
-                if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-                    canvas.width = frame.displayWidth;
-                    canvas.height = frame.displayHeight;
-                    renderWidth = frame.displayWidth;
-                    renderHeight = frame.displayHeight;
+                if (canvas.width !== frame.codedWidth || canvas.height !== frame.codedHeight) {
+                    canvas.width = frame.codedWidth;
+                    canvas.height = frame.codedHeight;
+                    renderWidth = frame.codedWidth;
+                    renderHeight = frame.codedHeight;
                     
                     const resEl = document.getElementById("resDisplay");
                     if (resEl) {
@@ -1842,7 +1842,7 @@ $sessionCode = strlen($cleanId) === 9
                 }
 
                 if (!window._display_logged) {
-                    console.log(`[DISPLAY]\nframeWidth = ${frame.displayWidth}\nframeHeight = ${frame.displayHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
+                    console.log(`[DISPLAY]\nframeWidth = ${frame.codedWidth}\nframeHeight = ${frame.codedHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
                     console.log("[DISPLAY] Frame rendered");
                     window._display_logged = true;
                 }
