@@ -1559,9 +1559,14 @@ function getRelativeTime($timestamp)
         </aside>
 
         <!-- Main Content Area -->
-        <main class="content">
-            <!-- Top Section - Two Primary Panels -->
-            <div class="top-panels-grid">
+        <main class="content" id="mainContentArea" style="position: relative;">
+            
+            <!-- Integrated Remote Session Iframe -->
+            <iframe id="remoteSessionIframe" style="display: none; width: 100%; height: 100%; border: none; position: absolute; top: 0; left: 0; z-index: 50; background: #fff;" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+
+            <div id="dashboardInnerContent">
+                <!-- Top Section - Two Primary Panels -->
+                <div class="top-panels-grid">
                 <!-- Panel 1: This Device -->
                 <div class="panel-card">
                     <div>
@@ -1725,6 +1730,7 @@ function getRelativeTime($timestamp)
                     <?php endif; ?>
                 </div>
             </div>
+            </div> <!-- End dashboardInnerContent -->
         </main>
     </div>
 
@@ -2112,7 +2118,8 @@ function getRelativeTime($timestamp)
                             clearInterval(pendingPollInterval);
                             showToast('Connection APPROVED! Launching session...');
                             setTimeout(() => {
-                                window.location.href = `remote/session.php?id=${encodeURIComponent(cleanId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
+                                const sessionUrl = `remote/session.php?id=${encodeURIComponent(cleanId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
+                                openIntegratedSession(sessionUrl);
                             }, 500);
                         } else if (statusData.request_status === 'rejected') {
                             clearInterval(pendingPollInterval);
@@ -2685,7 +2692,8 @@ function getRelativeTime($timestamp)
                 const token = data.request.request_token;
                 showToast('Local session ready! Launching...');
                 setTimeout(() => {
-                    window.location.href = `remote/session.php?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                    const sessionUrl = `remote/session.php?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                    openIntegratedSession(sessionUrl);
                 }, 500);
 
             } catch (err) {
@@ -2707,11 +2715,36 @@ function getRelativeTime($timestamp)
                 </div>
             `).join('');
         }
-
         // Initialize: Fetch on start and poll every 3 seconds
         fetchAllDevices();
         setInterval(() => fetchAllDevices(false), 3000);
+
+        // Integrated Remote Session Support
+        function openIntegratedSession(url) {
+            const inner = document.getElementById('dashboardInnerContent');
+            const iframe = document.getElementById('remoteSessionIframe');
+            
+            if (inner && iframe) {
+                inner.style.display = 'none';
+                iframe.style.display = 'block';
+                // Add a query param so session.php knows it's embedded
+                iframe.src = url + "&integrated=1";
+            }
+        }
+        
+        // Listen for messages from the session iframe
+        window.addEventListener('message', function(e) {
+            if (e.data === 'end_integrated_session') {
+                const inner = document.getElementById('dashboardInnerContent');
+                const iframe = document.getElementById('remoteSessionIframe');
+                if (inner && iframe) {
+                    iframe.src = 'about:blank';
+                    iframe.style.display = 'none';
+                    inner.style.display = 'block';
+                    fetchAllDevices();
+                }
+            }
+        });
     </script>
 </body>
-
 </html>
