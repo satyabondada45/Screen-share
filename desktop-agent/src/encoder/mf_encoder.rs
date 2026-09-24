@@ -223,7 +223,7 @@ impl HardwareH264Encoder {
             set_attribute_ratio(&out_media_type, &MF_MT_FRAME_RATE, fps, 1).map_err(|e| format!("{:?}", e))?;
             set_attribute_ratio(&out_media_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1).map_err(|e| format!("{:?}", e))?;
             out_media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| format!("{:?}", e))?;
-            out_media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32).map_err(|e| format!("{:?}", e))?;
+            out_media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32).map_err(|e| format!("{:?}", e))?;
 
             mft.SetOutputType(0, &out_media_type, 0).map_err(|e| format!("SetOutputType failed: {:?}", e))?;
             println!("[H264 HW] Output type configured successfully: H.264 {}x{} @ {} FPS", width, height, fps);

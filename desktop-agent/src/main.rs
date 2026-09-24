@@ -1298,8 +1298,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
 
                                 if hw_encoder.is_none() || current_enc_width != src_width as u32 || current_enc_height != src_height as u32 {
-                                    let dynamic_bitrate = ((src_width * src_height) as f64 * 4.5) as u32; 
-                                    let target_bitrate = dynamic_bitrate.clamp(8_000_000, 20_000_000); // 8 to 20 Mbps
+                                    let dynamic_bitrate = ((src_width * src_height) as f64 * 8.0) as u32; 
+                                    let target_bitrate = dynamic_bitrate.clamp(12_000_000, 35_000_000); // 12 to 35 Mbps
 
                                     match HardwareH264Encoder::new(src_width as u32, src_height as u32, TARGET_FPS, target_bitrate) {
                                         Ok(enc) => {
