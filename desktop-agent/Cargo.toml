@@ -26,7 +26,7 @@ lz4_flex = "0.11"
 arboard = "3.3"
 rand = "0.8"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
-reqwest = { version = "0.11", features = ["blocking", "json"] }
+reqwest = { version = "0.11", features = ["blocking", "cookies", "json"] }
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_UI_HiDpi",
@@ -61,6 +61,7 @@ webrtc = "0.11"
 rfd = "0.17.2"
 tao = "0.37.0"
 wry = "0.57.0"
+tiny_http = "0.12.0"
 
 [build-dependencies]
 winres = "0.1"

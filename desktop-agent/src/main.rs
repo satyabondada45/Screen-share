@@ -12,6 +12,7 @@ pub mod status;
 pub mod tray;
 pub mod ui;
 pub mod webview_app;
+pub mod local_server;
 
 
 use arboard::Clipboard;
@@ -1741,6 +1742,11 @@ fn main() {
     // Start system tray icon
     tray::start_tray(quit_signal.clone());
 
+    // Start embedded local HTTP server for the UI and API Proxy
+    let local_port = local_server::start_local_server(config.system_id.clone());
+    let local_url = format!("http://127.0.0.1:{}/dashboard.html", local_port);
+    agent_log!("[BOOT] Started local embedded UI server on {}", local_url);
+
     // Run the WebView2 window — blocks until window closed
-    webview_app::run_webview(quit_signal);
+    webview_app::run_webview(quit_signal, local_url);
 }

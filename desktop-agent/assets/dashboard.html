@@ -507,7 +507,7 @@
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
-        <span>Secure connection — DeskStream Agent v1.1.3</span>
+        <span>Secure connection — DeskStream Agent v1.1.3 (Build: 2026-09-24 19:35)</span>
     </div>
     <div class="footer-right">
         <span class="signal-icon-green">
@@ -618,8 +618,8 @@
      ============================================================ -->
 <script>
     // ── Configuration ────────────────────────────────────────────
-    const BACKEND = 'https://friendssoftwaresolutions.in/DeskStream';
-    const AGENT_HEALTH = 'http://localhost:49182';
+    const BACKEND = '';
+    const AGENT_HEALTH = '/local-health';
 
     // ── State ────────────────────────────────────────────────────
     let currentHostUid = '';
@@ -773,7 +773,7 @@
     // ── Agent health poll ────────────────────────────────────────
     async function pollAgentHealth() {
         try {
-            const res = await fetch(`${AGENT_HEALTH}/`);
+            const res = await fetch(`${AGENT_HEALTH}`);
             const data = await res.json();
             if (data.system_id) {
                 currentHostUid = data.system_id;

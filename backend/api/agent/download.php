@@ -1,18 +1,21 @@
 <?php
 // backend/api/agent/download.php
+// Serves the unified DeskStream.exe — the single application containing
+// both the Controller UI and the embedded Windows Agent engine.
+// The user downloads one file. No separate DeskStream-Agent.exe needed.
 
-$exePath = __DIR__ . '/../../../desktop-agent/target/release/desktop-agent.exe';
-$version = '1.1.3';
+$exePath = __DIR__ . '/../../../DESKSTREAM/DeskStream.exe';
+$version = '1.2.0';
 
 if (!is_file($exePath) || !is_readable($exePath)) {
     http_response_code(404);
-    die('Error: Agent executable not found on server.');
+    die('Error: DeskStream executable not found on server.');
 }
 
 $fileSize = filesize($exePath);
 if ($fileSize === false) {
     http_response_code(500);
-    die('Error: Unable to determine agent executable size.');
+    die('Error: Unable to determine executable size.');
 }
 
 while (ob_get_level() > 0) {
@@ -20,7 +23,7 @@ while (ob_get_level() > 0) {
 }
 
 header('Content-Type: application/octet-stream');
-header('Content-Disposition: attachment; filename="DeskStream-Agent-v' . $version . '-x64.exe"');
+header('Content-Disposition: attachment; filename="DeskStream-v' . $version . '-x64.exe"');
 header('Content-Length: ' . $fileSize);
 
 // Cache-busting headers

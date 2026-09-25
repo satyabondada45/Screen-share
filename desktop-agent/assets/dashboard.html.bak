@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeskStream - Remote Desktop Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-body: #f1f5f9;
+            --bg-card: #ffffff;
+            --border-color: #e2e8f0;
+            --border-focus: #cbd5e1;
+            --primary: #ef4444;
+            --primary-hover: #dc2626;
+            --primary-light: #fef2f2;
+            --primary-border: #fca5a5;
+            --text-dark: #0f172a;
+            --text-muted: #64748b;
+            --text-subtle: #94a3b8;
+            --success: #16a34a;
+            --success-light: #f0fdf4;
+            --success-border: #bbf7d0;
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+            --shadow-subtle: 0 1px 3px 0 rgba(0,0,0,0.05), 0 1px 2px -1px rgba(0,0,0,0.05);
+            --shadow-card: 0 4px 6px -1px rgba(0,0,0,0.03), 0 2px 4px -2px rgba(0,0,0,0.03);
+            --shadow-modal: 0 25px 50px -12px rgba(15,23,42,0.25);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        body { background-color: var(--bg-body); color: var(--text-dark); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+
+        /* Top Bar */
+        .topbar { height: 56px; background: var(--bg-card); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; padding: 0 20px; flex-shrink: 0; z-index: 10; }
+        .brand-container { display: flex; align-items: center; gap: 10px; text-decoration: none; cursor: pointer; }
+        .brand-logo { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; }
+        .brand-name { font-size: 1.18rem; font-weight: 800; color: var(--text-dark); letter-spacing: -0.02em; }
+        .topbar-center { display: flex; align-items: center; gap: 8px; }
+        .topbar-tab-btn { display: inline-flex; align-items: center; gap: 8px; padding: 7px 16px; background: #ffffff; border: 1px solid var(--border-color); border-radius: var(--radius-sm); font-weight: 600; font-size: 0.85rem; color: var(--primary); box-shadow: var(--shadow-subtle); cursor: pointer; transition: all 0.2s ease; }
+        .topbar-tab-btn:hover { border-color: var(--primary-border); background: var(--primary-light); }
+        .topbar-plus-btn { background: #ffffff; border: 1px solid var(--border-color); border-radius: var(--radius-sm); width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--text-muted); font-size: 1.1rem; transition: all 0.2s ease; }
+        .topbar-plus-btn:hover { background: #f8fafc; color: var(--text-dark); border-color: #cbd5e1; }
+        .window-controls { display: flex; align-items: center; gap: 16px; color: var(--text-muted); }
+        .win-btn { background: transparent; border: none; cursor: pointer; color: var(--text-muted); display: flex; align-items: center; justify-content: center; padding: 4px; border-radius: 4px; transition: color 0.15s ease; }
+        .win-btn:hover { color: var(--text-dark); }
+        .win-btn.close-btn:hover { color: var(--primary); }
+
+        /* Layout */
+        .workspace { display: flex; flex: 1; overflow: hidden; }
+
+        /* Sidebar */
+        .sidebar { width: 250px; background: var(--bg-card); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; justify-content: space-between; padding: 16px 14px; flex-shrink: 0; overflow-y: auto; }
+        .nav-menu { display: flex; flex-direction: column; gap: 6px; }
+        .nav-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 10px; text-decoration: none; color: var(--text-muted); font-weight: 500; font-size: 0.9rem; transition: all 0.15s ease; cursor: pointer; border: 1px solid transparent; background: transparent; text-align: left; width: 100%; }
+        .nav-item svg { flex-shrink: 0; stroke-width: 2; }
+        .nav-item:hover { background: #f8fafc; color: var(--text-dark); }
+        .nav-item.active { background: var(--primary-light); color: var(--primary); font-weight: 600; border-color: #fee2e2; }
+        .nav-item.active svg { color: var(--primary); stroke: var(--primary); }
+        .sidebar-divider { height: 1px; background: var(--border-color); margin: 8px 0; }
+        .sidebar-device-box { background: #ffffff; border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px; box-shadow: var(--shadow-subtle); }
+        .readiness-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--success); font-weight: 600; margin-bottom: 8px; }
+        .sidebar-id-row { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 6px 0; }
+        .sidebar-id-val { font-family: 'JetBrains Mono', monospace; font-size: 1.15rem; font-weight: 800; color: var(--text-dark); letter-spacing: 0.5px; }
+        .sidebar-copy-btn { background: transparent; border: none; cursor: pointer; color: var(--text-muted); padding: 4px; display: flex; align-items: center; border-radius: 4px; transition: all 0.15s ease; }
+        .sidebar-copy-btn:hover { color: var(--primary); background: var(--primary-light); }
+        .sidebar-alias-val { font-size: 0.82rem; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+        .sidebar-alias-val strong { color: var(--text-dark); font-weight: 600; }
+        .mini-edit-btn { background: transparent; border: none; color: var(--text-subtle); cursor: pointer; font-size: 0.8rem; transition: color 0.15s; }
+        .mini-edit-btn:hover { color: var(--primary); }
+        .field-label { font-size: 0.78rem; color: var(--text-muted); font-weight: 600; text-transform: capitalize; margin-bottom: 4px; }
+
+        /* Main Content */
+        .content { flex: 1; padding: 22px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+        .top-panels-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .panel-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 22px 24px; box-shadow: var(--shadow-card); position: relative; display: flex; flex-direction: column; justify-content: space-between; }
+        .panel-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 4px; }
+        .panel-title { font-size: 1.18rem; font-weight: 700; color: var(--text-dark); }
+        .panel-subtitle { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 14px; font-weight: 400; }
+        .panel-menu-btn { background: transparent; border: none; color: var(--text-muted); cursor: pointer; padding: 4px; font-size: 1.2rem; line-height: 1; border-radius: 4px; transition: color 0.15s; }
+        .panel-menu-btn:hover { color: var(--text-dark); }
+
+        /* ID display */
+        .id-row-wrapper { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+        .large-id-display { font-family: 'JetBrains Mono', monospace; font-size: 2.1rem; font-weight: 800; color: var(--primary); letter-spacing: 1px; line-height: 1.1; }
+        .copy-box-btn { background: #ffffff; border: 1px solid var(--border-color); border-radius: 10px; width: 42px; height: 42px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: var(--text-muted); transition: all 0.2s ease; box-shadow: var(--shadow-subtle); }
+        .copy-box-btn:hover { background: #f8fafc; color: var(--primary); border-color: var(--primary-border); transform: translateY(-1px); }
+        .alias-display-row { display: flex; align-items: center; gap: 8px; font-size: 1.05rem; font-weight: 700; color: var(--text-dark); margin-bottom: 16px; }
+        .alias-input-inline { font-size: 1rem; font-weight: 600; padding: 4px 8px; border: 1px solid var(--primary); border-radius: 6px; outline: none; display: none; }
+        .edit-alias-btn { background: transparent; border: none; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; padding: 2px 4px; transition: color 0.15s; }
+        .edit-alias-btn:hover { color: var(--primary); }
+        .connection-ready-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 0.84rem; color: var(--success); font-weight: 600; margin-top: auto; }
+
+        /* Connect Panel */
+        .connect-input-row { display: flex; gap: 10px; margin-bottom: 14px; position: relative; }
+        .input-with-dropdown { position: relative; flex: 1; display: flex; align-items: center; }
+        .remote-id-input { width: 100%; height: 46px; padding: 0 38px 0 14px; background: #ffffff; border: 1px solid var(--border-color); border-radius: 10px; font-size: 0.95rem; font-weight: 500; color: var(--text-dark); outline: none; transition: all 0.2s ease; }
+        .remote-id-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(239,68,68,0.12); }
+        .dropdown-chevron-btn { position: absolute; right: 12px; background: transparent; border: none; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+        .recent-dropdown-list { position: absolute; top: 50px; left: 0; right: 0; background: #ffffff; border: 1px solid var(--border-color); border-radius: 10px; box-shadow: var(--shadow-modal); z-index: 40; display: none; max-height: 180px; overflow-y: auto; }
+        .recent-dropdown-list.open { display: block; }
+        .dropdown-item { padding: 10px 14px; font-size: 0.85rem; color: var(--text-dark); display: flex; justify-content: space-between; align-items: center; cursor: pointer; border-bottom: 1px solid #f1f5f9; }
+        .dropdown-item:hover { background: #f8fafc; color: var(--primary); }
+        .btn-connect-primary { background: var(--primary); color: #ffffff; border: none; border-radius: 10px; padding: 0 22px; height: 46px; font-weight: 700; font-size: 0.92rem; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s ease; box-shadow: 0 4px 10px rgba(239,68,68,0.25); flex-shrink: 0; }
+        .btn-connect-primary:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 6px 14px rgba(239,68,68,0.35); }
+
+        /* Mode Cards */
+        .mode-selection-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .btn-connect-local { background: var(--primary); color: #ffffff; border: none; border-radius: 10px; padding: 0 20px; height: 42px; font-weight: 600; font-size: 0.88rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s ease; box-shadow: 0 4px 10px rgba(239,68,68,0.25); margin-top: 10px; width: 100%; }
+        .btn-connect-local:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 6px 14px rgba(239,68,68,0.35); }
+        .mode-option-card { border: 1px solid var(--border-color); background: #ffffff; border-radius: 12px; padding: 12px 14px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: all 0.2s ease; user-select: none; }
+        .mode-option-card.active { background: var(--primary-light); border-color: var(--primary-border); }
+        .mode-icon-box { color: var(--text-muted); display: flex; align-items: center; justify-content: center; }
+        .mode-option-card.active .mode-icon-box { color: var(--primary); }
+        .mode-text-box h5 { font-size: 0.9rem; font-weight: 700; color: var(--text-dark); margin-bottom: 2px; }
+        .mode-text-box p { font-size: 0.75rem; color: var(--text-muted); font-weight: 400; }
+
+        /* Recent Sessions */
+        .section-header-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+        .section-heading { font-size: 1.15rem; font-weight: 700; color: var(--text-dark); }
+        .view-all-link { color: #2563eb; font-size: 0.85rem; font-weight: 600; text-decoration: none; transition: color 0.15s; cursor: pointer; }
+        .view-all-link:hover { color: #1d4ed8; text-decoration: underline; }
+        .workstations-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .workstation-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 14px; padding: 16px; box-shadow: var(--shadow-subtle); display: flex; align-items: center; gap: 14px; cursor: pointer; transition: all 0.2s ease; position: relative; }
+        .workstation-card:hover { border-color: #cbd5e1; box-shadow: 0 6px 16px rgba(0,0,0,0.05); transform: translateY(-2px); }
+        .device-avatar-circle { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #ffffff; flex-shrink: 0; }
+        .card-main-info { flex: 1; overflow: hidden; }
+        .card-top-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
+        .device-name-title { font-size: 0.95rem; font-weight: 700; color: var(--text-dark); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
+        .online-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--text-subtle); }
+        .online-dot.active { background: var(--success); box-shadow: 0 0 6px rgba(22,163,74,0.6); }
+        .card-top-actions { display: flex; align-items: center; gap: 6px; color: var(--text-subtle); }
+        .star-fav-btn, .more-opt-btn { background: transparent; border: none; cursor: pointer; color: var(--text-subtle); padding: 2px; display: flex; align-items: center; transition: color 0.15s; }
+        .star-fav-btn:hover { color: #f59e0b; }
+        .more-opt-btn:hover { color: var(--text-dark); }
+        .device-ip-text { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 5px; }
+        .last-active-row { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; color: var(--text-muted); }
+        .empty-grid-box { grid-column: 1 / -1; background: #ffffff; border: 1px dashed var(--border-color); border-radius: 14px; padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 0.9rem; }
+
+        /* Footer */
+        .footer-status-bar { height: 34px; background: #f8fafc; border-top: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; padding: 0 24px; font-size: 0.78rem; color: var(--text-muted); flex-shrink: 0; }
+        .footer-left { display: flex; align-items: center; gap: 6px; }
+        .footer-right { display: flex; align-items: center; gap: 6px; color: var(--text-dark); font-weight: 500; }
+        .signal-icon-green { color: var(--success); display: inline-flex; align-items: center; }
+
+        /* Modal Overlay */
+        .modal-backdrop-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.65); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); z-index: 1000; display: none; align-items: center; justify-content: center; padding: 20px; opacity: 0; transition: opacity 0.25s cubic-bezier(0.16,1,0.3,1); }
+        .modal-backdrop-overlay.open { display: flex; opacity: 1; }
+        .incoming-modal-card { background: #ffffff; border-radius: 20px; padding: 28px 28px 24px; width: 100%; max-width: 420px; box-shadow: var(--shadow-modal); display: flex; flex-direction: column; gap: 18px; transform: translateY(20px) scale(0.97); transition: transform 0.3s cubic-bezier(0.16,1,0.3,1); }
+        .modal-backdrop-overlay.open .incoming-modal-card { transform: translateY(0) scale(1); }
+        .modal-red-icon-badge { width: 64px; height: 64px; background: var(--primary-light); border: 2px solid var(--primary-border); border-radius: 16px; display: flex; align-items: center; justify-content: center; color: var(--primary); margin: 0 auto; }
+        .modal-title { font-size: 1.2rem; font-weight: 800; color: var(--text-dark); text-align: center; }
+        .modal-subtitle { font-size: 0.88rem; color: var(--text-muted); text-align: center; margin-top: -10px; }
+        .modal-info-card { background: #f8fafc; border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+        .info-row { display: flex; justify-content: space-between; align-items: center; }
+        .info-label-group { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text-muted); font-weight: 500; }
+        .info-value-group { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; font-weight: 700; color: var(--text-dark); }
+        .red-id-highlight { color: var(--primary); font-family: 'JetBrains Mono', monospace; font-weight: 800; }
+        .verified-shield-icon { color: var(--success); }
+        .permissions-section { display: flex; flex-direction: column; gap: 10px; }
+        .permissions-label { font-size: 0.85rem; color: var(--text-muted); font-weight: 600; }
+        .permissions-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        .permission-card { background: #f8fafc; border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .perm-top-row { display: flex; justify-content: space-between; align-items: center; }
+        .perm-icon { color: var(--text-muted); }
+        .perm-title { font-size: 0.82rem; font-weight: 700; color: var(--text-dark); }
+        .perm-desc { font-size: 0.72rem; color: var(--text-muted); }
+        .switch { position: relative; display: inline-block; width: 32px; height: 18px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #cbd5e1; border-radius: 18px; transition: 0.3s; }
+        .slider:before { position: absolute; content: ""; height: 12px; width: 12px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
+        input:checked + .slider { background: var(--success); }
+        input:checked + .slider:before { transform: translateX(14px); }
+        .modal-action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .btn-modal-deny { background: #fff5f5; border: 1px solid var(--primary-border); color: var(--primary); border-radius: var(--radius-md); padding: 12px 18px; font-size: 0.95rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; transition: all 0.2s ease; }
+        .btn-modal-deny:hover { background: #fecaca; }
+        .btn-modal-accept { background: #15803d; border: 1px solid #166534; color: #ffffff; border-radius: var(--radius-md); padding: 12px 18px; font-size: 0.95rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; transition: all 0.2s ease; box-shadow: 0 4px 12px rgba(22,163,74,0.3); }
+        .btn-modal-accept:hover { background: #166534; box-shadow: 0 6px 16px rgba(22,163,74,0.4); transform: translateY(-1px); }
+        .remember-choice-wrapper { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 0.8rem; color: var(--text-dark); }
+        .remember-checkbox-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
+        .remember-checkbox-label input { accent-color: var(--primary); cursor: pointer; }
+        .remember-subtext { font-size: 0.72rem; color: var(--text-muted); }
+
+        /* Toast */
+        .toast-popup { position: fixed; bottom: 24px; right: 24px; background: var(--text-dark); color: #ffffff; padding: 10px 18px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; box-shadow: var(--shadow-modal); z-index: 2000; opacity: 0; transform: translateY(20px); transition: all 0.25s ease; pointer-events: none; display: flex; align-items: center; gap: 8px; }
+        .toast-popup.show { opacity: 1; transform: translateY(0); }
+
+        /* Login overlay — shown until authenticated */
+        .login-overlay { position: fixed; inset: 0; background: var(--bg-body); z-index: 5000; display: flex; align-items: center; justify-content: center; }
+        .login-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 20px; padding: 36px 32px; width: 360px; box-shadow: var(--shadow-modal); display: flex; flex-direction: column; gap: 20px; }
+        .login-logo { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 4px; }
+        .login-logo .brand-name { font-size: 1.5rem; }
+        .login-heading { font-size: 1.1rem; font-weight: 700; color: var(--text-dark); text-align: center; }
+        .login-sub { font-size: 0.85rem; color: var(--text-muted); text-align: center; margin-top: -12px; }
+        .login-field { display: flex; flex-direction: column; gap: 6px; }
+        .login-field label { font-size: 0.82rem; font-weight: 600; color: var(--text-muted); }
+        .login-field input { height: 44px; padding: 0 14px; border: 1px solid var(--border-color); border-radius: 10px; font-size: 0.95rem; color: var(--text-dark); outline: none; transition: all 0.2s; }
+        .login-field input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(239,68,68,0.12); }
+        .btn-login { height: 46px; background: var(--primary); color: #fff; border: none; border-radius: 10px; font-weight: 700; font-size: 0.95rem; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px rgba(239,68,68,0.25); }
+        .btn-login:hover { background: var(--primary-hover); transform: translateY(-1px); }
+        .login-err { font-size: 0.82rem; color: var(--primary); font-weight: 600; text-align: center; display: none; }
+        .login-register-link { text-align: center; font-size: 0.82rem; color: var(--text-muted); }
+        .login-register-link a { color: var(--primary); font-weight: 600; text-decoration: none; }
+
+        @media (max-width: 1080px) { .workstations-grid { grid-template-columns: repeat(2,1fr); } }
+        @media (max-width: 820px) { .top-panels-grid { grid-template-columns: 1fr; } .sidebar { width: 220px; } .workstations-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 640px) { .workspace { flex-direction: column; } .sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border-color); } .topbar-center { display: none; } .modal-action-row { grid-template-columns: 1fr; } .permissions-grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+
+<body>
+
+<!-- ============================================================
+     LOGIN OVERLAY — shown until user authenticates
+     ============================================================ -->
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+        <div class="login-logo">
+            <div class="brand-logo">
+                <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
+                    <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
+                    <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
+                    <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" opacity="0.8" />
+                </svg>
+            </div>
+            <div class="brand-name">DeskStream</div>
+        </div>
+        <div class="login-heading">Sign in to continue</div>
+        <p class="login-sub">Remote Desktop Agent — Desktop App</p>
+        <div class="login-field">
+            <label for="loginEmail">Email</label>
+            <input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="email">
+        </div>
+        <div class="login-field">
+            <label for="loginPassword">Password</label>
+            <input type="password" id="loginPassword" placeholder="••••••••" autocomplete="current-password"
+                   onkeydown="if(event.key==='Enter') doLogin()">
+        </div>
+        <div class="login-err" id="loginErr">Invalid credentials. Please try again.</div>
+        <button class="btn-login" onclick="doLogin()">Sign In</button>
+        <div class="login-register-link">
+            Don't have an account? <a href="https://friendssoftwaresolutions.in/DeskStream/register.php" target="_blank">Register</a>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
+     1. TOP TITLE BAR
+     ============================================================ -->
+<header class="topbar">
+    <div class="brand-container" onclick="location.reload()">
+        <div class="brand-logo">
+            <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
+                <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
+                <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
+                <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" opacity="0.8" />
+            </svg>
+        </div>
+        <div class="brand-name">DeskStream</div>
+    </div>
+
+    <div class="topbar-center">
+        <button class="topbar-tab-btn" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+            New Session
+        </button>
+        <button class="topbar-plus-btn" title="Open new tab" onclick="showToast('Opened new session tab')">+</button>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:14px;">
+        <div id="topbarUserBadge" style="display:none;align-items:center;gap:8px;font-size:0.84rem;font-weight:600;color:var(--text-dark);background:#f8fafc;border:1px solid var(--border-color);padding:5px 12px;border-radius:20px;">
+            <span id="topbarUsername">👤 User</span>
+            <button onclick="doLogout()" style="color:var(--primary);background:none;border:none;font-size:0.78rem;font-weight:700;margin-left:4px;cursor:pointer;text-decoration:none;" title="Sign out">Logout</button>
+        </div>
+        <div class="window-controls">
+            <button class="win-btn" title="Menu">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" />
+                </svg>
+            </button>
+            <button class="win-btn" title="Minimize" onclick="showToast('Minimized to tray')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            </button>
+            <button class="win-btn" title="Maximize">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
+            </button>
+            <button class="win-btn close-btn" title="Close" onclick="showToast('Running in system tray')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+            </button>
+        </div>
+    </div>
+</header>
+
+<!-- ============================================================
+     2. MAIN WORKSPACE
+     ============================================================ -->
+<div class="workspace">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="nav-menu">
+            <button class="nav-item active" onclick="setSidebarActive(this)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
+                New Session
+            </button>
+            <button class="nav-item" onclick="setSidebarActive(this); scrollToSection('recent-section');">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+                Recent Sessions
+            </button>
+            <button class="nav-item" onclick="setSidebarActive(this); showToast('Address Book synced');">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                Address Book
+            </button>
+            <div class="sidebar-divider"></div>
+            <button class="nav-item" onclick="setSidebarActive(this); showToast('Settings opened');">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                Settings
+            </button>
+            <button class="nav-item" onclick="setSidebarActive(this); showToast('DeskStream Agent v1.1.3');">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+                About
+            </button>
+        </div>
+
+        <!-- Bottom Device Status Box -->
+        <div class="sidebar-device-box">
+            <div class="readiness-tag">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><polyline points="9 12 11 14 15 10" />
+                </svg>
+                Ready for connections
+            </div>
+            <div class="field-label">Your ID</div>
+            <div class="sidebar-id-row">
+                <div class="sidebar-id-val" id="sidebarIdDisplay">Connecting...</div>
+                <button class="sidebar-copy-btn" onclick="copyHostId()" title="Copy ID">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                </button>
+            </div>
+            <div class="sidebar-alias-val">
+                Alias: <strong id="sidebarAliasDisplay">Loading...</strong>
+                <button class="mini-edit-btn" onclick="triggerAliasEdit()" title="Edit Alias">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+                </button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="content">
+        <div class="top-panels-grid">
+            <!-- Panel 1: This Device -->
+            <div class="panel-card">
+                <div>
+                    <div class="panel-header">
+                        <h2 class="panel-title">This Device</h2>
+                        <button class="panel-menu-btn" title="Options" onclick="showToast('Host options')">⋮</button>
+                    </div>
+                    <p class="panel-subtitle">Your device can be accessed with this address.</p>
+
+                    <div class="field-label">Your ID</div>
+                    <div class="id-row-wrapper">
+                        <div class="large-id-display" id="mainHostId">Connecting...</div>
+                        <button class="copy-box-btn" onclick="copyHostId()" title="Copy to clipboard">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="field-label">Alias</div>
+                    <div class="alias-display-row">
+                        <span id="mainHostAlias">Loading...</span>
+                        <input type="text" id="hostAliasInput" class="alias-input-inline" value=""
+                               onblur="saveAliasInline()" onkeydown="handleAliasKey(event)">
+                        <button class="edit-alias-btn" onclick="triggerAliasEdit()" title="Edit Alias">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="connection-ready-badge" id="hostStatusBadge"></div>
+                <button class="btn-connect-local" type="button" id="connectToLocalBtn" onclick="connectToLocalHost()">
+                    Connect to This Device
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7 7 7-7" /></svg>
+                </button>
+            </div>
+
+            <!-- Panel 2: Connect to Remote -->
+            <div class="panel-card">
+                <div>
+                    <div class="panel-header">
+                        <h2 class="panel-title">Connect to Remote Device</h2>
+                    </div>
+                    <p class="panel-subtitle">Enter the remote device ID to start a session.</p>
+
+                    <div class="connect-input-row">
+                        <div class="input-with-dropdown">
+                            <input type="text" id="remoteIdInput" class="remote-id-input"
+                                   placeholder="Enter Remote ID" autocomplete="off"
+                                   onkeydown="if(event.key==='Enter') startConnection()">
+                            <button class="dropdown-chevron-btn" type="button" onclick="toggleRecentDropdown()" title="Recent IDs">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9" /></svg>
+                            </button>
+                            <div class="recent-dropdown-list" id="recentDropdown"></div>
+                        </div>
+                        <button class="btn-connect-primary" type="button" onclick="startConnection()">
+                            Connect
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" />
+                            </svg>
+                        </button>
+                    </div>
+
+                    <!-- Connection mode -->
+                    <div class="mode-selection-grid">
+                        <div class="mode-option-card active" id="modeDesktop" onclick="selectMode('desktop')">
+                            <div class="mode-icon-box">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>Full Control</h5>
+                                <p>Mouse &amp; keyboard access</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card" id="modeViewOnly" onclick="selectMode('view')">
+                            <div class="mode-icon-box">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>View Only</h5>
+                                <p>No remote control</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Sessions Grid -->
+        <div id="recent-section">
+            <div class="section-header-row">
+                <h3 class="section-heading">Recent Sessions</h3>
+                <a class="view-all-link" href="#" onclick="fetchAllDevices(true); return false;">View All</a>
+            </div>
+            <div class="workstations-grid" id="workstationsContainer">
+                <div class="empty-grid-box">Loading devices...</div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- 3. Footer -->
+<footer class="footer-status-bar">
+    <div class="footer-left">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+        <span>Secure connection — DeskStream Agent v1.1.3</span>
+    </div>
+    <div class="footer-right">
+        <span class="signal-icon-green">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M2 17h2v4H2v-4zm4-5h2v9H6v-9zm4-4h2v13h-2V8zm4-4h2v17h-2V4zm4-4h2v21h-2V0z" /></svg>
+        </span>
+        <span id="agentStatusFooter">Agent: Connecting...</span>
+    </div>
+</footer>
+
+<!-- 4. Incoming Connection Modal -->
+<div class="modal-backdrop-overlay" id="incomingModalOverlay" onclick="handleBackdropClick(event)">
+    <div class="incoming-modal-card" id="incomingModalCard">
+        <div class="modal-red-icon-badge">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /><circle cx="12" cy="10" r="2.5" /><path d="M8 15c0-1.5 1.5-2 4-2s4 .5 4 2" />
+            </svg>
+        </div>
+        <h3 class="modal-title">Incoming Connection Request</h3>
+        <p class="modal-subtitle">Someone is trying to connect to your device</p>
+        <div class="modal-info-card">
+            <div class="info-row">
+                <div class="info-label-group">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                    <span>Remote Device</span>
+                </div>
+                <div class="info-value-group">
+                    <span id="modalDeviceName">Remote User</span>
+                    <span class="verified-shield-icon">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><polyline points="9 12 11 14 15 10" /></svg>
+                    </span>
+                </div>
+            </div>
+            <div class="info-row">
+                <div class="info-label-group">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
+                    <span>Remote ID</span>
+                </div>
+                <div class="info-value-group">
+                    <span class="red-id-highlight" id="modalRemoteId">—</span>
+                </div>
+            </div>
+            <div class="info-row">
+                <div class="info-label-group">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
+                    <span>IP Address</span>
+                </div>
+                <div class="info-value-group"><span id="modalIpAddress">—</span></div>
+            </div>
+            <div class="info-row">
+                <div class="info-label-group">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+                    <span>Request Time</span>
+                </div>
+                <div class="info-value-group"><span id="modalRequestTime">Just now</span></div>
+            </div>
+        </div>
+        <div class="permissions-section">
+            <div class="permissions-label">Allow the remote device to:</div>
+            <div class="permissions-grid">
+                <div class="permission-card">
+                    <div class="perm-top-row">
+                        <div class="perm-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg></div>
+                        <label class="switch"><input type="checkbox" id="permViewScreen" checked><span class="slider"></span></label>
+                    </div>
+                    <div><div class="perm-title">View Screen</div><div class="perm-desc">Allow remote view</div></div>
+                </div>
+                <div class="permission-card">
+                    <div class="perm-top-row">
+                        <div class="perm-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="7" /><line x1="12" y1="6" x2="12" y2="10" /></svg></div>
+                        <label class="switch"><input type="checkbox" id="permControlInput" checked><span class="slider"></span></label>
+                    </div>
+                    <div><div class="perm-title">Control Input</div><div class="perm-desc">Mouse and keyboard</div></div>
+                </div>
+                <div class="permission-card">
+                    <div class="perm-top-row">
+                        <div class="perm-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg></div>
+                        <label class="switch"><input type="checkbox" id="permFileTransfer" checked><span class="slider"></span></label>
+                    </div>
+                    <div><div class="perm-title">File Transfer</div><div class="perm-desc">Allow file transfer</div></div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-action-row">
+            <button class="btn-modal-deny" type="button" onclick="denyConnection()">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+                Deny
+            </button>
+            <button class="btn-modal-accept" type="button" onclick="acceptConnection()">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><polyline points="9 12 11 14 15 10" /></svg>
+                Accept and connect
+            </button>
+        </div>
+        <div class="remember-choice-wrapper">
+            <label class="remember-checkbox-label">
+                <input type="checkbox" id="rememberChoiceCheck">
+                Remember my choice for this device
+            </label>
+            <div class="remember-subtext">You can change this later in Settings &gt; Security</div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast-popup" id="toastBox"><span id="toastMsg">Action completed</span></div>
+
+<!-- ============================================================
+     CLIENT-SIDE APPLICATION LOGIC
+     ============================================================ -->
+<script>
+    // ── Configuration ────────────────────────────────────────────
+    const BACKEND = 'https://friendssoftwaresolutions.in/DeskStream';
+    const AGENT_HEALTH = 'http://localhost:49182';
+
+    // ── State ────────────────────────────────────────────────────
+    let currentHostUid = '';
+    let currentHostAlias = '';
+    let selectedMode = 'desktop';
+    let currentRequestToken = null;
+    let deviceRefreshInProgress = false;
+    let isAuthenticated = false;
+
+    // ── Boot ─────────────────────────────────────────────────────
+    window.addEventListener('DOMContentLoaded', () => {
+        tryRestoreSession();
+        pollAgentHealth();
+        setInterval(pollAgentHealth, 5000);
+    });
+
+    // ── Auth helpers ─────────────────────────────────────────────
+    function tryRestoreSession() {
+        // Check if we have a session cookie / local token
+        const token = localStorage.getItem('ds_session_token');
+        const username = localStorage.getItem('ds_username');
+        if (token && username) {
+            // Validate token against backend
+            fetch(`${BACKEND}/api/auth/validate.php`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'valid' || data.valid) {
+                    onAuthenticated(username);
+                } else {
+                    showLoginOverlay();
+                }
+            })
+            .catch(() => {
+                // If backend unreachable but we have a token, still proceed optimistically
+                if (token) onAuthenticated(username);
+                else showLoginOverlay();
+            });
+        } else {
+            showLoginOverlay();
+        }
+    }
+
+    function showLoginOverlay() {
+        document.getElementById('loginOverlay').style.display = 'flex';
+    }
+
+    async function doLogin() {
+        const email = document.getElementById('loginEmail').value.trim();
+        const pass = document.getElementById('loginPassword').value;
+        const errEl = document.getElementById('loginErr');
+        errEl.style.display = 'none';
+
+        if (!email || !pass) {
+            errEl.textContent = 'Please enter email and password.';
+            errEl.style.display = 'block';
+            return;
+        }
+
+        try {
+            const res = await fetch(`${BACKEND}/api/auth/login.php`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `email=${encodeURIComponent(email)}&password=${encodeURIComponent(pass)}`
+            });
+            const data = await res.json();
+            if (data.status === 'success' || data.token || data.user_id) {
+                const username = data.username || email.split('@')[0];
+                if (data.token) localStorage.setItem('ds_session_token', data.token);
+                if (data.session_id) localStorage.setItem('ds_session_token', data.session_id);
+                localStorage.setItem('ds_username', username);
+                onAuthenticated(username);
+            } else {
+                errEl.textContent = data.message || 'Invalid credentials.';
+                errEl.style.display = 'block';
+            }
+        } catch(e) {
+            errEl.textContent = 'Connection error. Please check your internet connection.';
+            errEl.style.display = 'block';
+        }
+    }
+
+    function onAuthenticated(username) {
+        isAuthenticated = true;
+        document.getElementById('loginOverlay').style.display = 'none';
+        const badge = document.getElementById('topbarUserBadge');
+        badge.style.display = 'flex';
+        document.getElementById('topbarUsername').textContent = '👤 ' + username;
+        fetchAllDevices(false);
+        setInterval(() => fetchAllDevices(false), 5000);
+        setInterval(checkIncoming, 4000);
+    }
+
+    function doLogout() {
+        localStorage.removeItem('ds_session_token');
+        localStorage.removeItem('ds_username');
+        isAuthenticated = false;
+        document.getElementById('topbarUserBadge').style.display = 'none';
+        showLoginOverlay();
+    }
+
+    // ── Agent health poll ────────────────────────────────────────
+    async function pollAgentHealth() {
+        try {
+            const res = await fetch(`${AGENT_HEALTH}/`);
+            const data = await res.json();
+            if (data.system_id) {
+                currentHostUid = data.system_id;
+                updateIdDisplays(formatId(currentHostUid));
+                document.getElementById('agentStatusFooter').textContent = 'Agent: Online (' + formatId(currentHostUid) + ')';
+                updateHostBadge('online');
+            }
+        } catch(e) {
+            document.getElementById('agentStatusFooter').textContent = 'Agent: Not running';
+            updateHostBadge('offline');
+        }
+    }
+
+    function updateIdDisplays(formattedId) {
+        document.getElementById('mainHostId').textContent = formattedId;
+        document.getElementById('sidebarIdDisplay').textContent = formattedId;
+    }
+
+    function updateHostBadge(state) {
+        const el = document.getElementById('hostStatusBadge');
+        if (state === 'online') {
+            el.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#16a34a"/></svg> Ready for connections`;
+            el.style.color = 'var(--success)';
+        } else {
+            el.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#94a3b8"/></svg> Agent offline`;
+            el.style.color = 'var(--text-muted)';
+        }
+    }
+
+    // ── Devices fetch ────────────────────────────────────────────
+    async function fetchAllDevices(isManual = false) {
+        if (deviceRefreshInProgress || !isAuthenticated) return;
+        deviceRefreshInProgress = true;
+        try {
+            const res = await fetch(`${BACKEND}/api/devices/list.php`, { credentials: 'include' });
+            const data = await res.json();
+            if (data.status === 'success' && Array.isArray(data.devices)) {
+                const others = data.devices.filter(d =>
+                    d.system_id !== currentHostUid && d.device_uid !== currentHostUid
+                );
+                renderDevicesGrid(others);
+                populateRecentDropdown(others);
+                // Alias from DB
+                const mine = data.devices.find(d =>
+                    d.system_id === currentHostUid || d.device_uid === currentHostUid
+                );
+                if (mine && mine.name) {
+                    currentHostAlias = mine.name;
+                    document.getElementById('mainHostAlias').textContent = mine.name;
+                    document.getElementById('sidebarAliasDisplay').textContent = mine.name;
+                    document.getElementById('hostAliasInput').value = mine.name;
+                }
+                if (isManual) showToast('Workstation inventory synchronized');
+            }
+        } catch(e) {
+            if (isManual) showToast('Could not reach server');
+        }
+        deviceRefreshInProgress = false;
+    }
+
+    async function checkIncoming() {
+        if (!currentHostUid || !isAuthenticated) return;
+        try {
+            const res = await fetch(`${BACKEND}/api/connections/incoming.php?system_id=${encodeURIComponent(currentHostUid)}`, { credentials: 'include' });
+            const data = await res.json();
+            if (data.has_request && data.request) {
+                const req = data.request;
+                const overlay = document.getElementById('incomingModalOverlay');
+                if (!overlay.classList.contains('open')) {
+                    promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token);
+                }
+            }
+        } catch(e) {}
+    }
+
+    // ── UI helpers ───────────────────────────────────────────────
+    function selectMode(mode) {
+        selectedMode = mode;
+        document.getElementById('modeDesktop').classList.toggle('active', mode === 'desktop');
+        document.getElementById('modeViewOnly').classList.toggle('active', mode === 'view');
+    }
+
+    function formatId(raw) {
+        if (!raw || raw === 'ID unavailable' || raw === 'Agent Not Installed') return 'ID unavailable';
+        const clean = raw.toString().replace(/[^0-9]/g, '');
+        if (!clean) return raw;
+        if (clean.length === 9) return clean.slice(0,3) + ' ' + clean.slice(3,6) + ' ' + clean.slice(6);
+        if (clean.length === 6) return clean.slice(0,3) + ' ' + clean.slice(3);
+        return clean.replace(/(\d{3})(?=\d)/g, '$1 ');
+    }
+
+    function cleanId(id) { return (id || '').replace(/[^0-9a-zA-Z_-]/g, ''); }
+
+    function copyHostId() {
+        if (!currentHostUid) return;
+        navigator.clipboard && navigator.clipboard.writeText(currentHostUid.replace(/\s/g, ''));
+        showToast('System ID copied: ' + formatId(currentHostUid));
+    }
+
+    function showToast(msg) {
+        const toast = document.getElementById('toastBox');
+        document.getElementById('toastMsg').textContent = msg;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    function triggerAliasEdit() {
+        document.getElementById('mainHostAlias').style.display = 'none';
+        document.getElementById('hostAliasInput').style.display = 'inline-block';
+        document.getElementById('hostAliasInput').focus();
+        document.getElementById('hostAliasInput').select();
+    }
+
+    function handleAliasKey(e) {
+        if (e.key === 'Enter') saveAliasInline();
+        else if (e.key === 'Escape') {
+            document.getElementById('mainHostAlias').style.display = 'inline-block';
+            document.getElementById('hostAliasInput').style.display = 'none';
+        }
+    }
+
+    async function saveAliasInline() {
+        const input = document.getElementById('hostAliasInput');
+        const newAlias = input.value.trim() || 'Workstation';
+        document.getElementById('mainHostAlias').textContent = newAlias;
+        document.getElementById('sidebarAliasDisplay').textContent = newAlias;
+        document.getElementById('mainHostAlias').style.display = 'inline-block';
+        input.style.display = 'none';
+        try {
+            await fetch(`${BACKEND}/api/devices/update.php`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_uid: currentHostUid, alias: newAlias }),
+                credentials: 'include'
+            });
+            showToast('Device alias updated to "' + newAlias + '"');
+        } catch(e) { showToast('Could not save alias'); }
+    }
+
+    function setSidebarActive(el) {
+        document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+        el.classList.add('active');
+    }
+
+    function scrollToSection(id) {
+        document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function toggleRecentDropdown() {
+        document.getElementById('recentDropdown').classList.toggle('open');
+    }
+
+    function selectDropdownId(uid) {
+        document.getElementById('remoteIdInput').value = uid;
+        document.getElementById('recentDropdown').classList.remove('open');
+    }
+
+    function toggleFavorite(btn) {
+        btn.textContent = btn.textContent === '☆' ? '★' : '☆';
+        btn.style.color = btn.textContent === '★' ? '#f59e0b' : '';
+    }
+
+    async function startConnection() {
+        const raw = document.getElementById('remoteIdInput').value.trim();
+        if (!raw) { showToast('Please enter a Remote ID'); return; }
+        const targetId = raw.replace(/[^0-9]/g, '');
+        showToast('Connecting to ' + formatId(targetId) + '...');
+        try {
+            const res = await fetch(`${BACKEND}/api/connections/request.php`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_system_id: targetId, requester_system_id: currentHostUid, requester_name: currentHostAlias || 'DeskStream User' }),
+                credentials: 'include'
+            });
+            const data = await res.json();
+            if (data.status === 'success' && data.request) {
+                const token = data.request.request_token;
+                // Navigate to the remote session page on the backend
+                window.open(`${BACKEND}/remote/session.php?id=${encodeURIComponent(targetId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`, '_blank');
+            } else {
+                showToast(data.message || 'Connection request failed');
+            }
+        } catch(e) { showToast('Server error — check internet connection'); }
+    }
+
+    async function connectToLocalHost() {
+        if (!currentHostUid || currentHostUid === 'Connecting...') {
+            showToast('This device is not registered yet');
+            return;
+        }
+        showToast('Establishing local session...');
+        try {
+            const res = await fetch(`${BACKEND}/api/connections/request.php`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_system_id: currentHostUid, requester_system_id: currentHostUid, requester_name: currentHostAlias || 'Local', local_loopback: true }),
+                credentials: 'include'
+            });
+            const data = await res.json();
+            if (data.status === 'success' && data.request) {
+                const token = data.request.request_token;
+                window.open(`${BACKEND}/remote/session.php?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`, '_blank');
+            } else {
+                showToast(data.message || 'Failed to initiate local connection');
+            }
+        } catch(e) { showToast('Server error'); }
+    }
+
+    function getOsSvg(osType) {
+        osType = (osType || 'windows').toLowerCase();
+        if (osType.includes('mac') || osType.includes('apple')) return '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.63-.77 1.06-1.84.94-2.91-.91.04-2.02.61-2.67 1.37-.58.67-1.09 1.76-.95 2.8 1.02 0 2-.49 2.63-1.26z"/></svg>';
+        if (osType.includes('linux')) return '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"/></svg>';
+        return '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.557L10.375 4.5v6.924H3V5.557zm0 12.886l7.375 1.057v-6.924H3v5.867zm8.344 1.218L21 21.2V11.424H11.344v8.237zM21 2.8L11.344 4.361v7.063H21V2.8z"/></svg>';
+    }
+
+    function formatRelativeTime(dateStr) {
+        if (!dateStr) return 'Recently active';
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return 'Recently active';
+        const now = new Date();
+        const diffSec = Math.floor((now - d) / 1000);
+        if (diffSec < 60) return 'Just now';
+        if (diffSec < 3600) return Math.floor(diffSec / 60) + ' mins ago';
+        const isToday = d.toDateString() === now.toDateString();
+        const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (isToday) return 'Today, ' + timeStr;
+        const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+        if (d.toDateString() === yesterday.toDateString()) return 'Yesterday, ' + timeStr;
+        return d.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+
+    function renderDevicesGrid(devices) {
+        const container = document.getElementById('workstationsContainer');
+        if (!devices || devices.length === 0) {
+            container.innerHTML = '<div class="empty-grid-box">No remote desktop agents connected yet. Launch the DeskStream Agent on another computer to connect automatically!</div>';
+            return;
+        }
+        const colors = ['#0284c7', '#ef4444', '#16a34a', '#f59e0b', '#8b5cf6', '#0d9488'];
+        container.innerHTML = devices.map((dev, idx) => {
+            const color = colors[idx % colors.length];
+            const isOnline = dev.is_online == 1;
+            const timeStr = formatRelativeTime(dev.last_seen_at || dev.created_at);
+            const safeName = (dev.name || 'Workstation').replace(/'/g, "\\'");
+            const safeUid = (dev.device_uid || dev.system_id || '').replace(/'/g, "\\'");
+            return `
+                <div class="workstation-card" onclick="selectDropdownId('${safeUid}')">
+                    <div class="device-avatar-circle" style="background:${color};">${getOsSvg(dev.os_type)}</div>
+                    <div class="card-main-info">
+                        <div class="card-top-row">
+                            <div class="device-name-title">
+                                ${dev.name || 'Workstation'}
+                                <span class="online-dot ${isOnline ? 'active' : ''}" title="${isOnline ? 'Online' : 'Offline'}"></span>
+                            </div>
+                            <div class="card-top-actions" onclick="event.stopPropagation()">
+                                <button class="star-fav-btn" title="Favorite" onclick="toggleFavorite(this)">☆</button>
+                                <button class="more-opt-btn" title="Options" onclick="showToast('Device: ${safeName}')">⋮</button>
+                            </div>
+                        </div>
+                        <div class="device-ip-text">${dev.ip_address || '—'}</div>
+                        <div class="last-active-row">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            ${timeStr}
+                        </div>
+                    </div>
+                </div>`;
+        }).join('');
+    }
+
+    function populateRecentDropdown(devices) {
+        const dd = document.getElementById('recentDropdown');
+        if (!devices || devices.length === 0) {
+            dd.innerHTML = '<div class="dropdown-item" style="color:var(--text-muted);">No recent devices</div>';
+            return;
+        }
+        dd.innerHTML = devices.slice(0, 5).map(dev =>
+            `<div class="dropdown-item" onclick="selectDropdownId('${dev.device_uid || dev.system_id}')">
+                <span><strong>${dev.name || 'Workstation'}</strong> (${formatId(dev.device_uid || dev.system_id)})</span>
+                <span style="font-size:0.75rem;color:var(--text-muted);">${dev.ip_address || ''}</span>
+            </div>`
+        ).join('');
+    }
+
+    // ── Incoming modal ───────────────────────────────────────────
+    function promptIncomingModal(name, remoteId, ip, time, token) {
+        document.getElementById('modalDeviceName').textContent = name;
+        document.getElementById('modalRemoteId').textContent = formatId(remoteId);
+        document.getElementById('modalIpAddress').textContent = ip;
+        document.getElementById('modalRequestTime').textContent = time;
+        currentRequestToken = token;
+        const overlay = document.getElementById('incomingModalOverlay');
+        overlay.style.display = 'flex';
+        requestAnimationFrame(() => overlay.classList.add('open'));
+    }
+
+    function closeModal() {
+        const overlay = document.getElementById('incomingModalOverlay');
+        overlay.classList.remove('open');
+        setTimeout(() => { overlay.style.display = 'none'; }, 300);
+        currentRequestToken = null;
+    }
+
+    function handleBackdropClick(e) {
+        if (e.target === document.getElementById('incomingModalOverlay')) closeModal();
+    }
+
+    async function denyConnection() {
+        if (currentRequestToken) {
+            try {
+                await fetch(`${BACKEND}/api/connections/reject.php`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ request_token: currentRequestToken }),
+                    credentials: 'include'
+                });
+            } catch(e) {}
+        }
+        showToast('Connection denied');
+        closeModal();
+    }
+
+    async function acceptConnection() {
+        if (currentRequestToken) {
+            try {
+                const res = await fetch(`${BACKEND}/api/connections/accept.php`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ request_token: currentRequestToken }),
+                    credentials: 'include'
+                });
+                const data = await res.json();
+            } catch(e) {}
+        }
+        showToast('Connection accepted — remote session starting...');
+        closeModal();
+    }
+
+    // Close dropdown on outside click
+    document.addEventListener('click', (e) => {
+        const dd = document.getElementById('recentDropdown');
+        if (!e.target.closest('.input-with-dropdown')) dd.classList.remove('open');
+    });
+</script>
+</body>
+</html>

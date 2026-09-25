@@ -22,7 +22,7 @@ const DESKSTREAM_URL: &str = "deskstream://localhost/dashboard.html";
 
 /// Run the WebView2 application on the main thread.
 /// `quit` — shared flag; when set true (e.g. from tray Exit), the window closes.
-pub fn run_webview(quit: Arc<AtomicBool>) {
+pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let event_loop: EventLoop<()> = EventLoop::new();
 
     let window = WindowBuilder::new()
@@ -52,30 +52,10 @@ pub fn run_webview(quit: Arc<AtomicBool>) {
         window.set_outer_position(PhysicalPosition::new(x.max(0), y.max(0)));
     }
 
-    // Build the WebView2 pointing directly at the live Hostinger DeskStream site.
-    // All authentication, session management, and data are handled server-side on Hostinger.
-    // The embedded agent engine health endpoint is available at localhost:49182.
     let _webview = WebViewBuilder::new()
-        .with_custom_protocol("deskstream".into(), move |_id, _request| {
-            let path = _request.uri().path();
-            let (content, content_type) = match path {
-                "/dashboard.html" | "/" | "" => (include_bytes!("../assets/dashboard.html").to_vec(), "text/html"),
-                "/session.html" => (include_bytes!("../assets/session.html").to_vec(), "text/html"),
-                "/icon.ico" => (include_bytes!("../assets/icon.ico").to_vec(), "image/x-icon"),
-                "/icon.png" => (include_bytes!("../assets/icon.png").to_vec(), "image/png"),
-                _ => (vec![], "text/plain"),
-            };
-            wry::http::Response::builder()
-                .header(wry::http::header::CONTENT_TYPE, content_type)
-                .body(std::borrow::Cow::Owned(content))
-                .unwrap()
-        })
-        .with_url(DESKSTREAM_URL)
+        .with_url(&local_url)
         .with_devtools(false)
         .with_initialization_script(r#"
-            // Expose the embedded agent health endpoint to the Hostinger frontend.
-            // The Hostinger JS code can poll this to show "This Computer: Online".
-            window.__agentHealth = 'http://localhost:49182';
             window.__deskstreamDesktop = true;
         "#)
         .build(&window)

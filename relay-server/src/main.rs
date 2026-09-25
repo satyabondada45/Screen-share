@@ -294,10 +294,13 @@ fn run_websocket_bridge(
     let is_active_reader = Arc::clone(&is_active);
     let session_id_for_thread = session_id.to_string();
 
-    // Dedicated WS-writer channel: eliminates Arc<Mutex<WebSocket>> contention
-    // between the video-sender thread and the control-read loop.
-    let (ws_tx, ws_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
-    let ws_tx_fwd = ws_tx.clone();
+    // Dedicated WS-writer channels: Priority queueing to ensure video can apply backpressure
+    // WITHOUT starving control packets or file-transfer packets.
+    let (ws_tx_ctrl, ws_rx_ctrl) = std::sync::mpsc::channel::<Vec<u8>>(); // Unbounded for control/file
+    let (ws_tx_vid, ws_rx_vid) = std::sync::mpsc::sync_channel::<Vec<u8>>(2); // Bounded (size 2) for video
+
+    let ws_tx_ctrl_fwd = ws_tx_ctrl.clone();
+    let ws_tx_vid_fwd = ws_tx_vid.clone();
 
     let ws_arc_writer = Arc::clone(&ws_arc);
     let ws_arc_closer = Arc::clone(&ws_arc);
@@ -312,23 +315,79 @@ fn run_websocket_bridge(
             let _ = ws.send(Message::Binary(vec![2u8]));
         }
 
+        let mut idle_ms = 0;
         while is_active_writer.load(Ordering::SeqCst) {
-            let msg_bytes = match ws_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(b) => b,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => break,
-            };
-            let mut lock = match ws_arc_writer.lock() {
-                Ok(l) => l,
-                Err(_) => {
-                    eprintln!("[WS CLOSE] component=ws_writer reason=mutex_poisoned device={}", session_id_writer);
+            let mut sent_control = false;
+            while let Ok(msg_bytes) = ws_rx_ctrl.try_recv() {
+                let mut lock = match ws_arc_writer.lock() {
+                    Ok(l) => l,
+                    Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
+                };
+                let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+                if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
+                    eprintln!("[WS CLOSE] component=ws_writer reason=ctrl_send_failed error={:?} device={}", e, session_id_writer);
+                    is_active_writer.store(false, Ordering::SeqCst);
                     break;
                 }
-            };
-            let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
-            if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
-                eprintln!("[WS CLOSE] component=ws_writer reason=send_failed error={:?} device={}", e, session_id_writer);
-                break;
+                sent_control = true;
+                idle_ms = 0;
+            }
+            if !is_active_writer.load(Ordering::SeqCst) { break; }
+            if sent_control { continue; }
+
+            let mut got_msg = false;
+            match ws_rx_ctrl.recv_timeout(Duration::from_millis(10)) {
+                Ok(msg_bytes) => {
+                    let mut lock = match ws_arc_writer.lock() {
+                        Ok(l) => l,
+                        Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
+                    };
+                    let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
+                        eprintln!("[WS CLOSE] component=ws_writer reason=ctrl_send_failed error={:?} device={}", e, session_id_writer);
+                        is_active_writer.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    got_msg = true;
+                    idle_ms = 0;
+                }
+                Err(_) => {}
+            }
+            if !is_active_writer.load(Ordering::SeqCst) { break; }
+            if got_msg { continue; }
+
+            match ws_rx_vid.recv_timeout(Duration::from_millis(10)) {
+                Ok(msg_bytes) => {
+                    let mut lock = match ws_arc_writer.lock() {
+                        Ok(l) => l,
+                        Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
+                    };
+                    let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+                    if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
+                        eprintln!("[WS CLOSE] component=ws_writer reason=vid_send_failed error={:?} device={}", e, session_id_writer);
+                        is_active_writer.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    got_msg = true;
+                    idle_ms = 0;
+                }
+                Err(_) => {}
+            }
+            if !is_active_writer.load(Ordering::SeqCst) { break; }
+            if got_msg { continue; }
+
+            idle_ms += 20;
+            if idle_ms >= 100 {
+                let mut lock = match ws_arc_writer.lock() {
+                    Ok(l) => l,
+                    Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
+                };
+                let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+                if lock.send(Message::Ping(vec![])).is_err() {
+                    is_active_writer.store(false, Ordering::SeqCst);
+                    break;
+                }
+                idle_ms = 0;
             }
         }
         println!("[WS CLOSE] component=ws_writer reason=exiting device={}", session_id_writer);
@@ -378,8 +437,9 @@ fn run_websocket_bridge(
                     msg.extend_from_slice(&header);
                     msg.extend_from_slice(&payload);
                     let msg_len = msg.len();
-                    if ws_tx_fwd.try_send(msg).is_err() {
-                        eprintln!("[WS ERROR] component=host_to_ws reason=tx_full_dropped_video device={}", session_id_for_thread);
+                    if ws_tx_vid_fwd.send(msg).is_err() {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=vid_channel_closed device={}", session_id_for_thread);
+                        break;
                     } else {
                         println!("[VIDEO RELAY TX]");
                         println!("type = 13");
@@ -404,7 +464,7 @@ fn run_websocket_bridge(
                     msg.push(17u8);
                     msg.extend_from_slice(&header);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 14 => {
                     let mut payload = [0u8; 8];
@@ -417,7 +477,7 @@ fn run_websocket_bridge(
                     let mut msg = Vec::with_capacity(9);
                     msg.push(14u8);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 12 => {
                     let mut hdr = [0u8; 4];
@@ -437,7 +497,7 @@ fn run_websocket_bridge(
                     msg.push(12u8);
                     msg.extend_from_slice(&hdr);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 16 => {
                     let mut hdr = [0u8; 2];
@@ -456,7 +516,7 @@ fn run_websocket_bridge(
                     msg.push(16u8);
                     msg.extend_from_slice(&hdr);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 20 => {
                     let mut hdr = [0u8; 18];
@@ -470,7 +530,7 @@ fn run_websocket_bridge(
                     msg.push(20u8);
                     msg.extend_from_slice(&hdr);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 21 => {
                     let mut hdr = [0u8; 16];
@@ -484,7 +544,7 @@ fn run_websocket_bridge(
                     msg.push(21u8);
                     msg.extend_from_slice(&hdr);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 22 => {
                     let mut hdr = [0u8; 48];
@@ -493,7 +553,7 @@ fn run_websocket_bridge(
                     let mut msg = Vec::with_capacity(1 + 48);
                     msg.push(22u8);
                     msg.extend_from_slice(&hdr);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 23 => {
                     let mut hdr = [0u8; 8];
@@ -502,7 +562,7 @@ fn run_websocket_bridge(
                     let mut msg = Vec::with_capacity(1 + 8);
                     msg.push(23u8);
                     msg.extend_from_slice(&hdr);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 24 => {
                     let mut hdr = [0u8; 12];
@@ -516,7 +576,7 @@ fn run_websocket_bridge(
                     msg.push(24u8);
                     msg.extend_from_slice(&hdr);
                     msg.extend_from_slice(&payload);
-                    let _ = ws_tx_fwd.try_send(msg);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 99 => {
                     println!("[WS CLOSE] component=host_to_ws reason=host_sent_99 device={}", session_id_for_thread);
@@ -640,7 +700,8 @@ fn run_websocket_bridge(
     println!("[RELAY] Session ended: main_loop_exited");
     println!("[WS CLOSE] component=bridge reason=main_loop_exited device={}", session_id);
     is_active.store(false, Ordering::SeqCst);
-    drop(ws_tx); // signal writer thread to exit
+    drop(ws_tx_ctrl); // signal writer thread to exit
+    drop(ws_tx_vid);
     println!("[REGISTRY] Viewer disconnected for Device ID: {}", session_id);
     let _ = host_writer.write_all(&[99u8]);
     let _ = host_to_ws_handle.join();
