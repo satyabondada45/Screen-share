@@ -3173,12 +3173,16 @@ window.addEventListener('DOMContentLoaded', () => {
 
         async function sendFiles(files) {
 
+            const socketState = ws ? ws.readyState : -1;
+            const stateNames = {0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED', '-1': 'NULL'};
+            console.log(`[FILE_TRANSFER_SOCKET_CHECK] ws=${ws ? 'exists' : 'null'} readyState=${socketState}(${stateNames[socketState]||socketState}) isStreaming=${isStreaming}`);
+
             if (!isSocketOpen()) {
-
-                alert(
-                    "WebSocket not connected."
-                );
-
+                console.error(`[FILE_TRANSFER_SOCKET_CHECK] FAILED: ws=${ws ? 'exists' : 'null'} state=${stateNames[socketState]||socketState}`);
+                const msg = isStreaming
+                    ? `File transfer failed: session disconnected (WebSocket state: ${stateNames[socketState]||socketState}).`
+                    : 'Connect to a device first before sending files.';
+                alert(msg);
                 return;
 
             }
@@ -3711,7 +3715,10 @@ window.addEventListener('DOMContentLoaded', () => {
                     dropOverlay.classList.remove("active");
 
                     if (!isSocketOpen()) {
-                        alert("WebSocket not connected.");
+                        const s = ws ? ws.readyState : -1;
+                        const sn = {0:'CONNECTING',1:'OPEN',2:'CLOSING',3:'CLOSED','-1':'NULL'};
+                        console.error(`[FILE_TRANSFER] Drag-drop: ws=${ws?'exists':'null'} state=${sn[s]||s}`);
+                        alert(isStreaming ? `Session disconnected (state: ${sn[s]||s}).` : 'Connect to a device first.');
                         return;
                     }
 
@@ -3795,9 +3802,13 @@ window.addEventListener('DOMContentLoaded', () => {
         function handleFileInput(event) {
             if (event.target.files && event.target.files.length > 0) {
                 if (!isSocketOpen()) {
-                    alert("WebSocket not connected.");
+                    const socketState = ws ? ws.readyState : -1;
+                    const stateNames = {0:'CONNECTING',1:'OPEN',2:'CLOSING',3:'CLOSED','-1':'NULL'};
+                    console.error(`[FILE_TRANSFER] Cannot send: ws=${ws?'exists':'null'} state=${stateNames[socketState]||socketState} isStreaming=${isStreaming}`);
+                    alert(isStreaming ? `Session disconnected (state: ${stateNames[socketState]||socketState}). Reconnect and retry.` : 'Connect to a device first before sending files.');
                     return;
                 }
+                console.log(`[FILE_TRANSFER_REQUEST] sending ${event.target.files.length} file(s) over active session`);
                 sendFiles(event.target.files);
                 addActivityLog(`Started sending ${event.target.files.length} file(s)`);
             }

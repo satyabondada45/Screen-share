@@ -2085,12 +2085,20 @@
             btn.textContent = btn.textContent === '☆' ? '★' : '☆';
             btn.style.color = btn.textContent === '★' ? '#f59e0b' : '';
         }
+        let connectionPollInterval = null;
 
         async function startConnection() {
             const raw = document.getElementById('remoteIdInput').value.trim();
             if (!raw) { showToast('Please enter a Remote ID'); return; }
             const targetId = raw.replace(/[^0-9]/g, '');
-            showToast('Connecting to ' + formatId(targetId) + '...');
+            showToast('Sending request to ' + formatId(targetId) + '...');
+
+            const connectBtn = document.querySelector('.btn-connect-primary');
+            if (connectBtn) {
+                connectBtn.disabled = true;
+                connectBtn.innerHTML = 'Waiting...';
+            }
+
             try {
                 const res = await fetch(`${BACKEND}/api/connections/request.php`, {
                     method: 'POST',
@@ -2102,11 +2110,48 @@
                 if (data.status === 'success' && data.request) {
                     const token = data.request.request_token;
                     const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
-                    openIntegratedSession(sessionUrl);
+                    
+                    if (data.request.status === 'accepted') {
+                        if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
+                        openIntegratedSession(sessionUrl);
+                    } else {
+                        showToast(`Waiting for ${formatId(targetId)} to accept...`);
+                        
+                        if (connectionPollInterval) clearInterval(connectionPollInterval);
+                        let pollCount = 0;
+                        connectionPollInterval = setInterval(async () => {
+                            pollCount++;
+                            if (pollCount > 30) { 
+                                clearInterval(connectionPollInterval);
+                                showToast('Connection request timed out.');
+                                if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
+                                return;
+                            }
+                            try {
+                                const statusRes = await fetch(`${BACKEND}/api/connections/status.php?token=${encodeURIComponent(token)}`, { credentials: 'include' });
+                                const statusData = await statusRes.json();
+                                if (statusData.status === 'success') {
+                                    if (statusData.request_status === 'accepted') {
+                                        clearInterval(connectionPollInterval);
+                                        if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
+                                        openIntegratedSession(sessionUrl);
+                                    } else if (statusData.request_status === 'rejected' || statusData.request_status === 'expired') {
+                                        clearInterval(connectionPollInterval);
+                                        showToast('Connection request was ' + statusData.request_status);
+                                        if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
+                                    }
+                                }
+                            } catch (e) { }
+                        }, 2000);
+                    }
                 } else {
+                    if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                     showToast(data.message || 'Connection request failed');
                 }
-            } catch (e) { showToast('Server error — check internet connection'); }
+            } catch (e) { 
+                if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
+                showToast('Server error — check internet connection'); 
+            }
         }
 
         async function connectToLocalHost() {
