@@ -908,7 +908,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
 
                                     match pkt_type_buf[0] {
-                                        0..=10 | 14 => {
+                                        0..=10 => {
                                             let mut data = [0u8; 8];
                                             if read_stream.read_exact(&mut data).is_err() {
                                                 is_conn_read.store(false, Ordering::SeqCst);
@@ -923,17 +923,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 5 => "KEY_DOWN",
                                                 6 => "KEY_UP",
                                                 9 => "MOUSE_WHEEL",
-                                                14 => "HEARTBEAT",
                                                 _ => "CONTROL",
                                             };
                                             println!("[CONTROL DEBUG][HOST RX]\ntype={}\nlength=9", type_name);
                                             println!("[AGENT CONTROL RX]\ntype={}\nbytes=9", event_type);
                                             println!("[AGENT CONTROL RX] {}", type_name);
 
-                                            if event_type == 14 {
-                                                println!("[AGENT] Heartbeat from viewer received");
-                                                continue;
-                                            }
                                             if event_type == 10 {
                                                 active_idx_input.store(data[0] as usize, Ordering::SeqCst);
                                                 continue;

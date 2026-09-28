@@ -534,12 +534,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 End Session
             </a>
             
-            <div class="window-controls">
-                <span>—</span>
-                <span>□</span>
-                <span>×</span>
-            </div>
-            
+
         </div>
     </div>
 
@@ -3810,7 +3805,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         function endSessionAndRedirect(event) {
-            event.preventDefault();
+            if (event && event.preventDefault) event.preventDefault();
             stopWebStream();
             addActivityLog("Session manually ended by user.");
             setTimeout(() => {
@@ -3822,6 +3817,12 @@ window.addEventListener('DOMContentLoaded', () => {
                 }
             }, 500);
         }
+
+        window.addEventListener('message', function (e) {
+            if (e.data === 'end_session_command') {
+                endSessionAndRedirect(new Event('click'));
+            }
+        });
 
         let sessionStartTime = null;
         let sessionTimerInterval = null;

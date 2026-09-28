@@ -10,7 +10,7 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -579,7 +579,7 @@ fn main() {
 
     println!("[Handshake] ACK received: {}", ack[0]);
     match ack[0] {
-        1 => {
+        4 => {
             println!("[Viewer] CONNECTION APPROVED");
             println!("[VIEWER] Adding device to UI");
         }
@@ -689,6 +689,9 @@ fn main() {
         let mut remote_clipboard = Clipboard::new().ok();
         let mut h264_decoder = Decoder::new().expect("Failed to create H.264 decoder");
         let mut frame_number: u64 = 0;
+        let mut current_file: Option<std::fs::File> = None;
+        let mut total_file_size: u64 = 0;
+        let mut received_bytes: u64 = 0;
 
         while connected_read.load(Ordering::SeqCst) {
             let mut packet_type = [0u8; 1];
@@ -924,6 +927,97 @@ fn main() {
                             }
                         }
                         println!("[Chat] {}: {}", tag, text);
+                    }
+                }
+
+                /* ==================================================
+                   FILE TRANSFER (20-24)
+                   ================================================== */
+                20 => {
+                    let mut hdr = [0u8; 18];
+                    if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
+                    let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                    total_file_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+                    let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
+                    if name_len > 4096 { break; }
+                    let mut name_buf = vec![0u8; name_len];
+                    if read_exact_interruptible(&mut read_stream, &mut name_buf, &connected_read).is_err() { break; }
+                    let mut current_filename = String::from_utf8_lossy(&name_buf).to_string();
+                    current_filename = current_filename.replace("/", "_").replace("\\", "_").replace("..", "_");
+                    
+                    let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+                    let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
+                    let _ = std::fs::create_dir_all(&drop_dir);
+                    
+                    let target_path = drop_dir.join(&current_filename);
+                    match std::fs::File::create(&target_path) {
+                        Ok(f) => {
+                            current_file = Some(f);
+                            received_bytes = 0;
+                            println!("[FILE RX START] direction=B->A transfer_id={} filename={} total_bytes={}", transfer_id, current_filename, total_file_size);
+                        }
+                        Err(e) => {
+                            println!("[FILE RX START] direction=B->A transfer_id={} filename={} success=false reason=\"Failed to create file: {:?}\"", transfer_id, current_filename, e);
+                            current_file = None;
+                        }
+                    }
+                }
+
+                21 => {
+                    let mut hdr = [0u8; 16];
+                    if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
+                    let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                    let chunk_idx = u32::from_be_bytes(hdr[8..12].try_into().unwrap());
+                    let chunk_len = u32::from_be_bytes(hdr[12..16].try_into().unwrap()) as usize;
+                    if chunk_len > 10 * 1024 * 1024 { break; }
+                    let mut chunk_buf = vec![0u8; chunk_len];
+                    if read_exact_interruptible(&mut read_stream, &mut chunk_buf, &connected_read).is_err() { break; }
+                    
+                    println!("[FILE RX CHUNK] direction=B->A transfer_id={} chunk_index={} chunk_size={}", transfer_id, chunk_idx, chunk_len);
+                    
+                    if let Some(ref mut file) = current_file {
+                        use std::io::Write;
+                        if file.write_all(&chunk_buf).is_err() {
+                            println!("[FILE RX CHUNK] direction=B->A transfer_id={} success=false reason=\"Disk write failed\"", transfer_id);
+                            current_file = None;
+                            continue;
+                        }
+                        received_bytes += chunk_len as u64;
+                    }
+                }
+
+                22 => {
+                    let mut hdr = [0u8; 48];
+                    if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
+                    let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                    
+                    let hash_hex: String = hdr[16..48].iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("[FILE RX END] direction=B->A transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
+                    
+                    if let Some(mut file) = current_file.take() {
+                        use std::io::Write;
+                        let _ = file.flush();
+                    }
+                }
+
+                23 => {
+                    let mut hdr = [0u8; 8];
+                    if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
+                    current_file = None;
+                    println!("[File Transfer] Cancelled.");
+                }
+
+                24 => {
+                    let mut hdr = [0u8; 12];
+                    if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
+                    let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                    let msg_len = u16::from_be_bytes([hdr[10], hdr[11]]) as usize;
+                    if msg_len > 4096 { break; }
+                    let mut msg_buf = vec![0u8; msg_len];
+                    if read_exact_interruptible(&mut read_stream, &mut msg_buf, &connected_read).is_err() { break; }
+                    current_file = None;
+                    if let Ok(msg) = String::from_utf8(msg_buf) {
+                        println!("[FILE RX ERROR] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, msg);
                     }
                 }
 

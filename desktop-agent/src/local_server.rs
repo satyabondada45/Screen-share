@@ -106,6 +106,22 @@ pub fn start_local_server(system_id: String) -> u16 {
                 continue;
             }
 
+            if path.starts_with("/desktop-api/transfers/pending") {
+                // Return static empty for now just to not 404
+                let json = "[]";
+                let response = Response::from_string(json)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path.starts_with("/desktop-api/transfers/accept") {
+                let response = Response::from_string("{\"success\":true}")
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
             // Extract the path without the query string for static file matching
             let static_path = match path.find('?') {
                 Some(idx) => &path[..idx],
