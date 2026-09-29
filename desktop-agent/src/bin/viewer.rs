@@ -5,7 +5,7 @@ use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 use sha2::{Digest, Sha256};
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_AUDIO_PACKET: usize = 1024 * 1024;
 const MAX_CLIPBOARD_SIZE: usize = 16 * 1024 * 1024;
 const MAX_CHAT_SIZE: usize = u16::MAX as usize;
-const MAX_FILE_NAME_SIZE: usize = 65_535;
+const MAX_FILE_NAME_SIZE: usize = 4096;
 
 const MAX_FRAME_PIXELS: usize = 100_000_000;
 
@@ -439,7 +439,65 @@ fn make_key_packet(packet_type: u8, code: u32) -> Vec<u8> {
    FILE TRANSFER
    ============================================================ */
 
-fn send_file_async(path_string: String, tx: SyncSender<Vec<u8>>) {
+fn decode_chat_text(bytes: Vec<u8>) -> Result<String, std::string::FromUtf8Error> {
+    String::from_utf8(bytes)
+}
+
+fn make_chat_packet(sender: u8, message: &str) -> Vec<u8> {
+    let bytes = message.as_bytes();
+    let mut packet = Vec::with_capacity(4 + bytes.len());
+    packet.extend_from_slice(&[16, sender]);
+    packet.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    packet.extend_from_slice(bytes);
+    packet
+}
+
+fn make_file_offer_packet(transfer_id: u64, size: u64, name: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(19 + name.len());
+    packet.push(20);
+    packet.extend_from_slice(&transfer_id.to_be_bytes());
+    packet.extend_from_slice(&size.to_be_bytes());
+    packet.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    packet.extend_from_slice(name);
+    packet
+}
+
+fn make_file_chunk_packet(transfer_id: u64, chunk_idx: u32, chunk: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(17 + chunk.len());
+    packet.push(21);
+    packet.extend_from_slice(&transfer_id.to_be_bytes());
+    packet.extend_from_slice(&chunk_idx.to_be_bytes());
+    packet.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+    packet.extend_from_slice(chunk);
+    packet
+}
+
+fn make_file_end_packet(transfer_id: u64, size: u64, hash: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(49);
+    packet.push(22);
+    packet.extend_from_slice(&transfer_id.to_be_bytes());
+    packet.extend_from_slice(&size.to_be_bytes());
+    packet.extend_from_slice(hash);
+    packet
+}
+
+fn make_file_error_packet(transfer_id: u64, message: &str) -> Vec<u8> {
+    let message = message.as_bytes();
+    let message = &message[..message.len().min(u16::MAX as usize)];
+    let mut packet = Vec::with_capacity(13 + message.len());
+    packet.push(24);
+    packet.extend_from_slice(&transfer_id.to_be_bytes());
+    packet.extend_from_slice(&[0, 0]);
+    packet.extend_from_slice(&(message.len() as u16).to_be_bytes());
+    packet.extend_from_slice(message);
+    packet
+}
+
+fn send_file_async(
+    path_string: String,
+    tx: SyncSender<Vec<u8>>,
+    responses: Arc<Mutex<HashMap<u64, SyncSender<u8>>>>,
+) {
     thread::spawn(move || {
         let path = Path::new(&path_string);
         if !path.exists() || !path.is_file() {
@@ -468,34 +526,93 @@ fn send_file_async(path_string: String, tx: SyncSender<Vec<u8>>) {
                 return;
             }
         };
-        let name = filename.as_bytes();
-        let mut meta = Vec::with_capacity(11 + name.len());
-        meta.push(20);
-        meta.extend_from_slice(&(name.len() as u16).to_be_bytes());
-        meta.extend_from_slice(&size.to_be_bytes());
-        meta.extend_from_slice(name);
-        if !send_packet(&tx, meta) {
+        let transfer_id: u64 = rand::random();
+        let (response_tx, response_rx) = sync_channel(1);
+        match responses.lock() {
+            Ok(mut pending) => {
+                pending.insert(transfer_id, response_tx);
+            }
+            Err(error) => {
+                eprintln!("[File] Response registry is unavailable: {}", error);
+                return;
+            }
+        }
+
+        if !send_packet(&tx, make_file_offer_packet(transfer_id, size, filename.as_bytes())) {
+            if let Ok(mut pending) = responses.lock() {
+                pending.remove(&transfer_id);
+            }
             return;
         }
+
+        match response_rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(26) => {}
+            Ok(25) => {
+                eprintln!("[File] Transfer {} was rejected by the host.", transfer_id);
+                if let Ok(mut pending) = responses.lock() {
+                    pending.remove(&transfer_id);
+                }
+                return;
+            }
+            Ok(other) => {
+                eprintln!("[File] Unexpected offer response {} for transfer {}.", other, transfer_id);
+                if let Ok(mut pending) = responses.lock() {
+                    pending.remove(&transfer_id);
+                }
+                return;
+            }
+            Err(error) => {
+                eprintln!("[File] No offer response for transfer {}: {}", transfer_id, error);
+                if let Ok(mut pending) = responses.lock() {
+                    pending.remove(&transfer_id);
+                }
+                return;
+            }
+        }
+
+        let mut hasher = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
+        let mut chunk_idx = 0u32;
         loop {
             let n = match file.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[File] Read error: {:?}", e);
+                    let mut cancel = Vec::with_capacity(9);
+                    cancel.push(23);
+                    cancel.extend_from_slice(&transfer_id.to_be_bytes());
+                    let _ = send_packet(&tx, cancel);
+                    if let Ok(mut pending) = responses.lock() {
+                        pending.remove(&transfer_id);
+                    }
                     return;
                 }
             };
-            let mut packet = Vec::with_capacity(5 + n);
-            packet.push(21);
-            packet.extend_from_slice(&(n as u32).to_be_bytes());
-            packet.extend_from_slice(&buffer[..n]);
-            if !send_packet(&tx, packet) {
+            hasher.update(&buffer[..n]);
+            if !send_packet(&tx, make_file_chunk_packet(transfer_id, chunk_idx, &buffer[..n])) {
+                if let Ok(mut pending) = responses.lock() {
+                    pending.remove(&transfer_id);
+                }
                 return;
             }
+            chunk_idx = chunk_idx.saturating_add(1);
         }
-        println!("[File] Transfer complete.");
+        let hash = hasher.finalize();
+        if !send_packet(&tx, make_file_end_packet(transfer_id, size, hash.as_slice())) {
+            if let Ok(mut pending) = responses.lock() {
+                pending.remove(&transfer_id);
+            }
+            return;
+        }
+        match response_rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(27) => println!("[File] Transfer {} completed successfully.", transfer_id),
+            Ok(other) => eprintln!("[File] Unexpected completion response {} for transfer {}.", other, transfer_id),
+            Err(error) => eprintln!("[File] No completion acknowledgement for transfer {}: {}", transfer_id, error),
+        }
+        if let Ok(mut pending) = responses.lock() {
+            pending.remove(&transfer_id);
+        }
     });
 }
 
@@ -659,6 +776,9 @@ fn main() {
     let out_chat = out_tx.clone();
     let out_file = out_tx.clone();
     let out_pong = out_tx.clone();
+    let out_file_response = out_tx.clone();
+    let file_responses = Arc::new(Mutex::new(HashMap::<u64, SyncSender<u8>>::new()));
+    let file_responses_read = Arc::clone(&file_responses);
 
     /* ========================================================
        OUTBOUND THREAD
@@ -690,8 +810,12 @@ fn main() {
         let mut h264_decoder = Decoder::new().expect("Failed to create H.264 decoder");
         let mut frame_number: u64 = 0;
         let mut current_file: Option<std::fs::File> = None;
+        let mut current_file_path: Option<PathBuf> = None;
+        let mut current_transfer_id: Option<u64> = None;
+        let mut current_chunk_index = 0u32;
         let mut total_file_size: u64 = 0;
         let mut received_bytes: u64 = 0;
+        let mut file_hasher = Sha256::new();
 
         while connected_read.load(Ordering::SeqCst) {
             let mut packet_type = [0u8; 1];
@@ -917,48 +1041,76 @@ fn main() {
                     if read_exact_interruptible(&mut read_stream, &mut data, &connected_read).is_err() {
                         break;
                     }
-                    if let Ok(text) = String::from_utf8(data) {
-                        let tag = if sender == 0 { "HOST" } else { "YOU" };
-                        if let Ok(mut messages) = chat_read.lock() {
-                            messages.push(format!("{}: {}", tag, text));
-                            if messages.len() > 100 {
-                                let remove = messages.len() - 100;
-                                messages.drain(0..remove);
+                    match decode_chat_text(data) {
+                        Ok(text) => {
+                            let tag = if sender == 0 { "HOST" } else { "YOU" };
+                            if let Ok(mut messages) = chat_read.lock() {
+                                messages.push(format!("{}: {}", tag, text));
+                                if messages.len() > 100 {
+                                    let remove = messages.len() - 100;
+                                    messages.drain(0..remove);
+                                }
                             }
+                            println!("[Chat] {}: {}", tag, text);
                         }
-                        println!("[Chat] {}: {}", tag, text);
+                        Err(error) => eprintln!(
+                            "[CHAT RX UTF8 ERROR] type=16 payload_len={} valid_up_to={} error_len={:?}",
+                            error.as_bytes().len(),
+                            error.utf8_error().valid_up_to(),
+                            error.utf8_error().error_len()
+                        ),
                     }
                 }
 
                 /* ==================================================
-                   FILE TRANSFER (20-24)
+                   FILE TRANSFER (20-27)
                    ================================================== */
                 20 => {
                     let mut hdr = [0u8; 18];
                     if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
                     let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
-                    total_file_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+                    let offered_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
                     let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
                     if name_len > 4096 { break; }
                     let mut name_buf = vec![0u8; name_len];
                     if read_exact_interruptible(&mut read_stream, &mut name_buf, &connected_read).is_err() { break; }
                     let mut current_filename = String::from_utf8_lossy(&name_buf).to_string();
                     current_filename = current_filename.replace("/", "_").replace("\\", "_").replace("..", "_");
-                    
-                    let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
-                    let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
-                    let _ = std::fs::create_dir_all(&drop_dir);
-                    
-                    let target_path = drop_dir.join(&current_filename);
-                    match std::fs::File::create(&target_path) {
-                        Ok(f) => {
-                            current_file = Some(f);
+                    let destination = rfd::FileDialog::new()
+                        .set_file_name(&current_filename)
+                        .save_file();
+                    let Some(destination) = destination else {
+                        let mut reject = vec![25u8];
+                        reject.extend_from_slice(&transfer_id.to_be_bytes());
+                        let _ = out_file_response.send(reject);
+                        println!("[FILE RX REJECTED] direction=B->A transfer_id={} filename={}", transfer_id, current_filename);
+                        continue;
+                    };
+
+                    match File::create(&destination) {
+                        Ok(file) => {
+                            current_file = Some(file);
+                            current_file_path = Some(destination);
+                            current_transfer_id = Some(transfer_id);
+                            current_chunk_index = 0;
+                            total_file_size = offered_size;
                             received_bytes = 0;
+                            file_hasher = Sha256::new();
+                            let mut accept = vec![26u8];
+                            accept.extend_from_slice(&transfer_id.to_be_bytes());
+                            if out_file_response.send(accept).is_err() {
+                                if let Some(path) = current_file_path.take() {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                                break;
+                            }
                             println!("[FILE RX START] direction=B->A transfer_id={} filename={} total_bytes={}", transfer_id, current_filename, total_file_size);
                         }
-                        Err(e) => {
-                            println!("[FILE RX START] direction=B->A transfer_id={} filename={} success=false reason=\"Failed to create file: {:?}\"", transfer_id, current_filename, e);
-                            current_file = None;
+                        Err(error) => {
+                            eprintln!("[FILE RX START] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, error);
+                            let mut reject = vec![25u8];
+                            reject.extend_from_slice(&transfer_id.to_be_bytes());
+                            let _ = out_file_response.send(reject);
                         }
                     }
                 }
@@ -975,14 +1127,48 @@ fn main() {
                     
                     println!("[FILE RX CHUNK] direction=B->A transfer_id={} chunk_index={} chunk_size={}", transfer_id, chunk_idx, chunk_len);
                     
-                    if let Some(ref mut file) = current_file {
-                        use std::io::Write;
-                        if file.write_all(&chunk_buf).is_err() {
-                            println!("[FILE RX CHUNK] direction=B->A transfer_id={} success=false reason=\"Disk write failed\"", transfer_id);
-                            current_file = None;
-                            continue;
+                    if current_transfer_id == Some(transfer_id)
+                        && chunk_idx == current_chunk_index
+                        && received_bytes.saturating_add(chunk_len as u64) <= total_file_size
+                    {
+                        if let Some(ref mut file) = current_file {
+                            use std::io::Write;
+                            if let Err(error) = file.write_all(&chunk_buf) {
+                                eprintln!("[FILE RX CHUNK] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, error);
+                                current_file = None;
+                                if let Some(path) = current_file_path.take() {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                                current_transfer_id = None;
+                                let message = b"Disk write failed";
+                                let mut failure = vec![24u8];
+                                failure.extend_from_slice(&transfer_id.to_be_bytes());
+                                failure.extend_from_slice(&[0, 0]);
+                                failure.extend_from_slice(&(message.len() as u16).to_be_bytes());
+                                failure.extend_from_slice(message);
+                                let _ = out_file_response.send(failure);
+                                continue;
+                            }
+                            file_hasher.update(&chunk_buf);
+                            received_bytes += chunk_len as u64;
+                            current_chunk_index = current_chunk_index.saturating_add(1);
                         }
-                        received_bytes += chunk_len as u64;
+                    } else {
+                        eprintln!("[FILE RX CHUNK] Rejected unexpected chunk for transfer {}.", transfer_id);
+                        if current_transfer_id == Some(transfer_id) {
+                            let reason = if chunk_idx != current_chunk_index {
+                                format!("Unexpected chunk index {}; expected {}", chunk_idx, current_chunk_index)
+                            } else {
+                                "Received data exceeds offered file size".to_string()
+                            };
+                            let _ = out_file_response.send(make_file_error_packet(transfer_id, &reason));
+                            current_file = None;
+                            if let Some(path) = current_file_path.take() {
+                                let _ = std::fs::remove_file(path);
+                            }
+                            current_transfer_id = None;
+                            received_bytes = 0;
+                        }
                     }
                 }
 
@@ -990,21 +1176,59 @@ fn main() {
                     let mut hdr = [0u8; 48];
                     if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
                     let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
-                    
+                    let final_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
                     let hash_hex: String = hdr[16..48].iter().map(|b| format!("{:02x}", b)).collect();
-                    println!("[FILE RX END] direction=B->A transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
-                    
-                    if let Some(mut file) = current_file.take() {
-                        use std::io::Write;
-                        let _ = file.flush();
+                    let actual_hash = std::mem::replace(&mut file_hasher, Sha256::new()).finalize();
+                    let flush_ok = current_file
+                        .take()
+                        .map(|mut file| file.flush().is_ok())
+                        .unwrap_or(false);
+                    let valid = current_transfer_id == Some(transfer_id)
+                        && final_size == total_file_size
+                        && received_bytes == final_size
+                        && actual_hash.as_slice() == &hdr[16..48]
+                        && flush_ok;
+                    if valid {
+                        let mut ack = vec![27u8];
+                        ack.extend_from_slice(&transfer_id.to_be_bytes());
+                        if out_file_response.send(ack).is_err() {
+                            break;
+                        }
+                        println!("[FILE RX END] direction=B->A transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
+                    } else {
+                        if let Some(path) = current_file_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        let message = b"File size or SHA-256 verification failed";
+                        let mut failure = vec![24u8];
+                        failure.extend_from_slice(&transfer_id.to_be_bytes());
+                        failure.extend_from_slice(&[0, 0]);
+                        failure.extend_from_slice(&(message.len() as u16).to_be_bytes());
+                        failure.extend_from_slice(message);
+                        let _ = out_file_response.send(failure);
+                        eprintln!("[FILE RX END] direction=B->A transfer_id={} success=false reason=\"SHA-256 or size mismatch\"", transfer_id);
                     }
+                    current_file_path = None;
+                    current_transfer_id = None;
                 }
 
                 23 => {
                     let mut hdr = [0u8; 8];
                     if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
-                    current_file = None;
-                    println!("[File Transfer] Cancelled.");
+                    let transfer_id = u64::from_be_bytes(hdr);
+                    if current_transfer_id == Some(transfer_id) {
+                        current_file = None;
+                        if let Some(path) = current_file_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        current_transfer_id = None;
+                    }
+                    if let Ok(mut pending) = file_responses_read.lock() {
+                        if let Some(response) = pending.remove(&transfer_id) {
+                            let _ = response.send(23);
+                        }
+                    }
+                    println!("[FILE RX CANCELLED] transfer_id={}", transfer_id);
                 }
 
                 24 => {
@@ -1015,10 +1239,32 @@ fn main() {
                     if msg_len > 4096 { break; }
                     let mut msg_buf = vec![0u8; msg_len];
                     if read_exact_interruptible(&mut read_stream, &mut msg_buf, &connected_read).is_err() { break; }
-                    current_file = None;
-                    if let Ok(msg) = String::from_utf8(msg_buf) {
-                        println!("[FILE RX ERROR] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, msg);
+                    if let Ok(mut pending) = file_responses_read.lock() {
+                        if let Some(response) = pending.remove(&transfer_id) {
+                            let _ = response.send(24);
+                        }
                     }
+                    if current_transfer_id == Some(transfer_id) {
+                        current_file = None;
+                        if let Some(path) = current_file_path.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        current_transfer_id = None;
+                    }
+                    let message = String::from_utf8_lossy(&msg_buf);
+                    println!("[FILE RX ERROR] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, message);
+                }
+
+                25 | 26 | 27 => {
+                    let mut hdr = [0u8; 8];
+                    if read_exact_interruptible(&mut read_stream, &mut hdr, &connected_read).is_err() { break; }
+                    let transfer_id = u64::from_be_bytes(hdr);
+                    if let Ok(mut pending) = file_responses_read.lock() {
+                        if let Some(response) = pending.remove(&transfer_id) {
+                            let _ = response.send(packet_type[0]);
+                        }
+                    }
+                    println!("[FILE TX RESPONSE] transfer_id={} type={}", transfer_id, packet_type[0]);
                 }
 
                 other => {
@@ -1197,7 +1443,7 @@ fn main() {
                     if io::stdin().read_line(&mut path).is_ok() {
                         let path = path.trim().trim_matches('"').to_string();
                         if !path.is_empty() {
-                            send_file_async(path, out_file.clone());
+                            send_file_async(path, out_file.clone(), Arc::clone(&file_responses));
                         }
                     }
                 }
@@ -1209,11 +1455,7 @@ fn main() {
                         let message = message.trim().to_string();
                         let bytes = message.as_bytes();
                         if !message.is_empty() && bytes.len() <= MAX_CHAT_SIZE {
-                            let mut packet = Vec::with_capacity(4 + bytes.len());
-                            packet.push(16);
-                            packet.push(1);
-                            packet.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-                            packet.extend_from_slice(bytes);
+                            let packet = make_chat_packet(1, &message);
                             if out_chat.send(packet).is_ok() {
                                 if let Ok(mut messages) = chat.lock() {
                                     messages.push(format!("YOU: {}", message));
@@ -1334,4 +1576,50 @@ fn main() {
     let _ = inbound_thread.join();
     let _ = outbound_thread.join();
     println!("[Viewer] Disconnected.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_packet_preserves_utf8_and_type_16_layout() {
+        let message = "Hello, 世界 🌍";
+        let packet = make_chat_packet(1, message);
+        let length = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+
+        assert_eq!(packet[0..2], [16, 1]);
+        assert_eq!(length, message.len());
+        assert_eq!(&packet[4..], message.as_bytes());
+        assert_eq!(decode_chat_text(packet[4..].to_vec()).unwrap(), message);
+    }
+
+    #[test]
+    fn malformed_chat_utf8_is_rejected_instead_of_corrupted() {
+        assert!(decode_chat_text(vec![b'a', 0xff, b'b']).is_err());
+    }
+
+    #[test]
+    fn file_transfer_packets_match_types_20_to_22_wire_layout() {
+        let offer = make_file_offer_packet(0x0102_0304_0506_0708, 0x1112_1314_1516_1718, b"a.txt");
+        assert_eq!(offer[0], 20);
+        assert_eq!(&offer[1..9], &0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(&offer[9..17], &0x1112_1314_1516_1718u64.to_be_bytes());
+        assert_eq!(&offer[17..19], &5u16.to_be_bytes());
+        assert_eq!(&offer[19..], b"a.txt");
+
+        let chunk = make_file_chunk_packet(7, 3, b"data");
+        assert_eq!(chunk[0], 21);
+        assert_eq!(&chunk[1..9], &7u64.to_be_bytes());
+        assert_eq!(&chunk[9..13], &3u32.to_be_bytes());
+        assert_eq!(&chunk[13..17], &4u32.to_be_bytes());
+        assert_eq!(&chunk[17..], b"data");
+
+        let hash = [0xA5; 32];
+        let end = make_file_end_packet(7, 4, &hash);
+        assert_eq!(end[0], 22);
+        assert_eq!(&end[1..9], &7u64.to_be_bytes());
+        assert_eq!(&end[9..17], &4u64.to_be_bytes());
+        assert_eq!(&end[17..], &hash);
+    }
 }

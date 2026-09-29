@@ -27,6 +27,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Condvar, Mutex};
@@ -306,6 +307,7 @@ struct FrameData {
     width: usize,
     height: usize,
     raw_pixels: Vec<u8>,
+    captured_at_ms: u64,
 }
 
 #[cfg(windows)]
@@ -401,6 +403,7 @@ fn capture_screen_gdi() -> Option<FrameData> {
             width,
             height,
             raw_pixels: buffer,
+            captured_at_ms: current_time_millis(),
         })
     }
 }
@@ -432,23 +435,23 @@ fn start_audio_capture(
                 if !is_running.load(Ordering::SeqCst) {
                     return;
                 }
+                if !crate::status::session_audio_enabled() {
+                    return;
+                }
 
                 let byte_len = data.len() * std::mem::size_of::<f32>();
                 if byte_len == 0 {
                     return;
                 }
 
-
                 let mut packet = Vec::with_capacity(11 + byte_len);
                 packet.push(17u8);
                 packet.extend_from_slice(&(byte_len as u32).to_be_bytes());
                 packet.extend_from_slice(&(sample_rate as u32).to_be_bytes());
                 packet.extend_from_slice(&(channels as u16).to_be_bytes());
-
-                let slice = unsafe {
-                    std::slice::from_raw_parts(data.as_ptr() as *const u8, byte_len)
-                };
-                packet.extend_from_slice(slice);
+                for sample in data {
+                    packet.extend_from_slice(&sample.to_le_bytes());
+                }
 
                 let _ = write_stream.try_send(packet);
             },
@@ -459,6 +462,124 @@ fn start_audio_capture(
 
     stream.play().ok()?;
     Some(stream)
+}
+fn setup_session_audio_playback() -> (Option<cpal::Stream>, Arc<Mutex<VecDeque<f32>>>, u32) {
+    let queue = Arc::new(Mutex::new(VecDeque::<f32>::new()));
+    let queue_for_callback = Arc::clone(&queue);
+    let device = match cpal::default_host().default_output_device() {
+        Some(device) => device,
+        None => {
+            eprintln!("[Audio] No output device available for session playback.");
+            return (None, queue, 0);
+        }
+    };
+    let config = match device.default_output_config() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("[Audio] Failed to read output configuration: {}", error);
+            return (None, queue, 0);
+        }
+    };
+    let stream_config: cpal::StreamConfig = config.clone().into();
+    let output_rate = stream_config.sample_rate.0;
+    let output_channels = stream_config.channels.max(1) as usize;
+    let stream = match device.build_output_stream(
+        &stream_config,
+        move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            if let Ok(mut samples) = queue_for_callback.lock() {
+                for frame in output.chunks_mut(output_channels) {
+                    let sample = samples.pop_front().unwrap_or(0.0);
+                    for channel in frame {
+                        *channel = sample;
+                    }
+                }
+            } else {
+                output.fill(0.0);
+            }
+        },
+        |error| {
+            eprintln!("[Audio] Output stream failed: {}", error);
+        },
+        None,
+    ) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("[Audio] Failed to create output stream: {}", error);
+            return (None, queue, 0);
+        }
+    };
+    if let Err(error) = stream.play() {
+        eprintln!("[Audio] Failed to start output stream: {}", error);
+        return (None, queue, 0);
+    }
+    (Some(stream), queue, output_rate)
+}
+
+fn decode_audio_packet(
+    payload: &[u8],
+    sample_rate: u32,
+    channels: u16,
+    output_rate: u32,
+) -> Option<Vec<f32>> {
+    if payload.is_empty()
+        || payload.len() % 4 != 0
+        || sample_rate == 0
+        || sample_rate > 192_000
+        || channels == 0
+        || channels > 32
+        || output_rate == 0
+    {
+        return None;
+    }
+    let channel_count = channels as usize;
+    let samples = payload
+        .chunks_exact(4)
+        .map(|bytes| {
+            let sample = f32::from_le_bytes(bytes.try_into().ok()?);
+            Some(if sample.is_finite() { sample } else { 0.0 })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if samples.len() % channel_count != 0 {
+        return None;
+    }
+
+    let mono = samples
+        .chunks_exact(channel_count)
+        .map(|frame| {
+            frame.iter().copied().sum::<f32>() / channel_count as f32
+        })
+        .collect::<Vec<_>>();
+    let output_len = ((mono.len() as u64 * output_rate as u64) / sample_rate as u64) as usize;
+    if output_len == 0 {
+        return Some(Vec::new());
+    }
+    Some(
+        (0..output_len)
+            .map(|index| {
+                let source_index = index * sample_rate as usize / output_rate as usize;
+                mono[source_index.min(mono.len() - 1)]
+            })
+            .collect(),
+    )
+}
+
+fn read_next_file_chunk<R: Read>(reader: &mut R, buffer: &mut [u8]) -> std::io::Result<Option<usize>> {
+    match reader.read(buffer)? {
+        0 => Ok(None),
+        bytes_read => Ok(Some(bytes_read)),
+    }
+}
+
+fn make_file_error_packet(transfer_id: u64, message: &str) -> Vec<u8> {
+    let message_bytes = message.as_bytes();
+    let message_bytes = &message_bytes[..message_bytes.len().min(u16::MAX as usize)];
+    let mut packet = Vec::with_capacity(13 + message_bytes.len());
+    packet.push(24);
+    packet.extend_from_slice(&transfer_id.to_be_bytes());
+    packet.extend_from_slice(&[0, 0]);
+    packet.extend_from_slice(&(message_bytes.len() as u16).to_be_bytes());
+    packet.extend_from_slice(message_bytes);
+    packet
 }
 
 // ============================================================
@@ -660,37 +781,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let is_conn_audio = Arc::clone(&is_connected);
                             let is_conn_ping = Arc::clone(&is_connected);
                             
-                            // ====================================================
-                            // REMOTE SESSION INDICATOR
-                            // ====================================================
-                            let ind_in_session = Arc::clone(&is_in_session);
-                            let ind_conn = Arc::clone(&is_connected);
-                            thread::spawn(move || {
-                                let width = 300;
-                                let height = 50;
-                                let mut opts = minifb::WindowOptions::default();
-                                opts.topmost = true;
-                                opts.title = true;
-                                opts.resize = false;
-                                if let Ok(mut window) = minifb::Window::new(
-                                    "DeskStream: REMOTE SESSION ACTIVE",
-                                    width,
-                                    height,
-                                    opts
-                                ) {
-                                    // A simple neutral banner background
-                                    let buffer: Vec<u32> = vec![0xFFFFFFFF; width * height];
-                                    while ind_in_session.load(Ordering::SeqCst) && window.is_open() {
-                                        let _ = window.update_with_buffer(&buffer, width, height);
-                                        thread::sleep(Duration::from_millis(50));
-                                    }
-                                    if !window.is_open() {
-                                        // User clicked "X" to end the session
-                                        ind_conn.store(false, Ordering::SeqCst);
-                                    }
-                                }
-                            });
-
                             if let Err(e) = stream.set_nodelay(true) {
                                 eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
                             }
@@ -722,7 +812,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             }
 
-                            let video_slot = Arc::new(Mutex::new(std::collections::VecDeque::<Vec<u8>>::with_capacity(30)));
+                            let video_slot = Arc::new(Mutex::new(std::collections::VecDeque::<Vec<u8>>::with_capacity(3)));
                             let video_slot_writer = Arc::clone(&video_slot);
                             let video_slot_capture = Arc::clone(&video_slot);
                             let video_recovery_needed = Arc::new(AtomicBool::new(false));
@@ -745,27 +835,30 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             println!("[VIDEO STATE] ACTIVE");
 
                             let writer_handle = thread::spawn(move || {
+                                let mut video_trace_count = 0u64;
                                 let mut write_packet = |packet: Vec<u8>| -> bool {
                                     if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
-                                        let ts = u64::from_be_bytes(packet[13..21].try_into().unwrap_or([0; 8]));
-                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-                                        if ts > 0 && now > ts {
-                                            println!("[VIDEO TRACE] send_timestamp={} ageMs={}", now, now - ts);
+                                        video_trace_count += 1;
+                                        if video_trace_count == 1 || video_trace_count % 60 == 0 {
+                                            let ts = u64::from_be_bytes(packet[13..21].try_into().unwrap_or([0; 8]));
+                                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                                            if ts > 0 && now > ts {
+                                                println!("[VIDEO TRACE] frames={} send_timestamp={} ageMs={}", video_trace_count, now, now - ts);
+                                            }
                                         }
                                     }
                                     match write_tcp.write_all(&packet) {
                                         Ok(_) => true,
                                         Err(e) => {
-                                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                                || e.kind() == std::io::ErrorKind::TimedOut
-                                            {
-                                                true
-                                            } else {
-                                                eprintln!("[Writer] TCP error: {:?}", e);
-                                                println!("[VIDEO STATE] WRITE_FAILED");
-                                                write_connected.store(false, Ordering::Release);
-                                                false
-                                            }
+                                            eprintln!(
+                                                "[Writer] TCP packet write failed: type={} bytes={} error={:?}; ending session to preserve stream framing",
+                                                packet.first().copied().unwrap_or(255),
+                                                packet.len(),
+                                                e
+                                            );
+                                            println!("[VIDEO STATE] WRITE_FAILED");
+                                            write_connected.store(false, Ordering::Release);
+                                            false
                                         }
                                     }
                                 };
@@ -857,12 +950,23 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     // Type 21
                                                     let mut buffer = [0u8; 256 * 1024]; // 256 KB
                                                     let mut chunk_idx = 0u32;
-                                                    use std::io::Read;
-                                                    
-                                                    while let Ok(bytes_read) = f.read(&mut buffer) {
-                                                        if bytes_read == 0 { break; }
+                                                    let mut bytes_sent = 0u64;
+                                                    let mut send_failed = false;
+
+                                                    loop {
+                                                        let bytes_read = match read_next_file_chunk(&mut f, &mut buffer) {
+                                                            Ok(None) => break,
+                                                            Ok(Some(bytes_read)) => bytes_read,
+                                                            Err(error) => {
+                                                                let message = format!("Failed to read source file: {}", error);
+                                                                let _ = write_stream_file.send(make_file_error_packet(transfer_id, &message));
+                                                                println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, message);
+                                                                send_failed = true;
+                                                                break;
+                                                            }
+                                                        };
                                                         hasher.update(&buffer[..bytes_read]);
-                                                        
+
                                                         let mut pkt = vec![21u8];
                                                         pkt.extend_from_slice(&transfer_id.to_be_bytes());
                                                         pkt.extend_from_slice(&chunk_idx.to_be_bytes());
@@ -870,13 +974,27 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         pkt.extend_from_slice(&buffer[..bytes_read]);
                                                         if write_stream_file.send(pkt).is_err() {
                                                             println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"Channel send failed\"", transfer_id);
+                                                            send_failed = true;
                                                             break;
                                                         }
-                                                        
+
                                                         println!("[FILE TX CHUNK] direction=B->A transfer_id={} chunk_index={} chunk_size={}", transfer_id, chunk_idx, bytes_read);
-                                                        
+                                                        bytes_sent += bytes_read as u64;
                                                         chunk_idx += 1;
                                                         std::thread::sleep(std::time::Duration::from_millis(10));
+                                                    }
+
+                                                    if send_failed || bytes_sent != file_size {
+                                                        if !send_failed {
+                                                            let message = format!(
+                                                                "Source file changed while sending (expected {} bytes, read {})",
+                                                                file_size, bytes_sent
+                                                            );
+                                                            let _ = write_stream_file.send(make_file_error_packet(transfer_id, &message));
+                                                            println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"{}\"", transfer_id, message);
+                                                        }
+                                                        crate::status::clear_session_file_response(transfer_id);
+                                                        continue;
                                                     }
                                                     
                                                     // Type 22
@@ -930,15 +1048,19 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             // INPUT THREAD
                             let input_handle = thread::spawn(move || {
+                                let (_audio_output_stream, audio_playback_queue, audio_output_rate) =
+                                    setup_session_audio_playback();
                                 println!("[INPUT THREAD] Started native input processing loop");
                                 let mut clip = Clipboard::new().ok();
                                 let mut current_file: Option<File> = None;
                                 let mut current_file_path: Option<PathBuf> = None;
                                 let mut current_transfer_id: Option<u64> = None;
+                                let mut current_file_chunk_index = 0u32;
                                 let mut current_filename = String::new();
                                 let mut total_file_size: u64 = 0;
                                 let mut received_bytes: u64 = 0;
                                 let mut file_hasher = Sha256::new();
+                                let mut chat_packet_diagnostic_logged = false;
                                 let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
                                 let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
                                 let _ = fs::create_dir_all(&drop_dir);
@@ -1136,11 +1258,105 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             if read_stream.read_exact(&mut msg_bytes).is_err() {
                                                 break;
                                             }
-                                            if let Ok(txt) = String::from_utf8(msg_bytes) {
-                                                println!("\n[Chat from Remote Viewer]: {}", txt);
-                                                if let Err(error) = crate::status::push_session_chat(txt) {
-                                                    eprintln!("[CHAT UI] Failed to queue received message: {}", error);
+                                            if !chat_packet_diagnostic_logged {
+                                                let prefix_hex = msg_bytes.iter().take(64)
+                                                    .map(|byte| format!("{:02x}", byte))
+                                                    .collect::<Vec<_>>()
+                                                    .join(" ");
+                                                println!(
+                                                    "[CHAT RX TRACE] type=16 declared_payload_len={} consumed_bytes={} payload_start=4 payload_end={} payload_bytes={} payload_prefix_hex=\"{}\"",
+                                                    len, 4 + len, 4 + len, msg_bytes.len(), prefix_hex
+                                                );
+                                                chat_packet_diagnostic_logged = true;
+                                            }
+                                            match String::from_utf8(msg_bytes) {
+                                                Ok(text) => {
+                                                    println!("\n[Chat from Remote Viewer]: {}", text);
+                                                    if let Err(error) = crate::status::push_session_chat(text, false) {
+                                                        eprintln!("[CHAT UI] Failed to retain received message: {}", error);
+                                                    }
                                                 }
+                                                Err(error) => {
+                                                    eprintln!(
+                                                        "[CHAT RX UTF8 ERROR] type=16 payload_len={} valid_up_to={} error_len={:?}",
+                                                        len,
+                                                        error.utf8_error().valid_up_to(),
+                                                        error.utf8_error().error_len()
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        18 => {
+                                            let mut state = [0u8; 1];
+                                            if read_stream.read_exact(&mut state).is_err() {
+                                                break;
+                                            }
+                                            if state[0] > 1 {
+                                                eprintln!("[CHAT TYPING RX] Invalid state byte {}", state[0]);
+                                                continue;
+                                            }
+                                            crate::status::set_session_remote_typing(state[0] == 1);
+                                        }
+
+                                        30 => {
+                                            crate::status::set_session_reverse_request_pending();
+                                            println!("[REVERSE] Received TYPE 30 request during active session.");
+                                        }
+
+                                        31 => {
+                                            let mut decision = [0u8; 1];
+                                            if read_stream.read_exact(&mut decision).is_err() {
+                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                break;
+                                            }
+                                            if decision[0] > 1 {
+                                                eprintln!("[REVERSE] Invalid TYPE 31 decision={}", decision[0]);
+                                                continue;
+                                            }
+                                            crate::status::set_session_reverse_decision(decision[0] == 1);
+                                            println!("[REVERSE] Received TYPE 31 decision={}; active roles are unchanged.", decision[0]);
+                                        }
+
+                                        17 => {
+                                            let mut header = [0u8; 10];
+                                            if read_stream.read_exact(&mut header).is_err() {
+                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                break;
+                                            }
+                                            let payload_len = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
+                                            let sample_rate = u32::from_be_bytes(header[4..8].try_into().unwrap());
+                                            let channels = u16::from_be_bytes(header[8..10].try_into().unwrap());
+                                            if payload_len == 0 || payload_len > 10 * 1024 * 1024 {
+                                                eprintln!("[AUDIO RX] Invalid TYPE 17 payload length={}", payload_len);
+                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                break;
+                                            }
+                                            let mut payload = vec![0u8; payload_len];
+                                            if read_stream.read_exact(&mut payload).is_err() {
+                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                break;
+                                            }
+                                            if let Some(samples) = decode_audio_packet(
+                                                &payload,
+                                                sample_rate,
+                                                channels,
+                                                audio_output_rate,
+                                            ) {
+                                                if let Ok(mut queue) = audio_playback_queue.lock() {
+                                                    let max_samples = audio_output_rate as usize * 2;
+                                                    if queue.len().saturating_add(samples.len()) > max_samples {
+                                                        queue.clear();
+                                                    }
+                                                    queue.extend(samples);
+                                                }
+                                            } else {
+                                                eprintln!(
+                                                    "[AUDIO RX] Invalid TYPE 17 frame rate={} channels={} bytes={}",
+                                                    sample_rate,
+                                                    channels,
+                                                    payload_len
+                                                );
                                             }
                                         }
 
@@ -1158,6 +1374,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             current_file = None;
                                             current_file_path = None;
                                             current_transfer_id = Some(transfer_id);
+                                            current_file_chunk_index = 0;
                                             received_bytes = 0;
                                             file_hasher = Sha256::new();
                                             if let Err(error) = crate::status::push_session_file_offer(crate::status::SessionFileOffer {
@@ -1192,7 +1409,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     false
                                                 }
                                             };
-                                            if current_transfer_id == Some(transfer_id) && accepted {
+                                            println!("[FILE RX CHUNK STATE] direction=A->B transfer_id={} received_bytes={} chunk_count={} accepted={}", transfer_id, received_bytes, current_file_chunk_index, accepted);
+                                            let chunk_is_valid = current_transfer_id == Some(transfer_id)
+                                                && accepted
+                                                && chunk_idx == current_file_chunk_index
+                                                && received_bytes.saturating_add(chunk_len as u64) <= total_file_size;
+                                            if chunk_is_valid {
                                                 if current_file.is_none() {
                                                     if let Err(error) = fs::create_dir_all(&drop_dir) {
                                                         eprintln!("[FILE RX START] Failed to create download directory: {}", error);
@@ -1217,17 +1439,36 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     }
                                                 }
                                                 if let Some(ref mut file) = current_file {
-                                                    if file.write_all(&chunk_buf).is_err() {
-                                                        println!("[FILE RX CHUNK] direction=A->B transfer_id={} success=false reason=\"Disk write failed\"", transfer_id);
-                                                        send_file_error(transfer_id, "Disk write failed");
+                                                    if let Err(error) = file.write_all(&chunk_buf) {
+                                                        println!("[FILE RX CHUNK] direction=A->B transfer_id={} success=false reason=\"{}\"", transfer_id, error);
+                                                        send_file_error(transfer_id, &format!("Disk write failed: {}", error));
                                                         current_file = None;
+                                                        if let Some(path) = current_file_path.take() {
+                                                            let _ = fs::remove_file(path);
+                                                        }
                                                         crate::status::finish_session_file(transfer_id);
                                                         current_transfer_id = None;
+                                                        received_bytes = 0;
                                                         continue;
                                                     }
                                                     file_hasher.update(&chunk_buf);
                                                     received_bytes += chunk_len as u64;
+                                                    current_file_chunk_index = current_file_chunk_index.saturating_add(1);
                                                 }
+                                            } else if current_transfer_id == Some(transfer_id) {
+                                                let reason = if chunk_idx != current_file_chunk_index {
+                                                    format!("Unexpected chunk index {}; expected {}", chunk_idx, current_file_chunk_index)
+                                                } else {
+                                                    "Chunk exceeded offered file size or transfer was not accepted".to_string()
+                                                };
+                                                send_file_error(transfer_id, &reason);
+                                                current_file = None;
+                                                if let Some(path) = current_file_path.take() {
+                                                    let _ = fs::remove_file(path);
+                                                }
+                                                crate::status::finish_session_file(transfer_id);
+                                                current_transfer_id = None;
+                                                received_bytes = 0;
                                             }
                                         }
 
@@ -1263,19 +1504,23 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     }
                                                 }
                                             }
-                                            let valid = current_transfer_id == Some(transfer_id)
-                                                && accepted
-                                                && total_file_size == final_size
-                                                && received_bytes == final_size
-                                                && actual_hash.as_slice() == &hdr[16..48];
+                                            let transfer_matches = current_transfer_id == Some(transfer_id) && accepted;
+                                            let size_matches = total_file_size == final_size && received_bytes == final_size;
+                                            let hash_matches = actual_hash.as_slice() == &hdr[16..48];
                                             let flush_ok = current_file
                                                 .take()
                                                 .map(|mut file| file.flush().is_ok())
                                                 .unwrap_or(false);
+                                            println!("[FILE RX VERIFY] direction=A->B transfer_id={} end_received=true file_closed={} expected_bytes={} received_bytes={} final_bytes={} size_match={} sha256_match={} accepted={}", transfer_id, flush_ok, total_file_size, received_bytes, final_size, size_matches, hash_matches, transfer_matches);
+                                            let valid = transfer_matches && size_matches && hash_matches;
                                             if valid && flush_ok {
                                                 let mut ack = vec![27u8];
                                                 ack.extend_from_slice(&transfer_id.to_be_bytes());
-                                                let _ = write_stream_input.send(ack);
+                                                if let Err(error) = write_stream_input.send(ack) {
+                                                    eprintln!("[FILE RX COMPLETE_ACK] direction=A->B transfer_id={} success=false reason=\"{}\"", transfer_id, error);
+                                                } else {
+                                                    println!("[FILE RX COMPLETE_ACK] direction=A->B transfer_id={} success=true", transfer_id);
+                                                }
                                                 println!("[FILE RX END] direction=A->B transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
                                             } else {
                                                 send_file_error(transfer_id, "File size or SHA-256 verification failed");
@@ -1336,7 +1581,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         }
 
                                         99 => {
-                                            println!("[Agent] Viewer disconnected command received.");
+                                            println!("[SESSION DISCONNECT] Received TYPE 99 from relay; terminating active session.");
                                             is_conn_read.store(false, Ordering::SeqCst);
                                             break;
                                         }
@@ -1402,6 +1647,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 println!("[Capture] {} monitor(s) detected.", screens.len());
 
                                 let mut next_frame_time = Instant::now() + Duration::from_micros(FRAME_INTERVAL_MICROS);
+                                let mut captured_frames = 0u64;
+                                let mut last_capture_log = Instant::now();
 
                                 while is_conn_capture.load(Ordering::SeqCst) {
                                     let current_idx = active_idx_capture.load(Ordering::SeqCst);
@@ -1433,6 +1680,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     width: source_width,
                                                     height: source_height,
                                                     raw_pixels: raw,
+                                                    captured_at_ms: current_time_millis(),
                                                 });
                                             }
                                         }
@@ -1443,6 +1691,18 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
 
                                     if let Some(frame) = captured_frame {
+                                        captured_frames += 1;
+                                        if last_capture_log.elapsed() >= Duration::from_secs(1) {
+                                            println!(
+                                                "[VIDEO CAPTURE] frames={} captured_at_ms={} source={}x{}",
+                                                captured_frames,
+                                                frame.captured_at_ms,
+                                                frame.width,
+                                                frame.height
+                                            );
+                                            captured_frames = 0;
+                                            last_capture_log = Instant::now();
+                                        }
                                         let (lock, cvar) = &*shared_frame_cap;
                                         if let Ok(mut shared) = lock.lock() {
                                             *shared = Some(frame);
@@ -1471,6 +1731,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let mut hw_encoder: Option<HardwareH264Encoder> = None;
                             let mut current_enc_width: u32 = 0;
                             let mut current_enc_height: u32 = 0;
+                            let mut encode_error_count = 0u64;
 
                             while is_conn_write.load(Ordering::SeqCst) {
                                 let frame_opt = {
@@ -1530,7 +1791,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                 let h264_bytes = match encoder.encode_rgba(&frame.raw_pixels, src_width, src_height, is_keyframe_request) {
                                     Ok(bytes) => bytes,
-                                    Err(_) => continue,
+                                    Err(error) => {
+                                        encode_error_count += 1;
+                                        if encode_error_count == 1 || encode_error_count % 60 == 0 {
+                                            eprintln!("[VIDEO ENCODE ERROR] count={} error={}", encode_error_count, error);
+                                        }
+                                        continue;
+                                    }
                                 };
 
                                 if h264_bytes.is_empty() {
@@ -1567,45 +1834,47 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
                                 }
 
-                                if has_idr {
-                                    println!("[H264] IDR GENERATED");
-                                    println!("[H264] NAL TYPES={:?}", nal_types);
-                                    println!("[H264] SENDING KEYFRAME TO VIEWER");
-                                }
+                                let log_video_frame = frame_number <= 5
+                                    || frame_number % (TARGET_FPS as u64) == 0;
+                                if log_video_frame {
+                                    if has_idr {
+                                        println!("[H264] IDR GENERATED");
+                                        println!("[H264] NAL TYPES={:?}", nal_types);
+                                        println!("[H264] SENDING KEYFRAME TO VIEWER");
+                                    }
 
-                                let mut raw_hash = 0u64;
-                                for (idx, &b) in frame.raw_pixels.iter().take(4096).enumerate() {
-                                    raw_hash = raw_hash.wrapping_add((b as u64).wrapping_mul(idx as u64 + 1));
-                                }
-                                let pts = (frame_number as u64) * (1_000_000u64 / (TARGET_FPS as u64));
+                                    let mut raw_hash = 0u64;
+                                    for (idx, &b) in frame.raw_pixels.iter().take(4096).enumerate() {
+                                        raw_hash = raw_hash.wrapping_add((b as u64).wrapping_mul(idx as u64 + 1));
+                                    }
+                                    let pts = (frame_number as u64) * (1_000_000u64 / (TARGET_FPS as u64));
 
-                                println!("[ENCODER]\nframe={}\ninput_bytes={}\ninput_hash={:016x}\noutput_bytes={}\nnal_types={:?}\nsps={}\npps={}\nidr={}\npts={}",
-                                    frame_number,
-                                    frame.raw_pixels.len(),
-                                    raw_hash,
-                                    h264_bytes.len(),
-                                    nal_types,
-                                    has_sps,
-                                    has_pps,
-                                    has_idr,
-                                    pts
-                                );
-                                println!("[VIDEO ENCODE]\nframe={}\nbytes={}\nkeyframe={}\nSPS={}\nPPS={}\nIDR={}",
-                                    frame_number,
-                                    h264_bytes.len(),
-                                    if has_idr { "true" } else { "false" },
-                                    if has_sps { "true" } else { "false" },
-                                    if has_pps { "true" } else { "false" },
-                                    if has_idr { "true" } else { "false" }
-                                );
+                                    println!("[ENCODER]\nframe={}\ninput_bytes={}\ninput_hash={:016x}\noutput_bytes={}\nnal_types={:?}\nsps={}\npps={}\nidr={}\npts={}",
+                                        frame_number,
+                                        frame.raw_pixels.len(),
+                                        raw_hash,
+                                        h264_bytes.len(),
+                                        nal_types,
+                                        has_sps,
+                                        has_pps,
+                                        has_idr,
+                                        pts
+                                    );
+                                    println!("[VIDEO ENCODE]\nframe={}\nbytes={}\nkeyframe={}\nSPS={}\nPPS={}\nIDR={}",
+                                        frame_number,
+                                        h264_bytes.len(),
+                                        if has_idr { "true" } else { "false" },
+                                        if has_sps { "true" } else { "false" },
+                                        if has_pps { "true" } else { "false" },
+                                        if has_idr { "true" } else { "false" }
+                                    );
 
-                                let format_str = if h264_bytes.starts_with(&[0, 0, 0, 1]) || h264_bytes.starts_with(&[0, 0, 1]) {
-                                    "AnnexB"
-                                } else {
-                                    "AVC"
-                                };
-                                println!("[AGENT H264]\nencoder=hardware\nformat={}\nsize={}\nNAL types={:?}", format_str, h264_bytes.len(), nal_types);
-                                if frame_number <= 5 || (frame_number % (TARGET_FPS as u64) == 0) {
+                                    let format_str = if h264_bytes.starts_with(&[0, 0, 0, 1]) || h264_bytes.starts_with(&[0, 0, 1]) {
+                                        "AnnexB"
+                                    } else {
+                                        "AVC"
+                                    };
+                                    println!("[AGENT H264]\nencoder=hardware\nformat={}\nsize={}\nNAL types={:?}", format_str, h264_bytes.len(), nal_types);
                                     println!("[VIDEO TX]");
                                     println!("capture = YES");
                                     println!("encoded = YES");
@@ -1615,21 +1884,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     println!("keyframe = {}", if has_idr { "YES" } else { "NO" });
                                 }
 
-                                let timestamp_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as u64;
-
                                 let packet_size = 21 + h264_bytes.len();
                                 let mut packet = Vec::with_capacity(packet_size);
                                 packet.push(13u8);
                                 packet.extend_from_slice(&current_enc_width.to_be_bytes());
                                 packet.extend_from_slice(&current_enc_height.to_be_bytes());
                                 packet.extend_from_slice(&(h264_bytes.len() as u32).to_be_bytes());
-                                packet.extend_from_slice(&timestamp_ms.to_be_bytes());
+                                packet.extend_from_slice(&frame.captured_at_ms.to_be_bytes());
                                 packet.extend_from_slice(&h264_bytes);
 
-                                if frame_number <= 5 || (frame_number % (TARGET_FPS as u64) == 0) {
+                                if log_video_frame {
                                     println!("[VIDEO TX PREP]");
                                     println!("type = 13");
                                     println!("width = {}", current_enc_width);
@@ -1655,11 +1919,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     }
                                 };
                                 
-                                if queue.len() >= 30 {
+                                if queue.len() >= 3 {
                                     queue.clear();
                                     if !has_idr {
                                         video_recovery_capture.store(true, Ordering::Release);
-                                        println!("[VIDEO TX DROP] Queue full, dropped frames, requesting IDR");
+                                        println!("[VIDEO TX DROP] Low-latency queue reached 3 frames; discarded stale frames and requested IDR");
                                         continue;
                                     }
                                 }
@@ -1725,6 +1989,57 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 // ============================================================
 // MAIN
 // ============================================================
+
+#[cfg(test)]
+mod session_feature_tests {
+    use super::{decode_audio_packet, make_file_error_packet, read_next_file_chunk};
+    use std::io::{self, Read};
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "test read failure"))
+        }
+    }
+
+    #[test]
+    fn type_17_audio_packet_decodes_interleaved_samples() {
+        let mut payload = Vec::new();
+        for sample in [0.25f32, 0.25, -0.5, -0.5] {
+            payload.extend_from_slice(&sample.to_le_bytes());
+        }
+        assert_eq!(
+            decode_audio_packet(&payload, 48_000, 2, 48_000).unwrap(),
+            vec![0.25, -0.5]
+        );
+        assert!(decode_audio_packet(&payload[..3], 48_000, 2, 48_000).is_none());
+    }
+
+    #[test]
+    fn file_sender_distinguishes_eof_from_read_failure() {
+        let mut eof_reader = io::Cursor::new(Vec::<u8>::new());
+        assert_eq!(read_next_file_chunk(&mut eof_reader, &mut [0u8; 8]).unwrap(), None);
+
+        let mut failing_reader = FailingReader;
+        assert_eq!(
+            read_next_file_chunk(&mut failing_reader, &mut [0u8; 8])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn file_read_error_uses_existing_type_24_frame() {
+        let packet = make_file_error_packet(0x0102_0304_0506_0708, "read failed");
+        assert_eq!(packet[0], 24);
+        assert_eq!(&packet[1..9], &0x0102_0304_0506_0708u64.to_be_bytes());
+        assert_eq!(&packet[9..11], &[0, 0]);
+        assert_eq!(u16::from_be_bytes([packet[11], packet[12]]), 11);
+        assert_eq!(&packet[13..], b"read failed");
+    }
+}
 
 fn main() {
     // STARTUP TRACE: Log instantly before anything can fail!

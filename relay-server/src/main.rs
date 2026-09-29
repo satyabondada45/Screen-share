@@ -64,6 +64,22 @@ struct ViewerSessionRequest {
 type ClientMap = Arc<Mutex<HashMap<String, (u64, Sender<ViewerSessionRequest>)>>>;
 
 const RELAY_ADDR: &str = "0.0.0.0:9001";
+const CHAT_TYPING_PACKET_TYPE: u8 = 18;
+const REVERSE_REQUEST_PACKET_TYPE: u8 = 30;
+const REVERSE_ACK_PACKET_TYPE: u8 = 31;
+
+fn chat_typing_packet(state: u8) -> Option<Vec<u8>> {
+    (state <= 1).then(|| vec![CHAT_TYPING_PACKET_TYPE, state])
+}
+
+// TYPE 30 is one byte; TYPE 31 carries one decision byte (0 reject, 1 accept).
+fn reverse_ack_packet(state: u8) -> Option<Vec<u8>> {
+    (state <= 1).then(|| vec![REVERSE_ACK_PACKET_TYPE, state])
+}
+
+fn reverse_request_packet() -> Vec<u8> {
+    vec![REVERSE_REQUEST_PACKET_TYPE]
+}
 
 // ============================================================
 // AUTOSTART & BACKGROUND PERSISTENCE
@@ -276,6 +292,60 @@ fn viewer_to_host_tcp(
 // HOST SESSION RUNNER (WEBSOCKET BRIDGE)
 // ============================================================
 
+const CONTROL_BYTES_PER_TURN: usize = 256 * 1024;
+const CONTROL_PACKETS_PER_TURN: usize = 64;
+
+fn take_control_burst(receiver: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut packets = Vec::new();
+    let mut bytes_sent = 0;
+    while packets.len() < CONTROL_PACKETS_PER_TURN
+        && (bytes_sent < CONTROL_BYTES_PER_TURN || packets.is_empty())
+    {
+        match receiver.try_recv() {
+            Ok(packet) => {
+                bytes_sent += packet.len();
+                packets.push(packet);
+            }
+            Err(_) => break,
+        }
+    }
+    packets
+}
+
+fn read_host_video_packet<R: Read>(reader: &mut R, packet_type: u8) -> std::io::Result<Vec<u8>> {
+    let mut header = [0u8; 20];
+    reader.read_exact(&mut header)?;
+    let width = u32::from_be_bytes(header[0..4].try_into().unwrap());
+    let height = u32::from_be_bytes(header[4..8].try_into().unwrap());
+    let payload_size = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
+    if width == 0 || width > 7680 || height == 0 || height > 4320 || payload_size > 50 * 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid video dimensions or payload size: {width}x{height}, {payload_size} bytes"),
+        ));
+    }
+    let mut packet = Vec::with_capacity(1 + header.len() + payload_size);
+    packet.push(packet_type);
+    packet.extend_from_slice(&header);
+    let payload_start = packet.len();
+    packet.resize(payload_start + payload_size, 0);
+    reader.read_exact(&mut packet[payload_start..])?;
+    Ok(packet)
+}
+
+fn read_host_chat_packet<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut header = [0u8; 3];
+    reader.read_exact(&mut header)?;
+    let payload_size = u16::from_be_bytes([header[1], header[2]]) as usize;
+    let mut packet = Vec::with_capacity(1 + header.len() + payload_size);
+    packet.push(16);
+    packet.extend_from_slice(&header);
+    let payload_start = packet.len();
+    packet.resize(payload_start + payload_size, 0);
+    reader.read_exact(&mut packet[payload_start..])?;
+    Ok(packet)
+}
+
 fn run_websocket_bridge(
     session_id: &str,
     stream: &mut TcpStream,
@@ -317,66 +387,81 @@ fn run_websocket_bridge(
 
         let mut idle_ms = 0;
         while is_active_writer.load(Ordering::SeqCst) {
-            let mut sent_control = false;
-            while let Ok(msg_bytes) = ws_rx_ctrl.try_recv() {
+            let mut did_work = false;
+            for msg_bytes in take_control_burst(&ws_rx_ctrl) {
                 let mut lock = match ws_arc_writer.lock() {
-                    Ok(l) => l,
+                    Ok(lock) => lock,
                     Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
                 };
                 let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
-                if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
-                    eprintln!("[WS CLOSE] component=ws_writer reason=ctrl_send_failed error={:?} device={}", e, session_id_writer);
+                if let Err(error) = lock.send(Message::Binary(msg_bytes)) {
+                    eprintln!("[WS CLOSE] component=ws_writer reason=ctrl_send_failed error={:?} device={}", error, session_id_writer);
                     is_active_writer.store(false, Ordering::SeqCst);
                     break;
                 }
-                sent_control = true;
+                did_work = true;
                 idle_ms = 0;
             }
             if !is_active_writer.load(Ordering::SeqCst) { break; }
-            if sent_control { continue; }
 
-            let mut got_msg = false;
-            match ws_rx_ctrl.recv_timeout(Duration::from_millis(10)) {
+            match ws_rx_vid.try_recv() {
                 Ok(msg_bytes) => {
                     let mut lock = match ws_arc_writer.lock() {
-                        Ok(l) => l,
+                        Ok(lock) => lock,
                         Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
                     };
                     let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
-                    if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
-                        eprintln!("[WS CLOSE] component=ws_writer reason=ctrl_send_failed error={:?} device={}", e, session_id_writer);
+                    if let Err(error) = lock.send(Message::Binary(msg_bytes)) {
+                        eprintln!("[WS CLOSE] component=ws_writer reason=vid_send_failed error={:?} device={}", error, session_id_writer);
                         is_active_writer.store(false, Ordering::SeqCst);
                         break;
                     }
-                    got_msg = true;
+                    did_work = true;
                     idle_ms = 0;
                 }
                 Err(_) => {}
             }
             if !is_active_writer.load(Ordering::SeqCst) { break; }
-            if got_msg { continue; }
 
-            match ws_rx_vid.recv_timeout(Duration::from_millis(10)) {
-                Ok(msg_bytes) => {
-                    let mut lock = match ws_arc_writer.lock() {
-                        Ok(l) => l,
-                        Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
-                    };
-                    let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
-                    if let Err(e) = lock.send(Message::Binary(msg_bytes)) {
-                        eprintln!("[WS CLOSE] component=ws_writer reason=vid_send_failed error={:?} device={}", e, session_id_writer);
-                        is_active_writer.store(false, Ordering::SeqCst);
-                        break;
+            if !did_work {
+                match ws_rx_ctrl.recv_timeout(Duration::from_millis(10)) {
+                    Ok(msg_bytes) => {
+                        let mut lock = match ws_arc_writer.lock() {
+                            Ok(lock) => lock,
+                            Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
+                        };
+                        let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+                        if let Err(error) = lock.send(Message::Binary(msg_bytes)) {
+                            eprintln!("[WS CLOSE] component=ws_writer reason=ctrl_send_failed error={:?} device={}", error, session_id_writer);
+                            is_active_writer.store(false, Ordering::SeqCst);
+                            break;
+                        }
+                        did_work = true;
+                        idle_ms = 0;
                     }
-                    got_msg = true;
-                    idle_ms = 0;
+                    Err(_) => {}
                 }
-                Err(_) => {}
+                if !is_active_writer.load(Ordering::SeqCst) { break; }
+                if !did_work {
+                    if let Ok(msg_bytes) = ws_rx_vid.try_recv() {
+                        let mut lock = match ws_arc_writer.lock() {
+                            Ok(lock) => lock,
+                            Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
+                        };
+                        let _ = lock.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
+                        if let Err(error) = lock.send(Message::Binary(msg_bytes)) {
+                            eprintln!("[WS CLOSE] component=ws_writer reason=vid_send_failed error={:?} device={}", error, session_id_writer);
+                            is_active_writer.store(false, Ordering::SeqCst);
+                            break;
+                        }
+                        did_work = true;
+                        idle_ms = 0;
+                    }
+                }
             }
-            if !is_active_writer.load(Ordering::SeqCst) { break; }
-            if got_msg { continue; }
+            if did_work { continue; }
 
-            idle_ms += 20;
+            idle_ms += 10;
             if idle_ms >= 100 {
                 let mut lock = match ws_arc_writer.lock() {
                     Ok(l) => l,
@@ -396,6 +481,7 @@ fn run_websocket_bridge(
     // Host -> WS forwarder thread
     let host_to_ws_handle = thread::spawn(move || {
         println!("[WS LIFECYCLE] host_to_ws thread started for device={}", session_id_for_thread);
+        let mut video_frame_count = 0u64;
         while is_active_reader.load(Ordering::SeqCst) {
             let _ = host_reader.set_read_timeout(Some(Duration::from_millis(200)));
             let mut type_buf = [0u8; 1];
@@ -410,40 +496,24 @@ fn run_websocket_bridge(
 
             match pkt {
                 13 | 15 => {
-                    let mut header = [0u8; 20];
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
-                    if let Err(e) = host_reader.read_exact(&mut header) {
-                        eprintln!("[WS CLOSE] component=host_to_ws reason=video_header_failed error={:?} device={}", e, session_id_for_thread);
-                        break;
+                    let msg = match read_host_video_packet(&mut host_reader, pkt) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            eprintln!("[WS CLOSE] component=host_to_ws reason=video_packet_read_failed error={:?} device={}", e, session_id_for_thread);
+                            break;
+                        }
+                    };
+                    video_frame_count += 1;
+                    if video_frame_count == 1 || video_frame_count % 120 == 0 {
+                        println!("[VIDEO RELAY RX] type={} bytes={} frames={}", pkt, msg.len(), video_frame_count);
                     }
-                    let width  = u32::from_be_bytes(header[0..4].try_into().unwrap());
-                    let height = u32::from_be_bytes(header[4..8].try_into().unwrap());
-                    let psize  = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
-                    if width == 0 || width > 7680 || height == 0 || height > 4320 || psize > 50 * 1024 * 1024 {
-                        eprintln!("[WS CLOSE] component=host_to_ws reason=invalid_video_dims w={} h={} p={} device={}", width, height, psize, session_id_for_thread);
-                        break;
-                    }
-                    let mut payload = vec![0u8; psize];
-                    if let Err(e) = host_reader.read_exact(&mut payload) {
-                        eprintln!("[WS CLOSE] component=host_to_ws reason=video_payload_failed error={:?} device={}", e, session_id_for_thread);
-                        break;
-                    }
-                    println!("[VIDEO RELAY RX]");
-                    println!("type = 13");
-                    println!("bytes = {}", 1 + 20 + psize);
-                    
-                    let mut msg = Vec::with_capacity(1 + 20 + psize);
-                    msg.push(pkt);
-                    msg.extend_from_slice(&header);
-                    msg.extend_from_slice(&payload);
                     let msg_len = msg.len();
                     if ws_tx_vid_fwd.send(msg).is_err() {
                         eprintln!("[WS ERROR] component=host_to_ws reason=vid_channel_closed device={}", session_id_for_thread);
                         break;
-                    } else {
-                        println!("[VIDEO RELAY TX]");
-                        println!("type = 13");
-                        println!("bytes = {}", msg_len);
+                    } else if video_frame_count == 1 || video_frame_count % 120 == 0 {
+                        println!("[VIDEO RELAY TX] type={} bytes={} frames={}", pkt, msg_len, video_frame_count);
                     }
                 }
                 17 => {
@@ -500,23 +570,46 @@ fn run_websocket_bridge(
                     let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 16 => {
-                    let mut hdr = [0u8; 3];
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
-                    if let Err(e) = host_reader.read_exact(&mut hdr) {
-                        eprintln!("[WS CLOSE] component=host_to_ws reason=chat_header_failed error={:?} device={}", e, session_id_for_thread);
+                    let msg = match read_host_chat_packet(&mut host_reader) {
+                        Ok(msg) => msg,
+                        Err(error) => {
+                            eprintln!("[WS CLOSE] component=host_to_ws reason=chat_packet_read_failed error={:?} device={}", error, session_id_for_thread);
+                            break;
+                        }
+                    };
+                    let psize = msg.len() - 4;
+                    let packet_hex = msg.iter()
+                        .map(|byte| format!("{:02x}", byte))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if ws_tx_ctrl_fwd.send(msg).is_err() {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=chat_channel_closed device={}", session_id_for_thread);
                         break;
                     }
-                    let psize = u16::from_be_bytes([hdr[1], hdr[2]]) as usize;
-                    let mut payload = vec![0u8; psize];
-                    if let Err(e) = host_reader.read_exact(&mut payload) {
-                        eprintln!("[WS CLOSE] component=host_to_ws reason=chat_payload_failed error={:?} device={}", e, session_id_for_thread);
+                    println!(
+                        "[CHAT RELAY TRACE] direction=B->A type=16 payload_bytes={} packet_bytes={} bytes_hex=\"{}\"",
+                        psize,
+                        4 + psize,
+                        packet_hex
+                    );
+                }
+                // Type 18 is an isolated START/STOP signal; it never contains chat text.
+                CHAT_TYPING_PACKET_TYPE => {
+                    let mut state = [0u8; 1];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(error) = host_reader.read_exact(&mut state) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=typing_state_failed error={:?} device={}", error, session_id_for_thread);
                         break;
                     }
-                    let mut msg = Vec::with_capacity(3 + psize);
-                    msg.push(16u8);
-                    msg.extend_from_slice(&hdr);
-                    msg.extend_from_slice(&payload);
-                    let _ = ws_tx_ctrl_fwd.send(msg);
+                    let Some(message) = chat_typing_packet(state[0]) else {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=invalid_typing_state state={} device={}", state[0], session_id_for_thread);
+                        continue;
+                    };
+                    if ws_tx_ctrl_fwd.send(message).is_err() {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=typing_channel_closed device={}", session_id_for_thread);
+                        break;
+                    }
                 }
                 20 => {
                     let mut hdr = [0u8; 18];
@@ -587,6 +680,28 @@ fn run_websocket_bridge(
                     msg.extend_from_slice(&hdr);
                     let _ = ws_tx_ctrl_fwd.send(msg);
                 }
+                REVERSE_REQUEST_PACKET_TYPE => {
+                    if ws_tx_ctrl_fwd.send(reverse_request_packet()).is_err() {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=reverse_request_channel_closed device={}", session_id_for_thread);
+                        break;
+                    }
+                }
+                REVERSE_ACK_PACKET_TYPE => {
+                    let mut state = [0u8; 1];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(error) = host_reader.read_exact(&mut state) {
+                        eprintln!("[WS CLOSE] component=host_to_ws reason=reverse_ack_read_failed error={:?} device={}", error, session_id_for_thread);
+                        break;
+                    }
+                    let Some(message) = reverse_ack_packet(state[0]) else {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=invalid_reverse_ack state={} device={}", state[0], session_id_for_thread);
+                        continue;
+                    };
+                    if ws_tx_ctrl_fwd.send(message).is_err() {
+                        eprintln!("[WS ERROR] component=host_to_ws reason=reverse_ack_channel_closed device={}", session_id_for_thread);
+                        break;
+                    }
+                }
                 99 => {
                     println!("[WS CLOSE] component=host_to_ws reason=host_sent_99 device={}", session_id_for_thread);
                     break;
@@ -628,6 +743,7 @@ fn run_websocket_bridge(
     });
 
     // WebSocket -> Host (control input loop)
+    let mut mouse_move_count = 0u64;
     loop {
         if !is_active.load(Ordering::SeqCst) {
             println!("[WS CLOSE] component=ws_to_host reason=active_flag_false device={}", session_id);
@@ -648,26 +764,33 @@ fn run_websocket_bridge(
 
         match msg_res {
             Ok(Message::Binary(data)) => {
-                if !data.is_empty() {
-                    let type_name = match data[0] {
+                let (type_name, log_control_packet) = if let Some(&packet_type) = data.first() {
+                    let type_name = match packet_type {
                         0 => "MOUSE_MOVE", 1 | 3 | 7 => "MOUSE_DOWN", 2 | 4 | 8 => "MOUSE_UP",
                         5 => "KEY_DOWN", 6 => "KEY_UP", 9 => "MOUSE_WHEEL", _ => "CONTROL",
                     };
-                    println!("[CONTROL RX] type={} bytes={} device={}", data[0], data.len(), session_id);
-                    println!("[RELAY CONTROL RX] {}", type_name);
-                    println!("[CONTROL DEBUG][RELAY RX]\ntype={}\nlength={}", type_name, data.len());
-                }
+                    let log_packet = if packet_type == 0 {
+                        mouse_move_count += 1;
+                        mouse_move_count == 1 || mouse_move_count % 120 == 0
+                    } else {
+                        true
+                    };
+                    if log_packet {
+                        println!("[CONTROL RX] type={} bytes={} device={}", packet_type, data.len(), session_id);
+                        println!("[RELAY CONTROL RX] {}", type_name);
+                        println!("[CONTROL DEBUG][RELAY RX]\ntype={}\nlength={}", type_name, data.len());
+                    }
+                    (type_name, log_packet)
+                } else {
+                    ("CONTROL", false)
+                };
                 // CRITICAL: control write failure is NON-FATAL
                 if !send_all(&mut host_writer, &data) {
                     eprintln!("[WS ERROR] component=ws_to_host reason=control_write_failed \
                         type={} device={}", data.first().copied().unwrap_or(255), session_id);
                     // Non-fatal: video stream continues
                 } else {
-                    if !data.is_empty() {
-                        let type_name = match data[0] {
-                            0 => "MOUSE_MOVE", 1 | 3 | 7 => "MOUSE_DOWN", 2 | 4 | 8 => "MOUSE_UP",
-                            5 => "KEY_DOWN", 6 => "KEY_UP", 9 => "MOUSE_WHEEL", _ => "CONTROL",
-                        };
+                    if log_control_packet {
                         println!("[CONTROL DEBUG][RELAY -> HOST]\ntype={}\nlength={}", type_name, data.len());
                     }
                 }
@@ -1485,5 +1608,129 @@ fn main() {
                 let _ = stream.shutdown(Shutdown::Both);
             }
         }
+
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        chat_typing_packet, read_host_chat_packet, read_host_video_packet, reverse_ack_packet,
+        reverse_request_packet, take_control_burst, CONTROL_BYTES_PER_TURN,
+    };
+    use std::io::{self, Read};
+    use std::sync::mpsc;
+
+    struct ChunkedReader {
+        bytes: io::Cursor<Vec<u8>>,
+        max_chunk: usize,
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(self.max_chunk);
+            self.bytes.read(&mut buffer[..limit])
+        }
+    }
+
+    fn video_packet(payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![13];
+        packet.extend_from_slice(&1920u32.to_be_bytes());
+        packet.extend_from_slice(&1080u32.to_be_bytes());
+        packet.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        packet.extend_from_slice(&123456789u64.to_be_bytes());
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    fn mixed_stream(video_a: &[u8], chat: &[u8], video_b: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let video_a = video_packet(video_a);
+        let video_b = video_packet(video_b);
+        let mut chat_packet = vec![16, 0];
+        chat_packet.extend_from_slice(&(chat.len() as u16).to_be_bytes());
+        chat_packet.extend_from_slice(chat);
+        let stream = [video_a.clone(), chat_packet.clone(), video_b.clone()].concat();
+        (stream, vec![video_a, chat_packet, video_b])
+    }
+
+    fn parse_video_chat_sequence<R: Read>(reader: &mut R) -> io::Result<Vec<Vec<u8>>> {
+        let mut packets = Vec::new();
+        loop {
+            let mut packet_type = [0u8; 1];
+            match reader.read_exact(&mut packet_type) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error),
+            }
+            let packet = match packet_type[0] {
+                13 | 15 => read_host_video_packet(reader, packet_type[0])?,
+                16 => read_host_chat_packet(reader)?,
+                unexpected => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected packet type {unexpected}"),
+                    ));
+                }
+            };
+            packets.push(packet);
+        }
+        Ok(packets)
+    }
+
+    #[test]
+    fn video_chat_video_packets_preserve_order_with_coalesced_and_partial_reads() {
+        let (stream, expected) = mixed_stream(b"frame-a", "hello from B".as_bytes(), b"frame-b");
+
+        let mut coalesced = io::Cursor::new(stream.clone());
+        assert_eq!(parse_video_chat_sequence(&mut coalesced).unwrap(), expected);
+
+        let mut fragmented = ChunkedReader {
+            bytes: io::Cursor::new(stream),
+            max_chunk: 2,
+        };
+        assert_eq!(parse_video_chat_sequence(&mut fragmented).unwrap(), expected);
+    }
+
+    #[test]
+    fn chat_packet_followed_by_video_consumes_exactly_chat_frame() {
+        let (stream, expected) = mixed_stream(b"", "chat".as_bytes(), b"next");
+        let mut reader = ChunkedReader {
+            bytes: io::Cursor::new(stream),
+            max_chunk: 1,
+        };
+        assert_eq!(parse_video_chat_sequence(&mut reader).unwrap(), expected);
+    }
+
+    #[test]
+    fn control_burst_is_bounded_so_video_can_be_serviced() {
+        let (control_tx, control_rx) = mpsc::channel();
+        let (video_tx, video_rx) = mpsc::channel();
+        control_tx.send(vec![1; CONTROL_BYTES_PER_TURN]).unwrap();
+        control_tx.send(vec![2; CONTROL_BYTES_PER_TURN]).unwrap();
+        video_tx.send(vec![99]).unwrap();
+
+        let controls = take_control_burst(&control_rx);
+        assert_eq!(controls.len(), 1);
+        assert_eq!(video_rx.try_recv().unwrap(), vec![99]);
+        assert_eq!(control_rx.try_recv().unwrap(), vec![2; CONTROL_BYTES_PER_TURN]);
+    }
+
+    #[test]
+    fn chat_typing_packets_forward_only_start_or_stop_state() {
+        assert_eq!(chat_typing_packet(1), Some(vec![18, 1]));
+        assert_eq!(chat_typing_packet(0), Some(vec![18, 0]));
+        assert_eq!(chat_typing_packet(2), None);
+    }
+
+    #[test]
+    fn reverse_ack_accepts_only_explicit_decisions() {
+        assert_eq!(reverse_ack_packet(0), Some(vec![31, 0]));
+        assert_eq!(reverse_ack_packet(1), Some(vec![31, 1]));
+        assert_eq!(reverse_ack_packet(2), None);
+    }
+
+    #[test]
+    fn reverse_request_keeps_the_existing_one_byte_type_30_frame() {
+        assert_eq!(reverse_request_packet(), vec![30]);
     }
 }

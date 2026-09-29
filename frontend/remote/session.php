@@ -444,6 +444,18 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             background: white;
         }
 
+        .chat-typing {
+            display: none;
+            padding: 0 12px 8px;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            font-style: italic;
+        }
+
+        .chat-typing.visible {
+            display: block;
+        }
+
         .msg {
             padding: 8px 12px;
             border-radius: 8px;
@@ -568,6 +580,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     </svg>
                     Chat
                 </button>
+                <button class="btn" id="audioBtn" type="button">Listen Audio</button>
+                <button class="btn" id="micBtn" type="button">Mic Off</button>
                 <button class="btn" id="fileBtn" onclick="document.getElementById('fileUploadInput').click()">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
@@ -716,9 +730,22 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 <span class="chat-close" id="chatClose">&times;</span>
             </div>
             <div class="chat-messages" id="chatMessages"></div>
+            <div class="chat-typing" id="chatTypingIndicator" aria-live="polite">Remote user is typing…</div>
             <div class="chat-input">
                 <input type="text" id="chatInput" placeholder="Type a message..." autocomplete="off">
                 <button type="button" id="sendChatBtn">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="reversePermissionDialog" role="dialog" aria-modal="true" aria-labelledby="reversePermissionTitle"
+        style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
+        <div style="width:min(420px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
+            <h2 id="reversePermissionTitle" style="margin:0 0 10px;font-size:1.1rem;">Reverse control request</h2>
+            <p style="margin:0 0 20px;color:#4b5563;">Remote device is requesting control. This build can exchange permission messages, but cannot hand off the active video/control roles.</p>
+            <div style="display:flex;justify-content:flex-end;gap:10px;">
+                <button type="button" id="reverseRejectBtn" class="btn">Reject</button>
+                <button type="button" id="reverseAcceptBtn" class="btn btn-primary">Accept</button>
             </div>
         </div>
     </div>
@@ -777,7 +804,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let videoDecodeBusy = false;
 
         let videoDecoder = null;
-        const MAX_DECODER_QUEUE = 30;
+        const MAX_DECODER_QUEUE = 12;
         const MAX_RX_BUFFER_BYTES = 12 * 1024 * 1024;
         const videoTimingByTimestamp = new Map();
         let lastLatencyLogAt = 0;
@@ -791,6 +818,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let nextAudioTime = 0;
 
         let isAudioEnabled = false;
+        let microphoneStream = null;
+        let microphoneContext = null;
+        let microphoneSource = null;
+        let microphoneProcessor = null;
 
 
         /* RECORDING */
@@ -816,6 +847,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         const audioBtn =
             document.getElementById("audioBtn");
 
+        const micBtn =
+            document.getElementById("micBtn");
+
         const chatBtn =
             document.getElementById("chatBtn");
 
@@ -839,6 +873,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
         const chatMessages =
             document.getElementById("chatMessages");
+        const chatHistory = [];
+        let nextChatMessageId = 0;
+        let chatPacketDiagnosticLogged = false;
+        let localChatTyping = false;
+        let remoteChatTyping = false;
+        let chatTypingIdleTimer = null;
 
         const dropOverlay =
             document.getElementById("dropOverlay");
@@ -918,31 +958,97 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 chatPanel.classList.contains("open")
             ) {
 
+                renderChatHistory();
+                renderRemoteChatTyping();
                 setTimeout(
                     () => chatInput.focus(),
                     100
                 );
-
+            } else {
+                stopLocalChatTyping();
             }
 
         }
 
+        function renderChatMessage(message) {
+            const div = document.createElement("div");
+            div.className = "msg " + message.type;
+            div.dataset.messageId = String(message.id);
+            div.textContent = message.text;
+            chatMessages.appendChild(div);
+        }
+
+        function renderChatHistory() {
+            chatMessages.replaceChildren();
+            for (const message of chatHistory) {
+                renderChatMessage(message);
+            }
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
 
         function appendMessage(type, text) {
+            const message = {
+                id: ++nextChatMessageId,
+                type,
+                text
+            };
+            chatHistory.push(message);
+            if (chatHistory.length > 500) {
+                chatHistory.shift();
+                chatMessages.firstElementChild?.remove();
+            }
+            if (chatPanel.classList.contains("open")) {
+                renderChatMessage(message);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        }
 
-            const div =
-                document.createElement("div");
+        window.addEventListener("chat_message_received", event => {
+            console.info(`[CHAT UI] direction=B->A event_received=true panel_open=${chatPanel.classList.contains("open")} characters=${event.detail.text.length}`);
+            appendMessage("recv", event.detail.text);
+        });
 
-            div.className =
-                "msg " + type;
+        function renderRemoteChatTyping() {
+            document.getElementById("chatTypingIndicator")
+                ?.classList.toggle("visible", remoteChatTyping && chatPanel.classList.contains("open"));
+        }
 
-            div.textContent = text;
+        function sendChatTyping(typing) {
+            if (localChatTyping === typing) return;
+            if (!isSocketOpen()) {
+                localChatTyping = false;
+                return;
+            }
+            try {
+                ws.send(new Uint8Array([18, typing ? 1 : 0]));
+                localChatTyping = typing;
+            } catch (error) {
+                localChatTyping = false;
+                console.error("[CHAT TYPING] Send failed:", error);
+            }
+        }
 
-            chatMessages.appendChild(div);
+        function stopLocalChatTyping() {
+            if (chatTypingIdleTimer) {
+                clearTimeout(chatTypingIdleTimer);
+                chatTypingIdleTimer = null;
+            }
+            sendChatTyping(false);
+        }
 
-            chatMessages.scrollTop =
-                chatMessages.scrollHeight;
+        function updateLocalChatTyping() {
+            if (!chatInput.value.trim()) {
+                stopLocalChatTyping();
+                return;
+            }
+            sendChatTyping(true);
+            if (chatTypingIdleTimer) clearTimeout(chatTypingIdleTimer);
+            chatTypingIdleTimer = setTimeout(stopLocalChatTyping, 900);
+        }
 
+        function setRemoteChatTyping(typing) {
+            remoteChatTyping = typing;
+            renderRemoteChatTyping();
         }
 
 
@@ -956,6 +1062,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 return;
 
             }
+
+            stopLocalChatTyping();
 
             if (!isSocketOpen()) {
 
@@ -998,8 +1106,21 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             );
 
             try {
-
+                console.info(
+                    `[CHAT SEND START] time=${Date.now()} bytes=${msgBytes.length} ` +
+                    `videoPackets=${streamStats.received_packets} decodedFrames=${browserPerf.decodedFrames} ` +
+                    `renderedFrames=${browserPerf.renderedFrames} lastVideoAt=${videoDiagnostics.lastPacketAt || "none"} ` +
+                    `lastDecodedAt=${videoDiagnostics.lastDecodedAt || "none"} ` +
+                    `lastRenderedAt=${videoDiagnostics.lastRenderedAt || "none"} ` +
+                    `receiveLoopAlive=${ws.readyState === WebSocket.OPEN} ` +
+                    `parserBufferBytes=${wsRxBuffer.length}`
+                );
                 ws.send(pkt);
+                chatVideoSnapshot = {
+                    sentAt: Date.now(),
+                    packetCountBefore: streamStats.received_packets
+                };
+                console.info(`[CHAT TYPE 16 SENT] bytes=${pkt.length} payloadBytes=${msgBytes.length}`);
 
                 appendMessage(
                     "sent",
@@ -1089,6 +1210,91 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
             }
 
+        }
+
+        async function toggleMicrophone() {
+            if (microphoneStream) {
+                stopMicrophone();
+                return;
+            }
+            if (!isSocketOpen()) {
+                console.error("[MIC] Cannot enable microphone without an active session.");
+                return;
+            }
+            try {
+                microphoneStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { channelCount: 1 },
+                    video: false
+                });
+                microphoneContext = new (window.AudioContext || window.webkitAudioContext)();
+                await microphoneContext.resume();
+                microphoneSource = microphoneContext.createMediaStreamSource(microphoneStream);
+                microphoneProcessor = microphoneContext.createScriptProcessor(2048, 1, 1);
+                const silentOutput = microphoneContext.createGain();
+                silentOutput.gain.value = 0;
+                microphoneProcessor.onaudioprocess = event => {
+                    if (!microphoneStream || !isSocketOpen()) return;
+                    const input = event.inputBuffer.getChannelData(0);
+                    const bytes = input.length * 4;
+                    const packet = new Uint8Array(11 + bytes);
+                    const view = new DataView(packet.buffer);
+                    packet[0] = 17;
+                    view.setUint32(1, bytes, false);
+                    view.setUint32(5, microphoneContext.sampleRate, false);
+                    view.setUint16(9, 1, false);
+                    for (let index = 0; index < input.length; index++) {
+                        view.setFloat32(11 + index * 4, input[index], true);
+                    }
+                    ws.send(packet);
+                };
+                microphoneSource.connect(microphoneProcessor);
+                microphoneProcessor.connect(silentOutput);
+                silentOutput.connect(microphoneContext.destination);
+                micBtn.textContent = "Mic On";
+                console.log("[MIC] TYPE 17 microphone transmission enabled.");
+            } catch (error) {
+                stopMicrophone();
+                console.error("[MIC] Failed to enable microphone:", error);
+            }
+        }
+
+        function stopMicrophone() {
+            if (microphoneProcessor) {
+                microphoneProcessor.onaudioprocess = null;
+                microphoneProcessor.disconnect();
+                microphoneProcessor = null;
+            }
+            if (microphoneSource) {
+                microphoneSource.disconnect();
+                microphoneSource = null;
+            }
+            if (microphoneStream) {
+                microphoneStream.getTracks().forEach(track => track.stop());
+                microphoneStream = null;
+            }
+            if (microphoneContext) {
+                void microphoneContext.close();
+                microphoneContext = null;
+            }
+            if (micBtn) micBtn.textContent = "Mic Off";
+        }
+
+        let reverseRequestPending = false;
+
+        function receiveReverseRequest() {
+            if (reverseRequestPending) return;
+            reverseRequestPending = true;
+            document.getElementById("reversePermissionDialog").style.display = "flex";
+        }
+
+        function answerReverseRequest(accepted) {
+            if (!reverseRequestPending || !isSocketOpen()) return;
+            ws.send(new Uint8Array([31, accepted ? 1 : 0]));
+            reverseRequestPending = false;
+            document.getElementById("reversePermissionDialog").style.display = "none";
+            if (accepted) {
+                console.error("[REVERSE] Permission was acknowledged, but this client session has no in-place role/video ownership transition; roles remain unchanged.");
+            }
         }
 
 
@@ -1465,6 +1671,16 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             maxWsRxBuffer: 0,
             lastReport: performance.now()
         };
+        const videoDiagnostics = {
+            lastPacketAt: 0,
+            lastPacketType: null,
+            lastPacketLength: 0,
+            lastIdrAt: 0,
+            lastDecodedAt: 0,
+            lastRenderedAt: 0,
+            lastDecoderError: null
+        };
+        let lastKeyDeltaLogAt = 0;
 
         function recordVideoMetrics(now) {
             if (now - browserPerf.lastReport < 1000) {
@@ -1484,7 +1700,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 `renderFPS=${browserPerf.renderWindow} avgDecodeQueue=${browserPerf.queueSamples ? Math.round(browserPerf.queueSum / browserPerf.queueSamples) : 0} ` +
                 `maxDecodeQueue=${browserPerf.maxQueue} wsRxBufferMax=${browserPerf.maxWsRxBuffer} ` +
                 `staleFrames=${browserPerf.staleFramesDiscarded} idrRecovery=${browserPerf.idrRecoveryCount} ` +
-                `currentDecodeQueue=${decoderQueue}`
+                `currentDecodeQueue=${decoderQueue} ` +
+                `lastPacketAgeMs=${videoDiagnostics.lastPacketAt ? Date.now() - videoDiagnostics.lastPacketAt : "n/a"} ` +
+                `lastIdrAgeMs=${videoDiagnostics.lastIdrAt ? Date.now() - videoDiagnostics.lastIdrAt : "n/a"} ` +
+                `lastDecodedAgeMs=${videoDiagnostics.lastDecodedAt ? Date.now() - videoDiagnostics.lastDecodedAt : "n/a"} ` +
+                `lastRenderedAgeMs=${videoDiagnostics.lastRenderedAt ? Date.now() - videoDiagnostics.lastRenderedAt : "n/a"} ` +
+                `chatPending=${chatVideoSnapshot !== null}`
             );
             browserPerf.receiveWindow = 0;
             browserPerf.decodeWindow = 0;
@@ -1512,6 +1733,21 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         function setStreamState(newState) {
             currentStreamState = newState;
             console.log("[STREAM STATE]", newState);
+            if (newState === "WAITING_FOR_KEYFRAME") {
+                console.warn(
+                    `[VIDEO WAIT DIAGNOSTIC] reason=decoder_wait ` +
+                    `lastPacketAt=${videoDiagnostics.lastPacketAt || "none"} ` +
+                    `lastPacketType=${videoDiagnostics.lastPacketType ?? "none"} ` +
+                    `lastPacketLength=${videoDiagnostics.lastPacketLength} ` +
+                    `lastIdrAt=${videoDiagnostics.lastIdrAt || "none"} ` +
+                    `lastDecodedAt=${videoDiagnostics.lastDecodedAt || "none"} ` +
+                    `lastRenderedAt=${videoDiagnostics.lastRenderedAt || "none"} ` +
+                    `receiveLoopAlive=${Boolean(ws && ws.readyState === WebSocket.OPEN)} ` +
+                    `videoQueueSize=${videoDecoder ? videoDecoder.decodeQueueSize : 0} ` +
+                    `decoderError=${videoDiagnostics.lastDecoderError || "none"} ` +
+                    `rxPackets=${streamStats.received_packets} idrPackets=${streamStats.received_idr}`
+                );
+            }
             addActivityLog(`State changed: ${newState}`);
 
             const dot = document.getElementById("headerConnDot");
@@ -1565,6 +1801,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let cachedSPS = null;
         let cachedPPS = null;
         let lastVideoNalInfo = null;
+        let chatVideoSnapshot = null;
 
         function logDecodeErrorDetail(error) {
             console.error(
@@ -1876,6 +2113,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
                 browserPerf.renderedFrames++;
                 browserPerf.renderWindow++;
+                videoDiagnostics.lastRenderedAt = Date.now();
 
                 const renderedAt = performance.now();
                 if (timing) {
@@ -1916,6 +2154,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         }
                         browserPerf.decodedFrames++;
                         browserPerf.decodeWindow++;
+                        videoDiagnostics.lastDecodedAt = Date.now();
                         videoFrameCount++;
                         const outputAt = performance.now();
                         const timing = videoTimingByTimestamp.get(frame.timestamp);
@@ -1951,7 +2190,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         // valid SPS/PPS/IDR keyframe. The host keeps streaming; the viewer stays open.
                         console.error("[BROWSER DECODE ERROR]", error);
                         console.log("[DECODER] decode error");
-                        logDecodeErrorDetail(error);
+                        videoDiagnostics.lastDecoderError = error && error.message ? error.message : String(error);
                         logDecodeErrorDetail(error);
                         if (decoderState !== DecoderState.UNCONFIGURED) {
                             console.warn("[WEBCODECS RECOVER] Decoder error recovered. Resetting decoder. Waiting for next keyframe.");
@@ -2026,6 +2265,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 const bytes = new Uint8Array(buffer);
                 const length = bytes.length;
                 window._rx_count = (window._rx_count || 0) + 1;
+                videoDiagnostics.lastPacketAt = Date.now();
+                videoDiagnostics.lastPacketType = bytes[0] ?? null;
+                videoDiagnostics.lastPacketLength = length;
 
                 const nowMs = performance.now();
                 if (!window.__videoHexLogLast || (nowMs - window.__videoHexLogLast) > 3000) {
@@ -2092,6 +2334,16 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 streamStats.received_packets++;
                 streamStats.received_bytes += actualPayloadSize;
                 browserPerf.rxPackets++;
+                if (chatVideoSnapshot) {
+                    console.info(
+                        `[CHAT VIDEO AFTER SEND] delayMs=${Date.now() - chatVideoSnapshot.sentAt} ` +
+                        `videoPacketsBefore=${chatVideoSnapshot.packetCountBefore} ` +
+                        `videoPacketsAfter=${streamStats.received_packets} ` +
+                        `decodedFrames=${browserPerf.decodedFrames} renderedFrames=${browserPerf.renderedFrames} ` +
+                        `parserBufferBytes=${wsRxBuffer.length}`
+                    );
+                    chatVideoSnapshot = null;
+                }
 
                 const receiveTime = Date.now();
                 const receivedAt = performance.now();
@@ -2153,6 +2405,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 const currentSPS = nals.hasSPS;
                 const currentPPS = nals.hasPPS;
                 const currentIDR = nals.hasIDR;
+                if (currentIDR) {
+                    videoDiagnostics.lastIdrAt = Date.now();
+                }
                 const cachedSPSExists = cachedSPS !== null;
                 const cachedPPSExists = cachedPPS !== null;
 
@@ -2177,7 +2432,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
                 // keyDeltaStr MUST be initialized before any log/reference to it (fixes TDZ ReferenceError).
                 const keyDeltaStr = isKey ? "key" : (classification === "DELTA" ? "delta" : "waiting");
-                console.log('[VIDEO] key/delta =', keyDeltaStr);
+                if (window._rx_count <= 5 || nowMs - lastKeyDeltaLogAt >= 1000) {
+                    console.log('[VIDEO] key/delta =', keyDeltaStr);
+                    lastKeyDeltaLogAt = nowMs;
+                }
 
                 if (window._rx_count <= 5) {
                     console.log(`[VIDEO] NAL types=[${nals.nalTypes.join(',')}]`);
@@ -2452,8 +2710,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
             if (
                 byteLen <= 0 ||
+                byteLen % 4 !== 0 ||
+                byteLen !== buffer.byteLength - 11 ||
                 sampleRate <= 0 ||
-                channels <= 0
+                sampleRate > 192000 ||
+                channels <= 0 ||
+                channels > 32
             ) {
 
                 return;
@@ -2520,7 +2782,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     channels
                 );
 
-            if (frames <= 0) {
+            if (frames <= 0 || floatArray.length % channels !== 0) {
 
                 return;
 
@@ -2594,9 +2856,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         function handleChatPacket(buffer) {
 
             if (buffer.byteLength < 4) {
-
+                console.error(`[CHAT RX FRAMING ERROR] type=16 packet_bytes=${buffer.byteLength} expected_min=4`);
                 return;
-
             }
 
             const view =
@@ -2608,13 +2869,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 ) |
                 view.getUint8(3);
 
-            if (
-                4 + len >
-                buffer.byteLength
-            ) {
-
+            const payloadEnd = 4 + len;
+            if (payloadEnd !== buffer.byteLength) {
+                console.error(`[CHAT RX FRAMING ERROR] type=16 declared_payload_len=${len} consumed_bytes=${payloadEnd} actual_packet_bytes=${buffer.byteLength} payload_start=4 payload_end=${payloadEnd}`);
                 return;
-
             }
 
             const msgBytes =
@@ -2624,25 +2882,31 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     len
                 );
 
-            const text =
-                new TextDecoder().decode(
-                    msgBytes
-                );
-
-            appendMessage(
-                "recv",
-                text
-            );
-
-            if (
-                !chatPanel.classList.contains(
-                    "open"
-                )
-            ) {
-
-                toggleChat();
-
+            if (!chatPacketDiagnosticLogged) {
+                const payloadPrefixHex = Array.from(msgBytes.slice(0, 64))
+                    .map(byte => byte.toString(16).padStart(2, "0"))
+                    .join(" ");
+                console.info(`[CHAT RX TRACE] type=16 declared_payload_len=${len} consumed_bytes=${payloadEnd} payload_start=4 payload_end=${payloadEnd} payload_bytes=${msgBytes.length} payload_prefix_hex="${payloadPrefixHex}"`);
+                chatPacketDiagnosticLogged = true;
             }
+            const packetHex = Array.from(new Uint8Array(buffer))
+                .map(byte => byte.toString(16).padStart(2, "0"))
+                .join(" ");
+            console.info(`[CHAT RX EXACT] type=16 packet_bytes=${buffer.byteLength} payload_bytes=${len} bytes_hex="${packetHex}"`);
+            let text;
+            try {
+                text = new TextDecoder("utf-8", { fatal: true }).decode(msgBytes);
+            } catch (error) {
+                console.error(`[CHAT RX UTF8 ERROR] type=16 payload_len=${len} message=${error.message}`);
+                return;
+            }
+
+            console.info(`[CHAT RX] direction=B->A type=16 payload_bytes=${len} characters=${text.length}`);
+            queueMicrotask(() => {
+                window.dispatchEvent(new CustomEvent("chat_message_received", {
+                    detail: { text }
+                }));
+            });
 
         }
 
@@ -2763,7 +3027,40 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
                         handleChatPacket(packetBuffer);
+                        const nextPacketType = wsRxBuffer[totalPacketSize];
+                        console.info(
+                            `[WS DISPATCH] type=16 declared_bytes=${totalPacketSize} consumed_bytes=${totalPacketSize} ` +
+                            `buffer_before=${bufferLen} buffer_after=${bufferLen - totalPacketSize} ` +
+                            `next_packet_type=${nextPacketType ?? "pending"}`
+                        );
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
+                        continue;
+                    }
+                    else if (type === 18) {
+                        if (bufferLen < 2) return;
+                        const typingState = wsRxBuffer[1];
+                        if (typingState > 1) {
+                            console.error(`[CHAT TYPING RX] Invalid type 18 state=${typingState}`);
+                        } else {
+                            setRemoteChatTyping(typingState === 1);
+                        }
+                        wsRxBuffer = wsRxBuffer.subarray(2);
+                        continue;
+                    }
+                    else if (type === 30) {
+                        receiveReverseRequest();
+                        wsRxBuffer = wsRxBuffer.subarray(1);
+                        continue;
+                    }
+                    else if (type === 31) {
+                        if (bufferLen < 2) return;
+                        const decision = wsRxBuffer[1];
+                        if (decision > 1) {
+                            console.error(`[REVERSE] Invalid TYPE 31 decision=${decision}`);
+                        } else {
+                            console.log(`[REVERSE] Permission response received: ${decision === 1 ? "accepted" : "rejected"}`);
+                        }
+                        wsRxBuffer = wsRxBuffer.subarray(2);
                         continue;
                     }
                     else if (type === 1) {
@@ -2812,7 +3109,11 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
                         if (typeof handleFilePacket === 'function') {
-                            await handleFilePacket(packetBuffer);
+                            try {
+                                await handleFilePacket(packetBuffer);
+                            } catch (error) {
+                                console.error(`[FILE RX] Packet handler failed for type ${type}:`, error);
+                            }
                         }
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
                         continue;
@@ -2938,6 +3239,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             };
 
             ws.onclose = function (event) {
+                stopMicrophone();
+                stopLocalChatTyping();
+                setRemoteChatTyping(false);
                 const closer = event.wasClean ? "BROWSER (local close)" : "REMOTE (relay/agent)";
                 console.log(`[AUTH DEBUG] WebSocket CLOSED\ncode: ${event.code}\nreason: ${event.reason || 'none'}\nwasClean: ${event.wasClean}\ninitiatedBy: ${closer}\npoint: ws.onclose handler`);
                 console.log("[WS] Closed:", event.code, event.reason);
@@ -3059,32 +3363,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             startRenderLoop();
 
 
-            let targetUrl = WS_URL;
-            try {
-                const cleanId = String(DEVICE_ID).replace(/[^0-9a-zA-Z_\-]/g, '');
-                const discRes = await fetch(`http://127.0.0.1:49182/discover?target=${cleanId}`, { method: 'GET' });
-                if (discRes.ok) {
-                    const discJson = await discRes.json();
-                    if (discJson.status === "found" && discJson.ip && discJson.port) {
-                        targetUrl = `ws://${discJson.ip}:${discJson.port}`;
-                        console.log("[DIRECT] Discovered local agent at " + targetUrl);
-                    }
-                }
-            } catch (e) {
-                console.log("[DIRECT] Local agent not running or discovery failed.", e);
-            }
-
-            if (targetUrl !== WS_URL) {
-                setHud("DIRECT P2P CONNECTING...");
-                // Add a small HUD indicator for Direct connection
-                const resEl = document.getElementById("resDisplay");
-                if (resEl) {
-                    resEl.innerHTML += " <span style='color: var(--online); font-weight: bold;'>[DIRECT]</span>";
-                }
-            }
-
-            directConnection = targetUrl !== WS_URL;
-            connectWebSocket(targetUrl, directConnection);
+            connectWebSocket(WS_URL, false);
             return;
 
 
@@ -3156,6 +3435,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
         function stopWebStream() {
             isStreaming = false;
+            stopLocalChatTyping();
+            setRemoteChatTyping(false);
             stopRenderLoop();
             videoDecodeBusy = false;
             safeCloseImage();
@@ -3301,7 +3582,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 outgoingFileResponses.set(transferId, type => {
                     clearTimeout(timer);
                     if (type === expectedType) resolve(type);
-                    else reject(new Error(type === 25 ? "The receiver rejected the file." : `Unexpected file response: ${type}`));
+                    else if (type === 25) reject(new Error("The receiver rejected the file."));
+                    else reject(new Error(outgoingFileErrors.get(transferId) || `Unexpected file response: ${type}`));
                 });
             });
         }
@@ -3352,6 +3634,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
         async function handleFilePacket(buffer) {
             const bytes = new Uint8Array(buffer);
+            if (bytes.length < 9) {
+                console.error(`[FILE RX FRAMING ERROR] packet_bytes=${bytes.length} expected_min=9`);
+                return;
+            }
             const type = bytes[0];
             const view = new DataView(buffer);
             const transferId = view.getBigUint64(1, false).toString();
@@ -3371,8 +3657,18 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             }
 
             if (type === 20) {
+                if (bytes.length < 19) {
+                    console.error(`[FILE RX FRAMING ERROR] type=20 packet_bytes=${bytes.length} expected_min=19`);
+                    sendFileControl(25, transferId);
+                    return;
+                }
                 const fileSize = view.getBigUint64(9, false);
                 const nameLen = view.getUint16(17, false);
+                if (bytes.length !== 19 + nameLen || fileSize > BigInt(Number.MAX_SAFE_INTEGER)) {
+                    console.error(`[FILE RX FRAMING ERROR] type=20 packet_bytes=${bytes.length} filename_len=${nameLen} size=${fileSize}`);
+                    sendFileControl(25, transferId);
+                    return;
+                }
                 const nameBytes = bytes.subarray(19, 19 + nameLen);
                 const filename = new TextDecoder().decode(nameBytes);
 
@@ -3393,15 +3689,40 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 updateTransferUI(transferId, 0, "Receiving...");
                 sendFileControl(26, transferId);
             } else if (type === 21) {
-                if (!incomingFiles[transferId]) return;
+                if (bytes.length < 17) {
+                    console.error(`[FILE RX FRAMING ERROR] type=21 packet_bytes=${bytes.length} expected_min=17`);
+                    return;
+                }
                 const chunkLen = view.getUint32(13, false);
-                const payload = bytes.slice(17, 17 + chunkLen);
-                incomingFiles[transferId].chunks.push(payload);
-                incomingFiles[transferId].receivedBytes += chunkLen;
+                if (chunkLen > 10 * 1024 * 1024 || bytes.length !== 17 + chunkLen) {
+                    console.error(`[FILE RX FRAMING ERROR] type=21 packet_bytes=${bytes.length} declared_chunk_len=${chunkLen}`);
+                    sendFileError(transferId, "Invalid file chunk framing");
+                    delete incomingFiles[transferId];
+                    return;
+                }
+                if (!incomingFiles[transferId]) return;
+                const incoming = incomingFiles[transferId];
+                if (incoming.receivedBytes + chunkLen > incoming.size) {
+                    sendFileError(transferId, "Received more data than the offered file size");
+                    updateTransferUI(transferId, 0, "Verification failed");
+                    delete incomingFiles[transferId];
+                    return;
+                }
+                const payload = bytes.slice(17);
+                incoming.chunks.push(payload);
+                incoming.receivedBytes += chunkLen;
 
-                const pct = Math.floor((incomingFiles[transferId].receivedBytes / incomingFiles[transferId].size) * 100);
+                const pct = incoming.size === 0
+                    ? 0
+                    : Math.floor((incoming.receivedBytes / incoming.size) * 100);
                 updateTransferUI(transferId, pct, "Receiving...");
             } else if (type === 22) {
+                if (bytes.length !== 49) {
+                    console.error(`[FILE RX FRAMING ERROR] type=22 packet_bytes=${bytes.length} expected=49`);
+                    sendFileError(transferId, "Invalid file completion framing");
+                    delete incomingFiles[transferId];
+                    return;
+                }
                 if (!incomingFiles[transferId]) return;
                 const incoming = incomingFiles[transferId];
                 const finalSize = Number(view.getBigUint64(9, false));
@@ -3465,10 +3786,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const transferIdStr = new DataView(transferIdBytes.buffer).getBigUint64(0, false).toString();
             outgoingFileErrors.delete(transferIdStr);
             outgoingFileIds.add(transferIdStr);
+            let offerSent = false;
+            let acceptedByReceiver = false;
 
             try {
             addTransferUI(transferIdStr, file.name, true);
-            updateTransferUI(transferIdStr, 0, "Sending...");
+            updateTransferUI(transferIdStr, 0, "Waiting for receiver...");
 
             // TYPE 20: 1 + 8 + 8 + 2 + nameBytes.length = 19 + nameBytes.length
             const metaPkt = new Uint8Array(19 + nameBytes.length);
@@ -3480,7 +3803,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             metaPkt.set(nameBytes, 19);
             const accepted = waitForFileResponse(transferIdStr, 26);
             ws.send(metaPkt);
+            offerSent = true;
+            console.info(`[FILE TX OFFER] direction=A->B transfer_id=${transferIdStr} filename=${JSON.stringify(file.name)} total_bytes=${file.size}`);
             await accepted;
+            acceptedByReceiver = true;
+            console.info(`[FILE TX ACCEPT] direction=A->B transfer_id=${transferIdStr}`);
+            updateTransferUI(transferIdStr, 0, "Sending...");
 
             // Calculate Hash
             const hashBuffer = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
@@ -3490,6 +3818,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const chunkSize = 256 * 1024; // 256 KB
             let offset = 0;
             let chunkIndex = 0;
+            console.info(`[FILE TX START] direction=A->B transfer_id=${transferIdStr} chunk_size=${chunkSize}`);
 
             while (offset < file.size) {
                 if (outgoingFileErrors.has(transferIdStr)) {
@@ -3539,9 +3868,28 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             }
             const completed = waitForFileResponse(transferIdStr, 27);
             ws.send(endPkt);
+            console.info(`[FILE TX END] direction=A->B transfer_id=${transferIdStr} chunks=${chunkIndex} total_bytes=${offset} sha256=${Array.from(hashBytes, byte => byte.toString(16).padStart(2, "0")).join("")}`);
             await completed;
+            console.info(`[FILE TX COMPLETE_ACK] direction=A->B transfer_id=${transferIdStr}`);
             updateTransferUI(transferIdStr, 100, "Complete");
             document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#28a745";
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (isSocketOpen() && offerSent) {
+                    try {
+                        if (acceptedByReceiver) {
+                            sendFileError(transferIdStr, message);
+                        } else {
+                            sendFileControl(23, transferIdStr);
+                        }
+                    } catch (signalError) {
+                        console.error(`[FILE] Failed to signal transfer failure for ${transferIdStr}:`, signalError);
+                    }
+                }
+                updateTransferUI(transferIdStr, 0, `Failed: ${message}`);
+                const bar = document.getElementById(`transfer-bar-${transferIdStr}`);
+                if (bar) bar.style.background = "#dc3545";
+                throw error;
             } finally {
                 outgoingFileIds.delete(transferIdStr);
                 outgoingFileErrors.delete(transferIdStr);
@@ -3902,6 +4250,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         if (audioBtn) {
             audioBtn.addEventListener("click", toggleAudio);
         }
+        if (micBtn) {
+            micBtn.addEventListener("click", toggleMicrophone);
+        }
+        document.getElementById("reverseAcceptBtn").addEventListener("click", () => answerReverseRequest(true));
+        document.getElementById("reverseRejectBtn").addEventListener("click", () => answerReverseRequest(false));
+        window.addEventListener("pagehide", stopMicrophone);
 
         if (chatBtn) {
             chatBtn.addEventListener("click", toggleChat);
@@ -3916,6 +4270,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         }
 
         if (chatInput) {
+            chatInput.addEventListener("input", updateLocalChatTyping);
             chatInput.addEventListener("keydown", event => {
                 if (event.key === "Enter") {
                     sendChat();

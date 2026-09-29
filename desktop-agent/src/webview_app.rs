@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tao::{
-    dpi::{LogicalSize, PhysicalPosition},
+    dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
@@ -35,9 +35,6 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
         .with_decorations(false)
         .build(&event_loop)
         .expect("Failed to create DeskStream window");
-    
-    window.set_maximized(true);
-
     // Set the window icon from embedded ICO bytes
     #[cfg(target_os = "windows")]
     {
@@ -46,16 +43,6 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
             let _ = window.set_window_icon(Some(icon));
         }
     }
-
-    // Centre the window on the primary monitor
-    if let Some(monitor) = window.primary_monitor() {
-        let monitor_size = monitor.size();
-        let window_size = window.outer_size();
-        let x = ((monitor_size.width as i32) - (window_size.width as i32)) / 2;
-        let y = ((monitor_size.height as i32) - (window_size.height as i32)) / 2;
-        window.set_outer_position(PhysicalPosition::new(x.max(0), y.max(0)));
-    }
-
     let _webview = WebViewBuilder::new()
         .with_url(&local_url)
         .with_devtools(false)
@@ -161,5 +148,3 @@ fn load_icon_from_ico(ico_bytes: &[u8]) -> Option<tao::window::Icon> {
         None
     }
 }
-
-

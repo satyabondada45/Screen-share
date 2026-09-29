@@ -114,6 +114,23 @@ pub fn start_local_server(system_id: String) -> u16 {
                 continue;
             }
 
+            if path == "/desktop-api/session/disconnect"
+                && request.method() == &tiny_http::Method::Post
+            {
+                match crate::status::send_session_packet(vec![99]) {
+                    Ok(()) => {
+                        println!("[SESSION DISCONNECT] TYPE 99 queued for active relay session.");
+                        let response = Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(503));
+                    }
+                }
+                continue;
+            }
+
             if path == "/desktop-api/session/chat" && request.method() == &tiny_http::Method::Post {
                 let mut body = Vec::new();
                 if let Err(error) = request.as_reader().read_to_end(&mut body) {
@@ -139,14 +156,39 @@ pub fn start_local_server(system_id: String) -> u16 {
                     let _ = request.respond(Response::from_string("message is too long").with_status_code(413));
                     continue;
                 }
-                let mut packet = Vec::with_capacity(3 + message_bytes.len());
+                let mut packet = Vec::with_capacity(4 + message_bytes.len());
                 packet.extend_from_slice(&[16, 0, (message_bytes.len() >> 8) as u8, message_bytes.len() as u8]);
                 packet.extend_from_slice(message_bytes);
+                let packet_hex = packet.iter()
+                    .map(|byte| format!("{:02x}", byte))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 match crate::status::send_session_packet(packet) {
                     Ok(()) => {
-                        let response = Response::from_string("{\"success\":true}")
-                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
-                        let _ = request.respond(response);
+                        match crate::status::push_session_chat(message.to_string(), true) {
+                            Ok(message) => {
+                                println!(
+                                    "[CHAT TX TRACE] direction=B->A type=16 payload_bytes={} packet_bytes={} bytes_hex=\"{}\"",
+                                    message_bytes.len(),
+                                    4 + message_bytes.len(),
+                                    packet_hex
+                                );
+                                let response = Response::from_string(json!({
+                                    "success": true,
+                                    "message": {
+                                        "id": message.id.to_string(),
+                                        "text": message.text,
+                                        "from_local": message.from_local
+                                    }
+                                }).to_string())
+                                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                            Err(error) => {
+                                eprintln!("[CHAT UI] Sent message but failed to retain session history: {}", error);
+                                let _ = request.respond(Response::from_string(error).with_status_code(500));
+                            }
+                        }
                     }
                     Err(error) => {
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
@@ -155,9 +197,177 @@ pub fn start_local_server(system_id: String) -> u16 {
                 continue;
             }
 
-            if path == "/desktop-api/session/messages" && request.method() == &tiny_http::Method::Get {
-                match crate::status::take_session_chat() {
+            if path == "/desktop-api/session/typing" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let typing = match payload.get("typing").and_then(serde_json::Value::as_bool) {
+                    Some(typing) => typing,
+                    None => {
+                        let _ = request.respond(Response::from_string("typing must be a boolean").with_status_code(400));
+                        continue;
+                    }
+                };
+                let state = if typing {
+                    crate::status::CHAT_TYPING_START
+                } else {
+                    crate::status::CHAT_TYPING_STOP
+                };
+                match crate::status::send_session_packet(vec![crate::status::CHAT_TYPING_PACKET_TYPE, state]) {
+                    Ok(()) => {
+                        let _ = request.respond(Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(503));
+                    }
+                }
+                continue;
+            }
+
+            if path == "/desktop-api/session/typing" && request.method() == &tiny_http::Method::Get {
+                let response = Response::from_string(json!({
+                    "typing": crate::status::session_remote_typing()
+                }).to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/session/audio" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let enabled = match payload.get("enabled").and_then(serde_json::Value::as_bool) {
+                    Some(enabled) => enabled,
+                    None => {
+                        let _ = request.respond(Response::from_string("enabled must be a boolean").with_status_code(400));
+                        continue;
+                    }
+                };
+                crate::status::set_session_audio_enabled(enabled);
+                let _ = request.respond(Response::from_string("{\"success\":true}")
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+                continue;
+            }
+
+            if path == "/desktop-api/session/audio" && request.method() == &tiny_http::Method::Get {
+                let response = Response::from_string(json!({
+                    "enabled": crate::status::session_audio_enabled()
+                }).to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/session/reverse" && request.method() == &tiny_http::Method::Post {
+                let _ = crate::status::take_session_reverse_decision();
+                match crate::status::send_session_packet(vec![30]) {
+                    Ok(()) => {
+                        let _ = request.respond(Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(503));
+                    }
+                }
+                continue;
+            }
+
+            if path == "/desktop-api/session/reverse/request" && request.method() == &tiny_http::Method::Get {
+                let response = Response::from_string(json!({
+                    "pending": crate::status::take_session_reverse_request()
+                }).to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/session/reverse/decision" && request.method() == &tiny_http::Method::Get {
+                let response = Response::from_string(json!({
+                    "decision": crate::status::take_session_reverse_decision()
+                }).to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/session/reverse/decision" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let accepted = match payload.get("accepted").and_then(serde_json::Value::as_bool) {
+                    Some(accepted) => accepted,
+                    None => {
+                        let _ = request.respond(Response::from_string("accepted must be a boolean").with_status_code(400));
+                        continue;
+                    }
+                };
+                match crate::status::send_session_packet(vec![31, u8::from(accepted)]) {
+                    Ok(()) => {
+                        let _ = request.respond(Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(503));
+                    }
+                }
+                continue;
+            }
+
+            if path.split('?').next() == Some("/desktop-api/session/messages")
+                && request.method() == &tiny_http::Method::Get
+            {
+                let after_cursor = path
+                    .split_once('?')
+                    .and_then(|(_, query)| query.split('&').find_map(|part| part.strip_prefix("after=")));
+                let after_id = match after_cursor {
+                    Some(value) => match value.parse::<u64>() {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let _ = request.respond(
+                                Response::from_string(format!("invalid chat history cursor: {}", error))
+                                    .with_status_code(400),
+                            );
+                            continue;
+                        }
+                    },
+                    None => 0,
+                };
+                match crate::status::session_chat_since(after_id) {
                     Ok(messages) => {
+                        let messages: Vec<_> = messages.into_iter().map(|message| json!({
+                            "id": message.id.to_string(),
+                            "text": message.text,
+                            "from_local": message.from_local
+                        })).collect();
                         let response = Response::from_string(json!(messages).to_string())
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                         let _ = request.respond(response);
@@ -214,6 +424,7 @@ pub fn start_local_server(system_id: String) -> u16 {
                 };
                 match crate::status::decide_session_file(transfer_id, accepted) {
                     Ok(()) => {
+                        println!("[FILE RX DECISION] direction=A->B transfer_id={} decision={}", transfer_id, if accepted { "ACCEPT" } else { "REJECT" });
                         let response = Response::from_string("{\"success\":true}")
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                         let _ = request.respond(response);

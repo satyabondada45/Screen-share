@@ -1,7 +1,12 @@
 use std::env;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+pub const CHAT_TYPING_PACKET_TYPE: u8 = 18;
+pub const CHAT_TYPING_STOP: u8 = 0;
+pub const CHAT_TYPING_START: u8 = 1;
 
 /// Live, process-wide status published by the agent and consumed by the
 /// Screen Share GUI through the local health server (127.0.0.1:49182).
@@ -21,6 +26,38 @@ pub struct AgentStatus {
     /// True while a real TCP relay session is active (B is streaming to A).
     /// Set by the agent loop when the Type-3 auth completes successfully.
     pub in_session: bool,
+}
+
+pub fn set_session_remote_typing(typing: bool) {
+    SESSION_REMOTE_TYPING.store(typing, Ordering::Release);
+}
+
+pub fn session_remote_typing() -> bool {
+    SESSION_REMOTE_TYPING.load(Ordering::Acquire)
+}
+
+pub fn set_session_audio_enabled(enabled: bool) {
+    SESSION_AUDIO_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn session_audio_enabled() -> bool {
+    SESSION_AUDIO_ENABLED.load(Ordering::Acquire)
+}
+
+pub fn set_session_reverse_request_pending() {
+    SESSION_REVERSE_REQUEST.store(true, Ordering::Release);
+}
+
+pub fn take_session_reverse_request() -> bool {
+    SESSION_REVERSE_REQUEST.swap(false, Ordering::AcqRel)
+}
+
+pub fn set_session_reverse_decision(accepted: bool) {
+    SESSION_REVERSE_DECISION.store(if accepted { 1 } else { 2 }, Ordering::Release);
+}
+
+pub fn take_session_reverse_decision() -> u8 {
+    SESSION_REVERSE_DECISION.swap(0, Ordering::AcqRel)
 }
 
 impl AgentStatus {
@@ -43,10 +80,54 @@ impl AgentStatus {
 
 pub static LIVE: OnceLock<Arc<Mutex<AgentStatus>>> = OnceLock::new();
 static SESSION_WRITER: OnceLock<Mutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::new();
-static SESSION_CHAT_MESSAGES: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+static SESSION_CHAT_HISTORY: OnceLock<Mutex<SessionChatHistory>> = OnceLock::new();
+static SESSION_REMOTE_TYPING: AtomicBool = AtomicBool::new(false);
+static SESSION_AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+static SESSION_REVERSE_REQUEST: AtomicBool = AtomicBool::new(false);
+static SESSION_REVERSE_DECISION: AtomicU8 = AtomicU8::new(0);
 static SESSION_FILE_OFFERS: OnceLock<Mutex<HashMap<u64, SessionFileOffer>>> = OnceLock::new();
 static SESSION_ACCEPTED_FILES: OnceLock<Mutex<HashMap<u64, bool>>> = OnceLock::new();
 static SESSION_FILE_RESPONSES: OnceLock<Mutex<HashMap<u64, mpsc::Sender<u8>>>> = OnceLock::new();
+
+#[derive(Clone)]
+pub struct SessionChatMessage {
+    pub id: u64,
+    pub text: String,
+    pub from_local: bool,
+}
+
+#[derive(Default)]
+struct SessionChatHistory {
+    next_id: u64,
+    messages: VecDeque<SessionChatMessage>,
+}
+
+impl SessionChatHistory {
+    fn push(&mut self, text: String, from_local: bool) -> Result<SessionChatMessage, String> {
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| "chat message id exhausted".to_string())?;
+        let message = SessionChatMessage {
+            id: self.next_id,
+            text,
+            from_local,
+        };
+        if self.messages.len() == 500 {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(message.clone());
+        Ok(message)
+    }
+
+    fn since(&self, after_id: u64) -> Vec<SessionChatMessage> {
+        self.messages
+            .iter()
+            .filter(|message| message.id > after_id)
+            .cloned()
+            .collect()
+    }
+}
 
 #[derive(Clone)]
 pub struct SessionFileOffer {
@@ -63,12 +144,19 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
     *session_writer()
         .lock()
         .map_err(|_| "session writer lock poisoned".to_string())? = writer.clone();
-    if writer.is_some() {
-        SESSION_CHAT_MESSAGES
-            .get_or_init(|| Mutex::new(VecDeque::new()))
+    {
+        let mut history = SESSION_CHAT_HISTORY
+            .get_or_init(|| Mutex::new(SessionChatHistory::default()))
             .lock()
-            .map_err(|_| "chat queue lock poisoned".to_string())?
-            .clear();
+            .map_err(|_| "chat history lock poisoned".to_string())?;
+        history.messages.clear();
+        history.next_id = 0;
+    }
+    SESSION_REMOTE_TYPING.store(false, Ordering::Release);
+    SESSION_AUDIO_ENABLED.store(false, Ordering::Release);
+    SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
+    SESSION_REVERSE_DECISION.store(0, Ordering::Release);
+    if writer.is_some() {
         SESSION_FILE_OFFERS
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
@@ -90,11 +178,6 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
         for sender in pending_responses {
             let _ = sender.send(23);
         }
-        SESSION_CHAT_MESSAGES
-            .get_or_init(|| Mutex::new(VecDeque::new()))
-            .lock()
-            .map_err(|_| "chat queue lock poisoned".to_string())?
-            .clear();
         SESSION_FILE_OFFERS
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
@@ -118,24 +201,20 @@ pub fn send_session_packet(packet: Vec<u8>) -> Result<(), String> {
     writer.send(packet).map_err(|_| "session writer disconnected".to_string())
 }
 
-pub fn push_session_chat(message: String) -> Result<(), String> {
-    let mut messages = SESSION_CHAT_MESSAGES
-        .get_or_init(|| Mutex::new(VecDeque::new()))
+pub fn push_session_chat(message: String, from_local: bool) -> Result<SessionChatMessage, String> {
+    let mut history = SESSION_CHAT_HISTORY
+        .get_or_init(|| Mutex::new(SessionChatHistory::default()))
         .lock()
-        .map_err(|_| "chat queue lock poisoned".to_string())?;
-    if messages.len() == 500 {
-        messages.pop_front();
-    }
-    messages.push_back(message);
-    Ok(())
+        .map_err(|_| "chat history lock poisoned".to_string())?;
+    history.push(message, from_local)
 }
 
-pub fn take_session_chat() -> Result<Vec<String>, String> {
-    SESSION_CHAT_MESSAGES
-        .get_or_init(|| Mutex::new(VecDeque::new()))
+pub fn session_chat_since(after_id: u64) -> Result<Vec<SessionChatMessage>, String> {
+    SESSION_CHAT_HISTORY
+        .get_or_init(|| Mutex::new(SessionChatHistory::default()))
         .lock()
-        .map(|mut messages| messages.drain(..).collect())
-        .map_err(|_| "chat queue lock poisoned".to_string())
+        .map(|history| history.since(after_id))
+        .map_err(|_| "chat history lock poisoned".to_string())
 }
 
 pub fn push_session_file_offer(offer: SessionFileOffer) -> Result<(), String> {
@@ -178,7 +257,12 @@ pub fn decide_session_file(transfer_id: u64, accept: bool) -> Result<(), String>
         if accept {
             finish_session_file(transfer_id);
         }
-        push_session_file_offer(offer);
+        if let Err(requeue_error) = push_session_file_offer(offer) {
+            return Err(format!(
+                "{}; failed to restore pending file offer: {}",
+                error, requeue_error
+            ));
+        }
         return Err(error);
     }
     Ok(())
@@ -261,6 +345,7 @@ pub fn set_relay_state(connected: bool) {
             } else {
                 g.status = "offline".to_string();
             }
+
         }
     }
 }
@@ -281,5 +366,56 @@ pub fn set_session_active(active: bool) {
         if let Ok(mut g) = s.lock() {
             g.in_session = active;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        session_audio_enabled, set_session_audio_enabled, SessionChatHistory,
+        CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START, CHAT_TYPING_STOP,
+    };
+
+    #[test]
+    fn session_chat_history_is_replayable_and_deduplicable_by_id() {
+        let mut history = SessionChatHistory::default();
+        let first = history.push("Hello".to_string(), false).unwrap();
+        let second = history.push("Hyderabad 🙂".to_string(), true).unwrap();
+
+        assert_eq!(first.id, 1);
+        assert_eq!(second.id, 2);
+        assert_eq!(history.since(0).len(), 2);
+        assert_eq!(history.since(first.id)[0].text, "Hyderabad 🙂");
+        assert_eq!(history.since(second.id).len(), 0);
+        assert!(!first.from_local);
+        assert!(second.from_local);
+    }
+
+    #[test]
+    fn session_chat_history_keeps_only_the_latest_500_messages() {
+        let mut history = SessionChatHistory::default();
+        for index in 0..501 {
+            history.push(index.to_string(), false).unwrap();
+        }
+
+        let messages = history.since(0);
+        assert_eq!(messages.len(), 500);
+        assert_eq!(messages[0].id, 2);
+        assert_eq!(messages[499].id, 501);
+    }
+
+    #[test]
+    fn chat_typing_signal_uses_a_dedicated_two_byte_packet() {
+        assert_eq!([CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START], [18, 1]);
+        assert_eq!([CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_STOP], [18, 0]);
+    }
+
+    #[test]
+    fn session_audio_starts_disabled_and_can_be_toggled() {
+        set_session_audio_enabled(false);
+        assert!(!session_audio_enabled());
+        set_session_audio_enabled(true);
+        assert!(session_audio_enabled());
+        set_session_audio_enabled(false);
     }
 }
