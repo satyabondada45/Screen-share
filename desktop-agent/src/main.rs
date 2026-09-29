@@ -197,7 +197,7 @@ macro_rules! agent_log {
 
 macro_rules! println {
     ($($arg:tt)*) => {
-        agent_log!($($arg)*);
+        agent_log!($($arg)*)
     };
 }
 
@@ -645,6 +645,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             println!("[Host] Approval response sent successfully (APPROVED)");
                             backend.log_session_start(&system_id);
                             println!("[Agent] Session APPROVED! Starting live video...");
+                            // Signal to the local health endpoint that B is now in an active session.
+                            crate::status::set_session_active(true);
 
                             // ====================================================
                             // CONNECTION STATE & STREAMING PIPELINE
@@ -676,8 +678,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     height,
                                     opts
                                 ) {
-                                    // A simple red banner background
-                                    let buffer: Vec<u32> = vec![0xFFFF0000; width * height];
+                                    // A simple neutral banner background
+                                    let buffer: Vec<u32> = vec![0xFFFFFFFF; width * height];
                                     while ind_in_session.load(Ordering::SeqCst) && window.is_open() {
                                         let _ = window.update_with_buffer(&buffer, width, height);
                                         thread::sleep(Duration::from_millis(50));
@@ -824,9 +826,33 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     let name_len = name_bytes.len() as u16;
                                                     hdr.extend_from_slice(&name_len.to_be_bytes());
                                                     hdr.extend_from_slice(name_bytes);
-                                                    let _ = write_stream_file.send(hdr);
+                                                    let response = crate::status::register_session_file_response(transfer_id);
+                                                    if write_stream_file.send(hdr).is_err() {
+                                                        crate::status::clear_session_file_response(transfer_id);
+                                                        println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"Offer send failed\"", transfer_id);
+                                                        continue;
+                                                    }
                                                     
                                                     println!("[FILE TX START] direction=B->A transfer_id={} filename={} total_bytes={}", transfer_id, filename, file_size);
+
+                                                    match response.recv_timeout(Duration::from_secs(60)) {
+                                                        Ok(26) => {}
+                                                        Ok(25) => {
+                                                            println!("[FILE TX REJECTED] direction=B->A transfer_id={}", transfer_id);
+                                                            crate::status::clear_session_file_response(transfer_id);
+                                                            continue;
+                                                        }
+                                                        Ok(other) => {
+                                                            println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"Unexpected offer response {}\"", transfer_id, other);
+                                                            crate::status::clear_session_file_response(transfer_id);
+                                                            continue;
+                                                        }
+                                                        Err(error) => {
+                                                            println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"No acceptance response: {}\"", transfer_id, error);
+                                                            crate::status::clear_session_file_response(transfer_id);
+                                                            continue;
+                                                        }
+                                                    }
                                                     
                                                     // Type 21
                                                     let mut buffer = [0u8; 256 * 1024]; // 256 KB
@@ -859,10 +885,19 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     end_pkt.extend_from_slice(&transfer_id.to_be_bytes());
                                                     end_pkt.extend_from_slice(&file_size.to_be_bytes());
                                                     end_pkt.extend_from_slice(&hash);
-                                                    let _ = write_stream_file.send(end_pkt);
+                                                    if write_stream_file.send(end_pkt).is_err() {
+                                                        println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"End packet send failed\"", transfer_id);
+                                                        crate::status::clear_session_file_response(transfer_id);
+                                                        continue;
+                                                    }
                                                     
                                                     let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-                                                    println!("[FILE TX END] direction=B->A transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
+                                                    match response.recv_timeout(Duration::from_secs(60)) {
+                                                        Ok(27) => println!("[FILE TX END] direction=B->A transfer_id={} final_sha256={} success=true", transfer_id, hash_hex),
+                                                        Ok(other) => println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"Unexpected completion response {}\"", transfer_id, other),
+                                                        Err(error) => println!("[FILE TX ERROR] direction=B->A transfer_id={} success=false reason=\"No completion acknowledgement: {}\"", transfer_id, error),
+                                                    }
+                                                    crate::status::clear_session_file_response(transfer_id);
                                                 } else {
                                                     println!("[FILE TX ERROR] direction=B->A filename=\"{}\" success=false reason=\"Failed to read metadata\"", file_path_str);
                                                 }
@@ -888,17 +923,36 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let last_clipboard_text = Arc::new(Mutex::new(String::new()));
                             let last_clip_recv = Arc::clone(&last_clipboard_text);
                             let last_clip_send = Arc::clone(&last_clipboard_text);
+                            if let Err(error) = crate::status::set_session_writer(Some(write_stream.clone())) {
+                                eprintln!("[SESSION UI] Failed to initialize session bridge: {}", error);
+                            }
+                            let write_stream_input = write_stream.clone();
 
                             // INPUT THREAD
                             let input_handle = thread::spawn(move || {
                                 println!("[INPUT THREAD] Started native input processing loop");
                                 let mut clip = Clipboard::new().ok();
                                 let mut current_file: Option<File> = None;
+                                let mut current_file_path: Option<PathBuf> = None;
+                                let mut current_transfer_id: Option<u64> = None;
+                                let mut current_filename = String::new();
                                 let mut total_file_size: u64 = 0;
                                 let mut received_bytes: u64 = 0;
+                                let mut file_hasher = Sha256::new();
                                 let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
                                 let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
                                 let _ = fs::create_dir_all(&drop_dir);
+                                let send_file_error = |transfer_id: u64, message: &str| {
+                                    let message = message.as_bytes();
+                                    let mut packet = vec![24u8];
+                                    packet.extend_from_slice(&transfer_id.to_be_bytes());
+                                    packet.extend_from_slice(&[0, 0]);
+                                    packet.extend_from_slice(&(message.len() as u16).to_be_bytes());
+                                    packet.extend_from_slice(message);
+                                    if let Err(error) = write_stream_input.send(packet) {
+                                        eprintln!("[FILE RX ERROR] Failed to send transfer error: {}", error);
+                                    }
+                                };
 
                                 while is_conn_read.load(Ordering::SeqCst) {
                                     let mut pkt_type_buf = [0u8; 1];
@@ -1084,6 +1138,9 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             }
                                             if let Ok(txt) = String::from_utf8(msg_bytes) {
                                                 println!("\n[Chat from Remote Viewer]: {}", txt);
+                                                if let Err(error) = crate::status::push_session_chat(txt) {
+                                                    eprintln!("[CHAT UI] Failed to queue received message: {}", error);
+                                                }
                                             }
                                         }
 
@@ -1096,25 +1153,24 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             if name_len > 4096 { break; }
                                             let mut name_buf = vec![0u8; name_len];
                                             if read_stream.read_exact(&mut name_buf).is_err() { break; }
-                                            let mut current_filename = String::from_utf8_lossy(&name_buf).to_string();
+                                            current_filename = String::from_utf8_lossy(&name_buf).to_string();
                                             current_filename = current_filename.replace("/", "_").replace("\\", "_").replace("..", "_");
-                                            
-                                            let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
-                                            let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
-                                            let _ = fs::create_dir_all(&drop_dir);
-                                            
-                                            let target_path = drop_dir.join(&current_filename);
-                                            match File::create(&target_path) {
-                                                Ok(f) => {
-                                                    current_file = Some(f);
-                                                    received_bytes = 0;
-                                                    println!("[FILE RX START] direction=A->B transfer_id={} filename={} total_bytes={}", transfer_id, current_filename, total_file_size);
-                                                }
-                                                Err(e) => {
-                                                    println!("[FILE RX START] direction=A->B transfer_id={} filename={} success=false reason=\"Failed to create file: {:?}\"", transfer_id, current_filename, e);
-                                                    current_file = None;
-                                                }
+                                            current_file = None;
+                                            current_file_path = None;
+                                            current_transfer_id = Some(transfer_id);
+                                            received_bytes = 0;
+                                            file_hasher = Sha256::new();
+                                            if let Err(error) = crate::status::push_session_file_offer(crate::status::SessionFileOffer {
+                                                transfer_id,
+                                                filename: current_filename.clone(),
+                                                size: total_file_size,
+                                            }) {
+                                                eprintln!("[FILE RX OFFER] Failed to publish offer: {}", error);
+                                                let mut reject = vec![25u8];
+                                                reject.extend_from_slice(&transfer_id.to_be_bytes());
+                                                let _ = write_stream_input.send(reject);
                                             }
+                                            println!("[FILE RX OFFER] direction=A->B transfer_id={} filename={} total_bytes={}", transfer_id, current_filename, total_file_size);
                                         }
 
                                         21 => {
@@ -1129,13 +1185,49 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             
                                             println!("[FILE RX CHUNK] direction=A->B transfer_id={} chunk_index={} chunk_size={}", transfer_id, chunk_idx, chunk_len);
                                             
-                                            if let Some(ref mut file) = current_file {
-                                                if file.write_all(&chunk_buf).is_err() {
-                                                    println!("[FILE RX CHUNK] direction=A->B transfer_id={} success=false reason=\"Disk write failed\"", transfer_id);
-                                                    current_file = None;
-                                                    continue;
+                                            let accepted = match crate::status::session_file_is_accepted(transfer_id) {
+                                                Ok(accepted) => accepted,
+                                                Err(error) => {
+                                                    eprintln!("[FILE RX] Failed to read acceptance state: {}", error);
+                                                    false
                                                 }
-                                                received_bytes += chunk_len as u64;
+                                            };
+                                            if current_transfer_id == Some(transfer_id) && accepted {
+                                                if current_file.is_none() {
+                                                    if let Err(error) = fs::create_dir_all(&drop_dir) {
+                                                        eprintln!("[FILE RX START] Failed to create download directory: {}", error);
+                                                        send_file_error(transfer_id, "Unable to create download directory");
+                                                        crate::status::finish_session_file(transfer_id);
+                                                        current_transfer_id = None;
+                                                        continue;
+                                                    }
+                                                    let path = drop_dir.join(&current_filename);
+                                                    match File::create(&path) {
+                                                        Ok(file) => {
+                                                            current_file = Some(file);
+                                                            current_file_path = Some(path);
+                                                        }
+                                                        Err(error) => {
+                                                            eprintln!("[FILE RX START] direction=A->B transfer_id={} success=false reason=\"Failed to create file: {:?}\"", transfer_id, error);
+                                                            send_file_error(transfer_id, "Unable to create destination file");
+                                                            crate::status::finish_session_file(transfer_id);
+                                                            current_transfer_id = None;
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(ref mut file) = current_file {
+                                                    if file.write_all(&chunk_buf).is_err() {
+                                                        println!("[FILE RX CHUNK] direction=A->B transfer_id={} success=false reason=\"Disk write failed\"", transfer_id);
+                                                        send_file_error(transfer_id, "Disk write failed");
+                                                        current_file = None;
+                                                        crate::status::finish_session_file(transfer_id);
+                                                        current_transfer_id = None;
+                                                        continue;
+                                                    }
+                                                    file_hasher.update(&chunk_buf);
+                                                    received_bytes += chunk_len as u64;
+                                                }
                                             }
                                         }
 
@@ -1143,19 +1235,73 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             let mut hdr = [0u8; 48];
                                             if read_stream.read_exact(&mut hdr).is_err() { break; }
                                             let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
-                                            
+                                            let final_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
                                             let hash_hex: String = hdr[16..48].iter().map(|b| format!("{:02x}", b)).collect();
-                                            println!("[FILE RX END] direction=A->B transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
-                                            
-                                            if let Some(mut file) = current_file.take() {
-                                                let _ = file.flush();
+                                            let actual_hash = std::mem::replace(&mut file_hasher, Sha256::new()).finalize();
+                                            let accepted = match crate::status::session_file_is_accepted(transfer_id) {
+                                                Ok(accepted) => accepted,
+                                                Err(error) => {
+                                                    eprintln!("[FILE RX] Failed to read acceptance state: {}", error);
+                                                    false
+                                                }
+                                            };
+                                            if current_transfer_id == Some(transfer_id)
+                                                && accepted
+                                                && final_size == 0
+                                                && current_file.is_none()
+                                            {
+                                                if fs::create_dir_all(&drop_dir).is_ok() {
+                                                    let path = drop_dir.join(&current_filename);
+                                                    match File::create(&path) {
+                                                        Ok(file) => {
+                                                            current_file = Some(file);
+                                                            current_file_path = Some(path);
+                                                        }
+                                                        Err(error) => {
+                                                            eprintln!("[FILE RX END] Failed to create empty file: {}", error);
+                                                        }
+                                                    }
+                                                }
                                             }
+                                            let valid = current_transfer_id == Some(transfer_id)
+                                                && accepted
+                                                && total_file_size == final_size
+                                                && received_bytes == final_size
+                                                && actual_hash.as_slice() == &hdr[16..48];
+                                            let flush_ok = current_file
+                                                .take()
+                                                .map(|mut file| file.flush().is_ok())
+                                                .unwrap_or(false);
+                                            if valid && flush_ok {
+                                                let mut ack = vec![27u8];
+                                                ack.extend_from_slice(&transfer_id.to_be_bytes());
+                                                let _ = write_stream_input.send(ack);
+                                                println!("[FILE RX END] direction=A->B transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
+                                            } else {
+                                                send_file_error(transfer_id, "File size or SHA-256 verification failed");
+                                                if let Some(path) = current_file_path.take() {
+                                                    let _ = fs::remove_file(path);
+                                                }
+                                                println!("[FILE RX END] direction=A->B transfer_id={} success=false reason=\"SHA-256 or size mismatch\"", transfer_id);
+                                            }
+                                            crate::status::finish_session_file(transfer_id);
+                                            current_transfer_id = None;
+                                            current_file_path = None;
                                         }
 
                                         23 => {
                                             let mut hdr = [0u8; 8];
                                             if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            let transfer_id = u64::from_be_bytes(hdr);
+                                            crate::status::resolve_session_file_response(transfer_id, 23);
                                             current_file = None;
+                                            if current_transfer_id == Some(transfer_id) {
+                                                if let Some(path) = current_file_path.take() {
+                                                    let _ = fs::remove_file(path);
+                                                }
+                                                current_transfer_id = None;
+                                            }
+                                            crate::status::finish_session_file(transfer_id);
                                             println!("[File Transfer] Cancelled.");
                                         }
 
@@ -1163,14 +1309,30 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             let mut hdr = [0u8; 12];
                                             if read_stream.read_exact(&mut hdr).is_err() { break; }
                                             let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
+                                            crate::status::resolve_session_file_response(transfer_id, 24);
                                             let msg_len = u16::from_be_bytes([hdr[10], hdr[11]]) as usize;
                                             if msg_len > 4096 { break; }
                                             let mut msg_buf = vec![0u8; msg_len];
                                             if read_stream.read_exact(&mut msg_buf).is_err() { break; }
                                             current_file = None;
+                                            if current_transfer_id == Some(transfer_id) {
+                                                if let Some(path) = current_file_path.take() {
+                                                    let _ = fs::remove_file(path);
+                                                }
+                                                current_transfer_id = None;
+                                            }
+                                            crate::status::finish_session_file(transfer_id);
                                             if let Ok(msg) = String::from_utf8(msg_buf) {
                                                 println!("[FILE RX ERROR] direction=A->B transfer_id={} success=false reason=\"{}\"", transfer_id, msg);
                                             }
+                                        }
+
+                                        25 | 26 | 27 => {
+                                            let mut hdr = [0u8; 8];
+                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            let transfer_id = u64::from_be_bytes(hdr);
+                                            crate::status::resolve_session_file_response(transfer_id, pkt_type_buf[0]);
+                                            println!("[FILE TX RESPONSE] transfer_id={} type={}", transfer_id, pkt_type_buf[0]);
                                         }
 
                                         99 => {
@@ -1181,6 +1343,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         _ => {}
                                     }
+                                }
+                                current_file = None;
+                                if let Some(path) = current_file_path.take() {
+                                    let _ = fs::remove_file(path);
+                                }
+                                if let Some(transfer_id) = current_transfer_id.take() {
+                                    crate::status::finish_session_file(transfer_id);
                                 }
                             });
 
@@ -1513,6 +1682,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             println!("[Agent] Session ended. Preparing for next request...");
                             is_in_session.store(false, Ordering::SeqCst);
+                            // Session ended — update the health endpoint so B's overlay hides.
+                            crate::status::set_session_active(false);
+                            if let Err(error) = crate::status::set_session_writer(None) {
+                                eprintln!("[SESSION UI] Failed to clear session bridge: {}", error);
+                            }
                             thread::sleep(Duration::from_millis(500));
                         }
 

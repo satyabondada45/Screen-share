@@ -32,6 +32,7 @@ const IDM_LOGS: usize = 202;
 const IDM_END_SESSION: usize = 203;
 const IDM_RESTART: usize = 204;
 const IDM_EXIT: usize = 205;
+const IDM_SEND_FILE: usize = 206;
 
 // ============================================================
 // Shared state passed to tray thread
@@ -107,6 +108,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         let logs_str = to_wide("View Logs\0");
                         let sep = to_wide("\0");
                         let end_str = to_wide("End Remote Session\0");
+                        let send_file_str = to_wide("Send File to Controller\0");
                         let restart_str = to_wide("Restart Agent\0");
                         let exit_str = to_wide("Exit\0");
 
@@ -116,6 +118,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         AppendMenuW(hmenu, MF_STRING, IDM_LOGS, logs_str.as_ptr());
                         AppendMenuW(hmenu, MF_SEPARATOR, 0, sep.as_ptr());
                         AppendMenuW(hmenu, MF_STRING, IDM_END_SESSION, end_str.as_ptr());
+                        AppendMenuW(hmenu, MF_STRING, IDM_SEND_FILE, send_file_str.as_ptr());
                         AppendMenuW(hmenu, MF_STRING, IDM_RESTART, restart_str.as_ptr());
                         AppendMenuW(hmenu, MF_SEPARATOR, 0, sep.as_ptr());
                         AppendMenuW(hmenu, MF_STRING, IDM_EXIT, exit_str.as_ptr());
@@ -174,6 +177,15 @@ unsafe extern "system" fn tray_wnd_proc(
                 }
                 IDM_END_SESSION => {
                     // TODO: signal agent engine to end session
+                }
+                IDM_SEND_FILE => {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\temp".to_string());
+                        let dest_dir = std::path::Path::new(&local_app_data).join("DeskStream");
+                        let _ = std::fs::create_dir_all(&dest_dir);
+                        let trigger_file = dest_dir.join("send_file.txt");
+                        let _ = std::fs::write(trigger_file, path.to_string_lossy().as_ref());
+                    }
                 }
                 IDM_RESTART => {
                     // Restart: bring window up; the agent reconnects automatically

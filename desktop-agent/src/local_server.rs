@@ -3,6 +3,7 @@ use std::io::Read;
 use tiny_http::{Server, Response, Header};
 use reqwest::blocking::Client;
 use std::sync::Arc;
+use serde_json::json;
 
 const UPSTREAM: &str = "https://friendssoftwaresolutions.in/DeskStream";
 
@@ -99,10 +100,128 @@ pub fn start_local_server(system_id: String) -> u16 {
             
             // Health endpoint for UI
             if path == "/local-health" || path == "/local-health/" {
-                let json = format!("{{\"running\": true, \"system_id\":\"{}\", \"status\": \"online\"}}", system_id);
+                let in_session = crate::status::LIVE.get()
+                    .and_then(|s| s.lock().ok())
+                    .map(|g| g.in_session)
+                    .unwrap_or(false);
+                let json = format!(
+                    "{{\"running\": true, \"system_id\":\"{}\", \"status\": \"online\", \"in_session\": {}}}",
+                    system_id, in_session
+                );
                 let response = Response::from_string(json)
                     .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/session/chat" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let message = match payload.get("message").and_then(serde_json::Value::as_str) {
+                    Some(message) if !message.trim().is_empty() => message.trim(),
+                    _ => {
+                        let _ = request.respond(Response::from_string("message is required").with_status_code(400));
+                        continue;
+                    }
+                };
+                let message_bytes = message.as_bytes();
+                if message_bytes.len() > u16::MAX as usize {
+                    let _ = request.respond(Response::from_string("message is too long").with_status_code(413));
+                    continue;
+                }
+                let mut packet = Vec::with_capacity(3 + message_bytes.len());
+                packet.extend_from_slice(&[16, 0, (message_bytes.len() >> 8) as u8, message_bytes.len() as u8]);
+                packet.extend_from_slice(message_bytes);
+                match crate::status::send_session_packet(packet) {
+                    Ok(()) => {
+                        let response = Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(503));
+                    }
+                }
+                continue;
+            }
+
+            if path == "/desktop-api/session/messages" && request.method() == &tiny_http::Method::Get {
+                match crate::status::take_session_chat() {
+                    Ok(messages) => {
+                        let response = Response::from_string(json!(messages).to_string())
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                    }
+                }
+                continue;
+            }
+
+            if path == "/desktop-api/session/offers" && request.method() == &tiny_http::Method::Get {
+                match crate::status::session_file_offers() {
+                    Ok(offers) => {
+                        let offers: Vec<_> = offers.into_iter().map(|offer| json!({
+                            "transfer_id": offer.transfer_id.to_string(),
+                            "filename": offer.filename,
+                            "size": offer.size
+                        })).collect();
+                        let response = Response::from_string(json!(offers).to_string())
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                    }
+                }
+                continue;
+            }
+
+            if path == "/desktop-api/session/offer" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let transfer_id = payload.get("transfer_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok());
+                let accepted = payload.get("accept").and_then(serde_json::Value::as_bool);
+                let (transfer_id, accepted) = match (transfer_id, accepted) {
+                    (Some(id), Some(accepted)) => (id, accepted),
+                    _ => {
+                        let _ = request.respond(Response::from_string("transfer_id and accept are required").with_status_code(400));
+                        continue;
+                    }
+                };
+                match crate::status::decide_session_file(transfer_id, accepted) {
+                    Ok(()) => {
+                        let response = Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(409));
+                    }
+                }
                 continue;
             }
 
@@ -132,6 +251,8 @@ pub fn start_local_server(system_id: String) -> u16 {
             let (content, content_type) = match static_path {
                 "/dashboard.html" | "/" | "" => (include_bytes!("../assets/dashboard.html").to_vec(), "text/html"),
                 "/session.html" => (include_bytes!("../assets/session.html").to_vec(), "text/html"),
+                "/deskstream-logo.png" => (include_bytes!("../assets/deskstream-logo.png").to_vec(), "image/png"),
+                "/deskstream-icon.jpeg" => (include_bytes!("../assets/deskstream-icon.jpeg").to_vec(), "image/jpeg"),
                 "/icon.ico" => (include_bytes!("../assets/icon.ico").to_vec(), "image/x-icon"),
                 "/icon.png" => (include_bytes!("../assets/icon.png").to_vec(), "image/png"),
                 _ => (vec![], "text/plain"),

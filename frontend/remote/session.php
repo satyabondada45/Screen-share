@@ -981,20 +981,20 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
             const pkt =
                 new Uint8Array(
-                    3 + msgBytes.length
+                    4 + msgBytes.length
                 );
 
             pkt[0] = 16;
-
-            pkt[1] =
+            pkt[1] = 0;
+            pkt[2] =
                 (msgBytes.length >> 8) & 0xff;
 
-            pkt[2] =
+            pkt[3] =
                 msgBytes.length & 0xff;
 
             pkt.set(
                 msgBytes,
-                3
+                4
             );
 
             try {
@@ -2593,7 +2593,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
         function handleChatPacket(buffer) {
 
-            if (buffer.byteLength < 3) {
+            if (buffer.byteLength < 4) {
 
                 return;
 
@@ -2604,12 +2604,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
             const len =
                 (
-                    view.getUint8(1) << 8
+                    view.getUint8(2) << 8
                 ) |
-                view.getUint8(2);
+                view.getUint8(3);
 
             if (
-                3 + len >
+                4 + len >
                 buffer.byteLength
             ) {
 
@@ -2620,7 +2620,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const msgBytes =
                 new Uint8Array(
                     buffer,
-                    3,
+                    4,
                     len
                 );
 
@@ -2749,12 +2749,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         continue;
                     }
                     else if (type === 16) {
-                        if (bufferLen < 3) {
+                        if (bufferLen < 4) {
                             return;
                         }
                         const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
-                        const payloadSize = (view.getUint8(1) << 8) | view.getUint8(2);
-                        const totalPacketSize = 3 + payloadSize;
+                        const payloadSize = (view.getUint8(2) << 8) | view.getUint8(3);
+                        const totalPacketSize = 4 + payloadSize;
 
                         if (bufferLen < totalPacketSize) {
                             return;
@@ -2778,7 +2778,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
-                    else if (type >= 20 && type <= 24) {
+                    else if (type >= 20 && type <= 27) {
                         let totalPacketSize = 0;
                         let headerLen = 0;
                         if (type === 20) {
@@ -2803,6 +2803,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                             const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
                             const msgLen = view.getUint16(11, false);
                             totalPacketSize = headerLen + msgLen;
+                        } else if (type === 25 || type === 26 || type === 27) {
+                            totalPacketSize = 9;
                         }
 
                         if (bufferLen < totalPacketSize) return;
@@ -2810,7 +2812,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
                         if (typeof handleFilePacket === 'function') {
-                            handleFilePacket(packetBuffer);
+                            await handleFilePacket(packetBuffer);
                         }
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
                         continue;
@@ -3286,6 +3288,40 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
 
         let incomingFiles = {};
+        const outgoingFileResponses = new Map();
+        const outgoingFileErrors = new Map();
+        const outgoingFileIds = new Set();
+
+        function waitForFileResponse(transferId, expectedType) {
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    outgoingFileResponses.delete(transferId);
+                    reject(new Error("Timed out waiting for file transfer response."));
+                }, 60000);
+                outgoingFileResponses.set(transferId, type => {
+                    clearTimeout(timer);
+                    if (type === expectedType) resolve(type);
+                    else reject(new Error(type === 25 ? "The receiver rejected the file." : `Unexpected file response: ${type}`));
+                });
+            });
+        }
+
+        function sendFileControl(type, transferId) {
+            const packet = new Uint8Array(9);
+            packet[0] = type;
+            new DataView(packet.buffer).setBigUint64(1, BigInt(transferId), false);
+            ws.send(packet);
+        }
+
+        function sendFileError(transferId, message) {
+            const messageBytes = new TextEncoder().encode(message);
+            const packet = new Uint8Array(13 + messageBytes.length);
+            packet[0] = 24;
+            new DataView(packet.buffer).setBigUint64(1, BigInt(transferId), false);
+            new DataView(packet.buffer).setUint16(11, messageBytes.length, false);
+            packet.set(messageBytes, 13);
+            ws.send(packet);
+        }
 
         function addTransferUI(transferId, filename, isUpload) {
             const feed = document.getElementById("transferFeed");
@@ -3314,11 +3350,25 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             if (statEl) statEl.innerText = status;
         }
 
-        function handleFilePacket(buffer) {
+        async function handleFilePacket(buffer) {
             const bytes = new Uint8Array(buffer);
             const type = bytes[0];
             const view = new DataView(buffer);
             const transferId = view.getBigUint64(1, false).toString();
+
+            if (type === 25 || type === 26 || type === 27) {
+                const resolve = outgoingFileResponses.get(transferId);
+                if (resolve) {
+                    outgoingFileResponses.delete(transferId);
+                    resolve(type);
+                }
+                if (type === 27) {
+                    updateTransferUI(transferId, 100, "Complete");
+                    const bar = document.getElementById(`transfer-bar-${transferId}`);
+                    if (bar) bar.style.background = "#28a745";
+                }
+                return;
+            }
 
             if (type === 20) {
                 const fileSize = view.getBigUint64(9, false);
@@ -3326,6 +3376,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 const nameBytes = bytes.subarray(19, 19 + nameLen);
                 const filename = new TextDecoder().decode(nameBytes);
 
+                if (!window.confirm(`Accept "${filename}" (${Number(fileSize)} bytes)?`)) {
+                    sendFileControl(25, transferId);
+                    addTransferUI(transferId, filename, false);
+                    updateTransferUI(transferId, 0, "Rejected");
+                    return;
+                }
                 incomingFiles[transferId] = {
                     filename: filename,
                     size: Number(fileSize),
@@ -3335,6 +3391,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 console.log(`[FILE] Incoming file start: ${filename}`);
                 addTransferUI(transferId, filename, false);
                 updateTransferUI(transferId, 0, "Receiving...");
+                sendFileControl(26, transferId);
             } else if (type === 21) {
                 if (!incomingFiles[transferId]) return;
                 const chunkLen = view.getUint32(13, false);
@@ -3346,25 +3403,55 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 updateTransferUI(transferId, pct, "Receiving...");
             } else if (type === 22) {
                 if (!incomingFiles[transferId]) return;
-                console.log(`[FILE] Transfer complete: ${incomingFiles[transferId].filename}`);
+                const incoming = incomingFiles[transferId];
+                const finalSize = Number(view.getBigUint64(9, false));
+                const expectedHash = bytes.slice(17, 49);
+                const blob = new Blob(incoming.chunks);
+                const actualHash = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+                const valid = incoming.receivedBytes === incoming.size
+                    && finalSize === incoming.size
+                    && actualHash.every((byte, index) => byte === expectedHash[index]);
+                if (!valid) {
+                    sendFileError(transferId, "File size or SHA-256 verification failed");
+                    updateTransferUI(transferId, 0, "Verification failed");
+                    const bar = document.getElementById(`transfer-bar-${transferId}`);
+                    if (bar) bar.style.background = "#dc3545";
+                    delete incomingFiles[transferId];
+                    return;
+                }
+                sendFileControl(27, transferId);
+                console.log(`[FILE] Transfer verified: ${incoming.filename}`);
                 updateTransferUI(transferId, 100, "Complete");
-
-                const blob = new Blob(incomingFiles[transferId].chunks);
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url;
-                a.download = incomingFiles[transferId].filename;
+                a.download = incoming.filename;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
                 delete incomingFiles[transferId];
             } else if (type === 23 || type === 24) {
+                const message = type === 24
+                    ? new TextDecoder().decode(bytes.subarray(13))
+                    : "The receiver cancelled the transfer.";
                 if (incomingFiles[transferId]) {
                     console.log(`[FILE] Transfer cancelled/error: ${incomingFiles[transferId].filename}`);
-                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : "Error");
-                    document.getElementById(`transfer-bar-${transferId}`).style.background = "#dc3545";
+                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : `Error: ${message}`);
+                    const bar = document.getElementById(`transfer-bar-${transferId}`);
+                    if (bar) bar.style.background = "#dc3545";
                     delete incomingFiles[transferId];
+                }
+                if (outgoingFileIds.has(transferId)) {
+                    outgoingFileErrors.set(transferId, message);
+                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : `Error: ${message}`);
+                    const bar = document.getElementById(`transfer-bar-${transferId}`);
+                    if (bar) bar.style.background = "#dc3545";
+                }
+                const resolve = outgoingFileResponses.get(transferId);
+                if (resolve) {
+                    outgoingFileResponses.delete(transferId);
+                    resolve(type);
                 }
             }
         }
@@ -3376,7 +3463,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const transferIdBytes = new Uint8Array(8);
             crypto.getRandomValues(transferIdBytes);
             const transferIdStr = new DataView(transferIdBytes.buffer).getBigUint64(0, false).toString();
+            outgoingFileErrors.delete(transferIdStr);
+            outgoingFileIds.add(transferIdStr);
 
+            try {
             addTransferUI(transferIdStr, file.name, true);
             updateTransferUI(transferIdStr, 0, "Sending...");
 
@@ -3388,7 +3478,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             metaView.setBigUint64(9, BigInt(file.size), false);
             metaView.setUint16(17, nameBytes.length, false);
             metaPkt.set(nameBytes, 19);
+            const accepted = waitForFileResponse(transferIdStr, 26);
             ws.send(metaPkt);
+            await accepted;
 
             // Calculate Hash
             const hashBuffer = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
@@ -3400,6 +3492,11 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             let chunkIndex = 0;
 
             while (offset < file.size) {
+                if (outgoingFileErrors.has(transferIdStr)) {
+                    const message = outgoingFileErrors.get(transferIdStr);
+                    outgoingFileErrors.delete(transferIdStr);
+                    throw new Error(message);
+                }
                 if (!isSocketOpen()) {
                     updateTransferUI(transferIdStr, 0, "Failed: Disconnected");
                     document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#dc3545";
@@ -3435,10 +3532,20 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const endView = new DataView(endPkt.buffer);
             endView.setBigUint64(9, BigInt(file.size), false);
             endPkt.set(hashBytes, 17);
+            if (outgoingFileErrors.has(transferIdStr)) {
+                const message = outgoingFileErrors.get(transferIdStr);
+                outgoingFileErrors.delete(transferIdStr);
+                throw new Error(message);
+            }
+            const completed = waitForFileResponse(transferIdStr, 27);
             ws.send(endPkt);
-
+            await completed;
             updateTransferUI(transferIdStr, 100, "Complete");
             document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#28a745";
+            } finally {
+                outgoingFileIds.delete(transferIdStr);
+                outgoingFileErrors.delete(transferIdStr);
+            }
         }
 
 

@@ -23,16 +23,20 @@ const DESKSTREAM_URL: &str = "deskstream://localhost/dashboard.html";
 /// Run the WebView2 application on the main thread.
 /// `quit` — shared flag; when set true (e.g. from tray Exit), the window closes.
 pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
-    let event_loop: EventLoop<()> = EventLoop::new();
+    let event_loop: tao::event_loop::EventLoop<String> = tao::event_loop::EventLoopBuilder::<String>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()
         .with_title("DeskStream")
         .with_inner_size(LogicalSize::new(1280_u32, 800_u32))
         .with_min_inner_size(LogicalSize::new(900_u32, 600_u32))
         .with_resizable(true)
-        .with_decorations(true)
+        .with_maximized(true)
+        .with_decorations(false)
         .build(&event_loop)
         .expect("Failed to create DeskStream window");
+    
+    window.set_maximized(true);
 
     // Set the window icon from embedded ICO bytes
     #[cfg(target_os = "windows")]
@@ -55,6 +59,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let _webview = WebViewBuilder::new()
         .with_url(&local_url)
         .with_devtools(false)
+        .with_ipc_handler(move |msg| { let _ = proxy.send_event(msg.into_body()); })
         .with_initialization_script(r#"
             window.__deskstreamDesktop = true;
         "#)
@@ -71,13 +76,37 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
         }
 
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                // Signal all threads including tray to stop
-                quit.store(true, Ordering::Relaxed);
-                *control_flow = ControlFlow::Exit;
+            Event::UserEvent(req) => {
+                match req.as_str() {
+                    "minimize" => window.set_minimized(true),
+                    "maximize" => {
+                        if !window.is_maximized() {
+                            window.set_maximized(true);
+                        }
+                    },
+                    "toggle_maximize" => {
+                        let is_max = window.is_maximized();
+                        window.set_maximized(!is_max);
+                    },
+                    "send_file" => {
+                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            let local_app_data = std::env::var("LOCALAPPDATA")
+                                .unwrap_or_else(|_| "C:\\temp".to_string());
+                            let app_dir = std::path::Path::new(&local_app_data).join("DeskStream");
+                            if let Err(error) = std::fs::create_dir_all(&app_dir) {
+                                eprintln!("[FILE TX] Failed to create transfer directory: {error}");
+                            } else if let Err(error) = std::fs::write(app_dir.join("send_file.txt"), path.to_string_lossy().as_bytes()) {
+                                eprintln!("[FILE TX] Failed to queue selected file: {error}");
+                            }
+                        }
+                    }
+                    "close" => { quit.store(true, Ordering::Relaxed); *control_flow = ControlFlow::Exit; },
+                    "drag_window" => { let _ = window.drag_window(); },
+                    _ => {}
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                quit.store(true, Ordering::Relaxed); *control_flow = ControlFlow::Exit;
             }
             _ => {}
         }
@@ -132,3 +161,5 @@ fn load_icon_from_ico(ico_bytes: &[u8]) -> Option<tao::window::Icon> {
         None
     }
 }
+
+

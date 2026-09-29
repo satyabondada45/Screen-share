@@ -1302,118 +1302,10 @@
                 grid-template-columns: 1fr;
             }
         }
-
-        /* ============================================================
-           B-SIDE CONNECTED SESSION OVERLAY
-        ============================================================ */
-        #bSessionOverlay {
-            display: none;
-            position: fixed;
-            inset: 0;
-            z-index: 10000;
-            flex-direction: column;
-            background: #0f172a;
-        }
-        #bSessionOverlay.active { display: flex; }
-        #bSessionNavbar {
-            width: 100%;
-            height: 52px;
-            background: #1e293b;
-            border-bottom: 1px solid #334155;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 18px;
-            flex-shrink: 0;
-            z-index: 10001;
-        }
-        #bSessionNavbar .bsn-left { display:flex; align-items:center; gap:6px; }
-        #bSessionNavbar .bsn-logo img { height:26px; width:auto; filter:brightness(0) invert(1); opacity:0.9; }
-        #bSessionNavbar .bsn-divider { width:1px; height:22px; background:#334155; margin:0 10px; }
-        #bSessionNavbar .bsn-actions { display:flex; align-items:center; gap:4px; }
-        #bSessionNavbar .bsn-btn {
-            display: inline-flex; align-items: center; gap: 7px;
-            padding: 6px 14px; background: transparent;
-            border: 1px solid #334155; border-radius: 7px;
-            color: #cbd5e1; font-size: 0.82rem; font-weight: 600;
-            cursor: pointer; transition: all 0.18s ease; font-family: inherit;
-        }
-        #bSessionNavbar .bsn-btn:hover { background:#334155; color:#f1f5f9; border-color:#475569; }
-        #bSessionNavbar .bsn-btn.bsn-disconnect { background:#7f1d1d; border-color:#991b1b; color:#fca5a5; }
-        #bSessionNavbar .bsn-btn.bsn-disconnect:hover { background:#991b1b; color:#ffffff; border-color:#ef4444; }
-        #bSessionNavbar .bsn-conn-dot {
-            width:7px; height:7px; border-radius:50%; background:#22c55e;
-            animation:bsn-pulse 2s infinite; margin-right:4px; flex-shrink:0;
-        }
-        @keyframes bsn-pulse { 0%,100%{opacity:1;} 50%{opacity:0.45;} }
-        #bSessionNavbar .bsn-right { display:flex; align-items:center; gap:8px; }
-        #bSessionContent {
-            flex:1; display:flex; align-items:center; justify-content:center;
-            flex-direction:column; gap:18px; color:#64748b;
-        }
-        #bSessionContent .bsc-icon {
-            width:64px; height:64px; border-radius:50%;
-            background:#1e293b; border:2px solid #334155;
-            display:flex; align-items:center; justify-content:center;
-        }
-        #bSessionContent .bsc-title { font-size:1.05rem; font-weight:700; color:#e2e8f0; }
-        #bSessionContent .bsc-sub { font-size:0.82rem; color:#64748b; text-align:center; max-width:320px; line-height:1.5; }
-        #bSessionContent .bsc-timer { font-size:0.78rem; font-family:'JetBrains Mono',monospace; color:#22c55e; letter-spacing:0.08em; }
-        #bSessionChatPanel {
-            display:none; position:absolute; right:16px; top:64px; width:min(360px, calc(100vw - 32px));
-            height:min(440px, calc(100vh - 80px)); background:#1e293b; border:1px solid #334155;
-            border-radius:10px; box-shadow:0 18px 48px #0008; flex-direction:column; z-index:10002;
-        }
-        #bSessionChatPanel.open { display:flex; }
-        #bSessionChatMessages { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px; color:#e2e8f0; }
-        #bSessionChatMessages .b-chat-message { padding:8px 10px; border-radius:8px; background:#334155; overflow-wrap:anywhere; }
-        #bSessionChatMessages .b-chat-message.sent { background:#1d4ed8; align-self:flex-end; }
-        #bSessionChatForm { display:flex; gap:8px; padding:10px; border-top:1px solid #334155; }
-        #bSessionChatInput { flex:1; min-width:0; padding:8px; color:#f8fafc; background:#0f172a; border:1px solid #475569; border-radius:6px; }
     </style>
 </head>
 
 <body>
-    <!-- ============================================================
-         B-SIDE CONNECTED SESSION OVERLAY
-         Shown on B (controlled device) after real accept succeeds.
-    ============================================================ -->
-    <div id="bSessionOverlay">
-        <nav id="bSessionNavbar">
-            <div class="bsn-left">
-                <div class="bsn-logo"><img src="deskstream-logo.png" alt="DeskStream" /></div>
-                <div class="bsn-divider"></div>
-                <div class="bsn-conn-dot"></div>
-                <span style="font-size:0.78rem;font-weight:600;color:#22c55e;">Connected</span>
-            </div>
-            <div class="bsn-actions">
-                <button class="bsn-btn" id="bChatBtn" title="Chat" onclick="toggleBSessionChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Chat</button>
-                <button class="bsn-btn" id="bFileBtn" title="File Transfer" onclick="selectBSessionFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg> File Transfer</button>
-                <button class="bsn-btn" id="bMicBtn" title="Microphone"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> Mic</button>
-                <button class="bsn-btn" id="bReverseBtn" title="Reverse Control"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg> Reverse</button>
-            </div>
-            <div class="bsn-right">
-                <button class="bsn-btn bsn-disconnect" id="bDisconnectBtn" onclick="disconnectBSession()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Disconnect</button>
-            </div>
-        </nav>
-        <div id="bSessionContent">
-            <div class="bsc-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
-            <div class="bsc-title">Session Active — Sharing Your Screen</div>
-            <div class="bsc-sub">Your screen is being shared. The remote controller can see your display and send input.</div>
-            <div class="bsc-timer" id="bSessionTimer">00:00:00</div>
-        </div>
-        <section id="bSessionChatPanel" aria-label="Session chat">
-            <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid #334155;color:#f8fafc;font-weight:700;">
-                <span>Session Chat</span><button class="bsn-btn" onclick="toggleBSessionChat()" aria-label="Close chat">×</button>
-            </div>
-            <div id="bSessionChatMessages" aria-live="polite"></div>
-            <form id="bSessionChatForm">
-                <input id="bSessionChatInput" maxlength="65535" autocomplete="off" placeholder="Message the controller">
-                <button class="bsn-btn" type="submit">Send</button>
-            </form>
-        </section>
-    </div>
-
 
     <!-- ============================================================
      LOGIN OVERLAY — shown until user authenticates
@@ -2415,9 +2307,6 @@
             closeModal();
         }
 
-        // Tracks the pending post-accept session poll so we can cancel it if needed.
-        let _bAcceptPollTimer = null;
-
         async function acceptConnection() {
             if (currentRequestToken) {
                 try {
@@ -2429,46 +2318,14 @@
                     });
                     const data = await res.json();
                     if (data.status === 'success') {
-                        // API accept confirmed — the Rust agent has queued the response.
-                        // Do NOT show the overlay yet. The real session is only live once
-                        // main.rs completes the relay TCP handshake and sets in_session=true
-                        // (which is exposed via /local-health). Poll until that is true.
-                        waitForRealBSession();
+                        // Route B to the exact same UI as A
+                        const sessionUrl = `session.html?id=${encodeURIComponent(currentHostUid)}&mode=receiver&token=${encodeURIComponent(currentRequestToken)}`;
+                        openIntegratedSession(sessionUrl);
                     }
                 } catch (e) { }
             }
             showToast('Connection accepted — remote session starting...');
             closeModal();
-        }
-
-        // Poll /local-health every 500 ms after B accepts.
-        // Only show the overlay when in_session=true (set by Rust AFTER the real TCP handshake).
-        // Stops polling after 30 s to avoid leaking if the relay never connects.
-        function waitForRealBSession() {
-            if (_bAcceptPollTimer) return;
-            let elapsed = 0;
-            const MAX_WAIT_MS = 30000;
-            const INTERVAL_MS = 500;
-
-            _bAcceptPollTimer = setInterval(async () => {
-                elapsed += INTERVAL_MS;
-                try {
-                    const res = await fetch(AGENT_HEALTH);
-                    const health = await res.json();
-                    if (health.in_session === true) {
-                        clearInterval(_bAcceptPollTimer);
-                        _bAcceptPollTimer = null;
-                        enterBConnectedSession();
-                    }
-                } catch (e) {
-                    // Local agent unreachable — keep trying until timeout
-                }
-                if (elapsed >= MAX_WAIT_MS) {
-                    clearInterval(_bAcceptPollTimer);
-                    _bAcceptPollTimer = null;
-                    console.warn('[DESKSTREAM] waitForRealBSession: timed out after 30s');
-                }
-            }, INTERVAL_MS);
         }
 
         // Close dropdown on outside click
@@ -2483,7 +2340,6 @@
             const iframe = document.getElementById('remoteSessionIframe');
 
             if (inner && iframe) {
-                integratedSessionEntered = false;
                 // Ensure dashboard remains visible to show the Disconnect button
                 inner.style.display = 'block'; 
                 
@@ -2517,7 +2373,6 @@
             }, 500);
         }
 
-        let integratedSessionEntered = false;
         window.addEventListener('message', function (e) {
             if (e.data === 'session_connected') {
                 enterConnectedSession();
@@ -2525,7 +2380,6 @@
                 const inner = document.getElementById('dashboardInnerContent');
                 const iframe = document.getElementById('remoteSessionIframe');
                 if (inner && iframe) {
-                    integratedSessionEntered = false;
                     iframe.src = 'about:blank';
                     iframe.style.display = 'none';
                     iframe.style.position = '';
@@ -2548,11 +2402,9 @@
     </script>
 <script>
 function minimizeWindow() { if(window.ipc) { window.ipc.postMessage('minimize'); } }
-function maximizeWindow() { if(window.ipc) { window.ipc.postMessage('toggle_maximize'); } }
+function maximizeWindow() { if(window.ipc) { window.ipc.postMessage('maximize'); } }
 function closeWindow() { if(window.ipc) { window.ipc.postMessage('close'); } }
 function enterConnectedSession() {
-    if (integratedSessionEntered) return;
-    integratedSessionEntered = true;
     if (window.ipc) { window.ipc.postMessage('maximize'); }
     console.log('[DESKSTREAM] session_state_changed: CONNECTED. Navbar visible.');
     const inner = document.getElementById('dashboardInnerContent');
@@ -2582,158 +2434,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
-
-        /* ============================================================
-           B-SIDE SESSION FUNCTIONS
-        ============================================================ */
-        let _bSessionTimerInterval = null;
-        let _bSessionStartTime = null;
-        let _bSessionWatchdog = null;
-        let _bSessionActive = false;
-        let _bSessionChatPoll = null;
-        let _bSessionOfferPoll = null;
-        const _bSessionHandledOffers = new Set();
-
-        function enterBConnectedSession() {
-            if (_bSessionActive) return;
-            _bSessionActive = true;
-            if (window.ipc) { window.ipc.postMessage('maximize'); }
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) {
-                overlay.classList.add('active');
-            }
-            // Start session timer
-            _bSessionStartTime = Date.now();
-            if (_bSessionTimerInterval) clearInterval(_bSessionTimerInterval);
-            _bSessionTimerInterval = setInterval(function() {
-                const elapsed = Math.floor((Date.now() - _bSessionStartTime) / 1000);
-                const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
-                const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
-                const s = String(elapsed % 60).padStart(2, '0');
-                const timerEl = document.getElementById('bSessionTimer');
-                if (timerEl) timerEl.textContent = h + ':' + m + ':' + s;
-            }, 1000);
-
-            // Watchdog: auto-dismiss overlay when Rust signals in_session=false
-            // (i.e., when the session ends on the controlled-device side).
-            if (_bSessionWatchdog) clearInterval(_bSessionWatchdog);
-            _bSessionWatchdog = setInterval(async () => {
-                try {
-                    const res = await fetch(AGENT_HEALTH);
-                    const health = await res.json();
-                    if (health.in_session === false) {
-                        // Rust says session ended — dismiss overlay.
-                        _dismissBSessionOverlay();
-                    }
-                } catch (e) { /* ignore transient errors */ }
-            }, 2000);
-            _bSessionChatPoll = setInterval(() => pollBSessionChat().catch(error => console.error('[CHAT] Poll failed:', error)), 300);
-            _bSessionOfferPoll = setInterval(() => pollBSessionFileOffers().catch(error => console.error('[FILE] Offer poll failed:', error)), 500);
-        }
-
-        function _dismissBSessionOverlay() {
-            if (!_bSessionActive) return;
-            _bSessionActive = false;
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.classList.remove('active');
-            document.getElementById('bSessionChatPanel')?.classList.remove('open');
-            document.getElementById('bSessionChatMessages')?.replaceChildren();
-            if (_bSessionTimerInterval) { clearInterval(_bSessionTimerInterval); _bSessionTimerInterval = null; }
-            if (_bSessionWatchdog) { clearInterval(_bSessionWatchdog); _bSessionWatchdog = null; }
-            if (_bSessionChatPoll) { clearInterval(_bSessionChatPoll); _bSessionChatPoll = null; }
-            if (_bSessionOfferPoll) { clearInterval(_bSessionOfferPoll); _bSessionOfferPoll = null; }
-            _bSessionStartTime = null;
-            const timerEl = document.getElementById('bSessionTimer');
-            if (timerEl) timerEl.textContent = '00:00:00';
-            _bSessionHandledOffers.clear();
-        }
-
-        function disconnectBSession() {
-            // Immediately hide the overlay — user intent is clear.
-            _dismissBSessionOverlay();
-            showToast('Session disconnected');
-            // Signal the backend to tear down the session token.
-            if (currentRequestToken) {
-                fetch(`${BACKEND}/api/connections/cancel.php`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ request_token: currentRequestToken }),
-                    credentials: 'include'
-                }).catch(() => {});
-            }
-            fetchAllDevices();
-        }
-
-        function toggleBSessionChat() {
-            document.getElementById('bSessionChatPanel')?.classList.toggle('open');
-            if (document.getElementById('bSessionChatPanel')?.classList.contains('open')) {
-                document.getElementById('bSessionChatInput')?.focus();
-            }
-        }
-
-        function appendBSessionChat(text, sent) {
-            const messages = document.getElementById('bSessionChatMessages');
-            const item = document.createElement('div');
-            item.className = `b-chat-message${sent ? ' sent' : ''}`;
-            item.textContent = text;
-            messages.appendChild(item);
-            messages.scrollTop = messages.scrollHeight;
-        }
-
-        async function pollBSessionChat() {
-            const response = await fetch('/desktop-api/session/messages');
-            if (!response.ok) throw new Error(`Chat poll failed: ${response.status}`);
-            const messages = await response.json();
-            for (const message of messages) appendBSessionChat(message, false);
-        }
-
-        document.getElementById('bSessionChatForm').addEventListener('submit', async event => {
-            event.preventDefault();
-            const input = document.getElementById('bSessionChatInput');
-            const message = input.value.trim();
-            if (!message) return;
-            const response = await fetch('/desktop-api/session/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message })
-            });
-            if (!response.ok) {
-                const error = await response.text();
-                showToast(`Chat send failed: ${error}`);
-                return;
-            }
-            appendBSessionChat(message, true);
-            input.value = '';
-        });
-
-        async function pollBSessionFileOffers() {
-            const response = await fetch('/desktop-api/session/offers');
-            if (!response.ok) throw new Error(`File offer poll failed: ${response.status}`);
-            const offers = await response.json();
-            for (const offer of offers) {
-                if (_bSessionHandledOffers.has(offer.transfer_id)) continue;
-                _bSessionHandledOffers.add(offer.transfer_id);
-                const accept = window.confirm(`Accept "${offer.filename}" (${offer.size} bytes)? It will be saved in Downloads\\DeskStream.`);
-                const decision = await fetch('/desktop-api/session/offer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ transfer_id: offer.transfer_id, accept })
-                });
-                if (!decision.ok) {
-                    showToast(`File offer response failed: ${await decision.text()}`);
-                    _bSessionHandledOffers.delete(offer.transfer_id);
-                }
-            }
-        }
-
-        function selectBSessionFile() {
-            if (!window.ipc) {
-                showToast('File picker is available in the DeskStream desktop app.');
-                return;
-            }
-            window.ipc.postMessage('send_file');
-        }
-    </script>
+</script>
 </body>
 
 </html>
+
+

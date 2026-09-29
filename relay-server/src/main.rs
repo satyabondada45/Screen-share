@@ -500,13 +500,13 @@ fn run_websocket_bridge(
                     let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 16 => {
-                    let mut hdr = [0u8; 2];
+                    let mut hdr = [0u8; 3];
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
                     if let Err(e) = host_reader.read_exact(&mut hdr) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=chat_header_failed error={:?} device={}", e, session_id_for_thread);
                         break;
                     }
-                    let psize = u16::from_be_bytes(hdr) as usize;
+                    let psize = u16::from_be_bytes([hdr[1], hdr[2]]) as usize;
                     let mut payload = vec![0u8; psize];
                     if let Err(e) = host_reader.read_exact(&mut payload) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=chat_payload_failed error={:?} device={}", e, session_id_for_thread);
@@ -576,6 +576,15 @@ fn run_websocket_bridge(
                     msg.push(24u8);
                     msg.extend_from_slice(&hdr);
                     msg.extend_from_slice(&payload);
+                    let _ = ws_tx_ctrl_fwd.send(msg);
+                }
+                25 | 26 | 27 => {
+                    let mut hdr = [0u8; 8];
+                    let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
+                    if let Err(_) = host_reader.read_exact(&mut hdr) { break; }
+                    let mut msg = Vec::with_capacity(1 + 8);
+                    msg.push(pkt);
+                    msg.extend_from_slice(&hdr);
                     let _ = ws_tx_ctrl_fwd.send(msg);
                 }
                 99 => {
