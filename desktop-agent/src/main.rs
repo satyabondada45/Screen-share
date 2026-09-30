@@ -13,6 +13,8 @@ pub mod tray;
 pub mod ui;
 pub mod webview_app;
 pub mod local_server;
+// TEMPORARY SESSION DIAGNOSTICS: remove with session_debug.rs after the A/B trace.
+pub mod session_debug;
 
 
 use arboard::Clipboard;
@@ -587,6 +589,14 @@ fn make_file_error_packet(transfer_id: u64, message: &str) -> Vec<u8> {
 // ============================================================
 
 fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) {
+    crate::session_debug::log(
+        &config.system_id,
+        &format!("B_START system_id={}", config.system_id),
+    );
+    crate::session_debug::log(
+        &config.system_id,
+        &format!("B_RELAY_CONFIG endpoint={}", relay_addr),
+    );
     let host_ip = relay_addr.split(':').next().unwrap_or("127.0.0.1");
     let backend_url = "https://friendssoftwaresolutions.in/DeskStream/api".to_string(); 
     // Use persistent device UUID as the machine identifier
@@ -609,6 +619,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         agent_log!("[DISCOVERY] Running in standalone relay mode.");
         config.system_id.clone()
     };
+    crate::session_debug::log(
+        &system_id,
+        &format!("B_SYSTEM_ID system_id={}", system_id),
+    );
+    crate::session_debug::log(
+        &system_id,
+        &format!("ROLE role=CONTROLLED video_direction=B->A system_id={}", system_id),
+    );
 
     let id_str = {
         let clean: String = system_id.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -633,14 +651,25 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
     loop {
         agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
+        crate::session_debug::log(&system_id, "B_TCP_CONNECT_START");
 
         let mut stream = match TcpStream::connect(&relay_addr) {
             Ok(s) => {
+                crate::session_debug::log(&system_id, "B_TCP_CONNECT_SUCCESS");
                 let _ = s.set_nodelay(true);
                 let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
                 s
             }
             Err(e) => {
+                crate::session_debug::log(
+                    &system_id,
+                    &format!("B_TCP_CONNECT_FAILED error={}", e),
+                );
+                crate::session_debug::log(&system_id, "B_DISCONNECT");
+                crate::session_debug::log(
+                    &system_id,
+                    "STATE_CHANGE old=CONNECTING new=DISCONNECTED",
+                );
                 eprintln!("[RELAY] Connection failed: {:?}", e);
                 println!("[SESSION STATE] OFFLINE");
                 println!("[RELAY][DISCONNECT] reason=Connection refused or network unreachable");
@@ -655,6 +684,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
         println!("[RELAY] TCP connection established");
         println!("[RELAY] Sending registration for System ID: {}", system_id);
+        crate::session_debug::log(
+            &system_id,
+            &format!("B_REGISTER_START system_id={}", system_id),
+        );
 
         // Registration (Type 1 + System ID as relay session key)
         let mut register_pkt = Vec::with_capacity(1 + system_id.len());
@@ -662,15 +695,32 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         register_pkt.extend_from_slice(system_id.as_bytes());
 
         if stream.write_all(&register_pkt).is_err() {
+            crate::session_debug::log(&system_id, "B_REGISTER_SEND_FAILED");
             eprintln!("[RELAY] Failed to send registration packet");
             println!("[SESSION STATE] OFFLINE");
             thread::sleep(Duration::from_secs(backoff_secs));
             backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
             continue;
         }
+        crate::session_debug::log(
+            &system_id,
+            &format!("B_REGISTER_SENT system_id={}", system_id),
+        );
 
         let mut ack = [0u8; 1];
-        if stream.read_exact(&mut ack).is_err() || ack[0] != 1 {
+        if stream.read_exact(&mut ack).is_err() {
+            crate::session_debug::log(&system_id, "B_REGISTER_ACK_READ_FAILED");
+            eprintln!("[RELAY] Registration failed or unacknowledged by relay");
+            println!("[SESSION STATE] OFFLINE");
+            thread::sleep(Duration::from_secs(backoff_secs));
+            backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+            continue;
+        }
+        crate::session_debug::log(
+            &system_id,
+            &format!("B_REGISTER_ACK ack={}", ack[0]),
+        );
+        if ack[0] != 1 {
             eprintln!("[RELAY] Registration failed or unacknowledged by relay");
             println!("[SESSION STATE] OFFLINE");
             thread::sleep(Duration::from_secs(backoff_secs));
@@ -679,6 +729,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         }
 
         println!("[RELAY] Registration ACK received");
+        crate::session_debug::log(
+            &system_id,
+            "STATE_CHANGE old=CONNECTING new=CONNECTED",
+        );
         agent_log!("[AGENT] Registration acknowledged");
         agent_log!("[AGENT] Registration sent");
         agent_log!("[AGENT] ACTUAL DEVICE ID = {}", id_str);
@@ -737,6 +791,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                         // Type 3: Incoming session request / Authentication
                         3 => {
+                            crate::session_debug::log(
+                                &system_id,
+                                &format!(
+                                    "B_SESSION_REQUEST_RECEIVED type=3 system_id={}",
+                                    system_id
+                                ),
+                            );
                             let mut auth_hash = [0u8; 32];
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                             if stream.read_exact(&mut auth_hash).is_err() {
@@ -748,6 +809,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             println!("[SESSION] ACCEPT received");
                             println!("[SESSION] Starting remote session");
                             println!("[STREAM STATE] STARTING");
+                            crate::session_debug::log(
+                                &system_id,
+                                "B_STREAM_STATE state=STARTING",
+                            );
                             println!("[STREAM] Starting screen capture");
                             println!("[STREAM] Starting H.264 encoder");
 
@@ -762,6 +827,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 eprintln!("[Agent] Failed to send approval ACK to relay.");
                                 break 'viewer_loop;
                             }
+                            crate::session_debug::log(
+                                &system_id,
+                                "B_SESSION_APPROVAL_SENT ack=1",
+                            );
 
                             println!("[Host] Approval response sent successfully (APPROVED)");
                             backend.log_session_start(&system_id);
@@ -833,9 +902,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             println!("[STREAM STATE] ACTIVE");
                             println!("[VIDEO STATE] ACTIVE");
+                            crate::session_debug::log(
+                                &system_id,
+                                "B_STREAM_STATE state=ACTIVE",
+                            );
+                            let diagnostic_system_id = system_id.clone();
 
                             let writer_handle = thread::spawn(move || {
                                 let mut video_trace_count = 0u64;
+                                let mut diagnostic_video_count = 0u64;
                                 let mut write_packet = |packet: Vec<u8>| -> bool {
                                     if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
                                         video_trace_count += 1;
@@ -848,7 +923,29 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         }
                                     }
                                     match write_tcp.write_all(&packet) {
-                                        Ok(_) => true,
+                                        Ok(_) => {
+                                            if packet.first() == Some(&13u8) {
+                                                diagnostic_video_count += 1;
+                                                if diagnostic_video_count == 1 {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        "B_FIRST_TYPE13_SENT",
+                                                    );
+                                                }
+                                                if diagnostic_video_count == 1
+                                                    || diagnostic_video_count % 60 == 0
+                                                {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "B_TYPE13_SENT count={}",
+                                                            diagnostic_video_count
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                            true
+                                        }
                                         Err(e) => {
                                             eprintln!(
                                                 "[Writer] TCP packet write failed: type={} bytes={} error={:?}; ending session to preserve stream framing",
@@ -857,6 +954,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 e
                                             );
                                             println!("[VIDEO STATE] WRITE_FAILED");
+                                            crate::session_debug::log(
+                                                &diagnostic_system_id,
+                                                &format!("B_VIDEO_WRITE_FAILED error={}", e),
+                                            );
                                             write_connected.store(false, Ordering::Release);
                                             false
                                         }
@@ -1943,6 +2044,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             backend.log_session_end(&system_id, 0.0);
                             println!("[STREAM STATE] STOPPED");
+                            crate::session_debug::log(
+                                &system_id,
+                                "B_STREAM_STATE state=STOPPED",
+                            );
 
                             println!("[Agent] Session ended. Preparing for next request...");
                             is_in_session.store(false, Ordering::SeqCst);
@@ -1971,6 +2076,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                     println!("[RELAY][DISCONNECT] system_id={}", system_id);
                     println!("[RELAY][DISCONNECT] socket_error={:?}", e);
                     println!("[RELAY][DISCONNECT] remote_closed=true");
+                    crate::session_debug::log(
+                        &system_id,
+                        &format!("B_DISCONNECT error={}", e),
+                    );
+                    crate::session_debug::log(
+                        &system_id,
+                        "STATE_CHANGE old=CONNECTED new=DISCONNECTED",
+                    );
                     println!("[SESSION STATE] OFFLINE");
                     break 'viewer_loop;
                 }

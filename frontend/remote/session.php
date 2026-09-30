@@ -976,6 +976,21 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             div.dataset.messageId = String(message.id);
             div.textContent = message.text;
             chatMessages.appendChild(div);
+            if (message.type === "sent") {
+                logAChatDiagnostic("A_CHAT_RENDER_MESSAGE", {
+                    message_id: String(message.id),
+                    sender: "local",
+                    dom_count: String(chatMessages.children.length),
+                    rendered: String(div.isConnected)
+                });
+            }
+        }
+
+        function logAChatDiagnostic(event, details = {}) {
+            console.info(`[A CHAT DIAG] ${event}`, details);
+            if (typeof sessionDebug === "function") {
+                sessionDebug(event, details);
+            }
         }
 
         function renderChatHistory() {
@@ -992,19 +1007,56 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 type,
                 text
             };
-            chatHistory.push(message);
-            if (chatHistory.length > 500) {
-                chatHistory.shift();
-                chatMessages.firstElementChild?.remove();
+            const isLocalSend = type === "sent";
+            if (isLocalSend) {
+                logAChatDiagnostic("A_CHAT_LOCAL_APPEND_START", {
+                    message_id: String(message.id),
+                    sender: "local",
+                    state_count_before: String(chatHistory.length),
+                    dom_count_before: String(chatMessages.children.length),
+                    panel_open: String(chatPanel.classList.contains("open"))
+                });
             }
-            if (chatPanel.classList.contains("open")) {
-                renderChatMessage(message);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+            try {
+                chatHistory.push(message);
+                if (chatHistory.length > 500) {
+                    chatHistory.shift();
+                    chatMessages.firstElementChild?.remove();
+                }
+                if (chatPanel.classList.contains("open")) {
+                    renderChatMessage(message);
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+                if (isLocalSend) {
+                    const renderedMessage = chatMessages.querySelector(
+                        `[data-message-id="${message.id}"]`
+                    );
+                    logAChatDiagnostic("A_CHAT_LOCAL_APPEND_SUCCESS", {
+                        message_id: String(message.id),
+                        sender: "local",
+                        state_count_after: String(chatHistory.length),
+                        dom_count_after: String(chatMessages.children.length),
+                        rendered: String(Boolean(renderedMessage)),
+                        panel_open: String(chatPanel.classList.contains("open"))
+                    });
+                }
+            } catch (error) {
+                if (isLocalSend) {
+                    logAChatDiagnostic("A_CHAT_LOCAL_APPEND_FAILED", {
+                        message_id: String(message.id),
+                        sender: "local",
+                        state_count_after: String(chatHistory.length),
+                        dom_count_after: String(chatMessages.children.length),
+                        error: error.name || "Error"
+                    });
+                }
+                throw error;
             }
         }
 
         window.addEventListener("chat_message_received", event => {
             console.info(`[CHAT UI] direction=B->A event_received=true panel_open=${chatPanel.classList.contains("open")} characters=${event.detail.text.length}`);
+            chatPanel.classList.add("open");
             appendMessage("recv", event.detail.text);
         });
 
@@ -1057,6 +1109,11 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const msg =
                 chatInput.value.trim();
 
+            logAChatDiagnostic("A_CHAT_SEND_START", {
+                message_length: String(msg.length),
+                panel_open: String(chatPanel.classList.contains("open"))
+            });
+
             if (!msg) {
 
                 return;
@@ -1078,6 +1135,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
             const msgBytes =
                 new TextEncoder().encode(msg);
+            logAChatDiagnostic("A_CHAT_SEND_TEXT_CREATED", {
+                message_length: String(msgBytes.length)
+            });
 
             if (msgBytes.length > 65535) {
 
@@ -1115,13 +1175,27 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     `receiveLoopAlive=${ws.readyState === WebSocket.OPEN} ` +
                     `parserBufferBytes=${wsRxBuffer.length}`
                 );
-                ws.send(pkt);
+                try {
+                    ws.send(pkt);
+                    logAChatDiagnostic("A_CHAT_WS_SEND_SUCCESS", {
+                        packet_type: "16",
+                        message_length: String(msgBytes.length)
+                    });
+                } catch (error) {
+                    logAChatDiagnostic("A_CHAT_WS_SEND_FAILED", {
+                        packet_type: "16",
+                        message_length: String(msgBytes.length),
+                        error: error.name || "Error"
+                    });
+                    throw error;
+                }
                 chatVideoSnapshot = {
                     sentAt: Date.now(),
                     packetCountBefore: streamStats.received_packets
                 };
                 console.info(`[CHAT TYPE 16 SENT] bytes=${pkt.length} payloadBytes=${msgBytes.length}`);
 
+                chatPanel.classList.add("open");
                 appendMessage(
                     "sent",
                     msg
@@ -1130,6 +1204,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 chatInput.value = "";
 
             } catch (error) {
+                logAChatDiagnostic("A_CHAT_SEND_FAILED", {
+                    error: error.name || "Error"
+                });
 
                 console.error(
                     "[CHAT] Send failed:",

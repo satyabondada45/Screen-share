@@ -2463,7 +2463,7 @@
                 const data = await res.json();
                 if (data.status === 'success' && data.request) {
                     const token = data.request.request_token;
-                    const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
+                    const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
                     
                     if (data.request.status === 'accepted') {
                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
@@ -2524,7 +2524,7 @@
                 const data = await res.json();
                 if (data.status === 'success' && data.request) {
                     const token = data.request.request_token;
-                    const sessionUrl = `session.html?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                    const sessionUrl = `session.html?id=${encodeURIComponent(currentHostUid)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
                     openIntegratedSession(sessionUrl);
                 } else {
                     showToast(data.message || 'Failed to initiate local connection');
@@ -3041,6 +3041,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (_bSessionChatRenderedIds.has(messageId)) return;
             _bSessionChatRenderedIds.add(messageId);
             const messages = document.getElementById('bSessionChatMessages');
+            if (!message.from_local) {
+                document.getElementById('bSessionChatPanel')?.classList.add('open');
+            }
             const item = document.createElement('div');
             item.className = `msg ${message.from_local ? 'sent' : 'recv'}`;
             item.dataset.messageId = messageId;

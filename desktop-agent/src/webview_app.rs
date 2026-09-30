@@ -9,6 +9,103 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+// TEMPORARY SESSION DIAGNOSTICS: accept only fixed event names and non-secret metadata.
+fn handle_session_debug_ipc(message: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(message) else {
+        return false;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("session_debug") {
+        return false;
+    }
+
+    let event = match value.get("event").and_then(serde_json::Value::as_str) {
+        Some(event) => event,
+        None => return true,
+    };
+    const ALLOWED_EVENTS: &[&str] = &[
+        "A_START",
+        "ROLE",
+        "A_WS_CONFIG",
+        "A_TARGET_ID",
+        "A_WS_CONNECT_START",
+        "A_WS_CONNECT_SUCCESS",
+        "A_WS_CONNECT_FAILED",
+        "A_TYPE2_SENT",
+        "A_SESSION_APPROVED",
+        "A_STREAM_STATE",
+        "A_TYPE13_RECEIVED",
+        "A_FIRST_TYPE13_RECEIVED",
+        "A_FIRST_FRAME_DECODED",
+        "A_FIRST_FRAME_DISPLAYED",
+        "A_DISCONNECT",
+        "STATE_CHANGE",
+        "A_CHAT_SEND_START",
+        "A_CHAT_SEND_TEXT_CREATED",
+        "A_CHAT_WS_SEND_SUCCESS",
+        "A_CHAT_WS_SEND_FAILED",
+        "A_CHAT_SEND_FAILED",
+        "A_CHAT_LOCAL_APPEND_START",
+        "A_CHAT_LOCAL_APPEND_SUCCESS",
+        "A_CHAT_LOCAL_APPEND_FAILED",
+        "A_CHAT_RENDER_MESSAGE",
+    ];
+    if !ALLOWED_EVENTS.contains(&event) {
+        return true;
+    }
+
+    let field = |name: &str| -> String {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| {
+                value
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(256)
+                    .collect::<String>()
+            })
+            .unwrap_or_default()
+    };
+    let system_id = field("system_id");
+    let identity = if system_id.len() == 9 && system_id.chars().all(|ch| ch.is_ascii_digit()) {
+        system_id
+    } else {
+        "unknown".to_string()
+    };
+    let mut details = Vec::new();
+    for name in [
+        "role",
+        "video_direction",
+        "target_system_id",
+        "endpoint",
+        "state",
+        "old",
+        "new",
+        "count",
+        "result",
+        "code",
+        "message_id",
+        "sender",
+        "message_length",
+        "packet_type",
+        "state_count_before",
+        "state_count_after",
+        "dom_count_before",
+        "dom_count_after",
+        "dom_count",
+        "panel_open",
+        "rendered",
+        "error",
+    ] {
+        let value = field(name);
+        if !value.is_empty() {
+            details.push(format!("{name}={value}"));
+        }
+    }
+    crate::session_debug::log(&identity, &format!("{} {}", event, details.join(" ")));
+    true
+}
+
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -46,7 +143,12 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let _webview = WebViewBuilder::new()
         .with_url(&local_url)
         .with_devtools(false)
-        .with_ipc_handler(move |msg| { let _ = proxy.send_event(msg.into_body()); })
+        .with_ipc_handler(move |msg| {
+            let body = msg.into_body();
+            if !handle_session_debug_ipc(&body) {
+                let _ = proxy.send_event(body);
+            }
+        })
         .with_initialization_script(r#"
             window.__deskstreamDesktop = true;
         "#)

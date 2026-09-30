@@ -698,9 +698,30 @@ window.addEventListener('DOMContentLoaded', () => {
         console.log("[SECURITY] secure:", window.isSecureContext);
         console.log("[SECURITY] VideoDecoder:", ("VideoDecoder" in window));
 
-        const DEVICE_ID = new URLSearchParams(window.location.search).get('id');
+        const SESSION_PARAMS = new URLSearchParams(window.location.search);
+        const DEVICE_ID = SESSION_PARAMS.get('id');
+        const DIAGNOSTIC_SYSTEM_ID = SESSION_PARAMS.get('requester_system_id') || '';
 
         const WS_URL = "wss://admin.friendssoftwaresolutions.in";
+
+        // TEMPORARY SESSION DIAGNOSTICS: sent through the existing WebView IPC only.
+        function sessionDebug(event, fields = {}) {
+            if (!window.ipc || typeof window.ipc.postMessage !== 'function') return;
+            window.ipc.postMessage(JSON.stringify({
+                type: 'session_debug',
+                event,
+                system_id: DIAGNOSTIC_SYSTEM_ID,
+                target_system_id: DEVICE_ID || '',
+                role: 'CONTROLLER',
+                video_direction: 'B->A',
+                ...fields
+            }));
+        }
+
+        sessionDebug('A_START');
+        sessionDebug('ROLE');
+        sessionDebug('A_WS_CONFIG', { endpoint: WS_URL });
+        sessionDebug('A_TARGET_ID');
 
 
         /* ============================================================
@@ -732,6 +753,7 @@ window.addEventListener('DOMContentLoaded', () => {
         let renderHeight = 0;
 
         let videoFrameCount = 0;
+        let diagnosticType13Count = 0;
 
         let videoDecodeBusy = false;
 
@@ -908,6 +930,21 @@ window.addEventListener('DOMContentLoaded', () => {
             div.dataset.messageId = String(message.id);
             div.textContent = message.text;
             chatMessages.appendChild(div);
+            if (message.type === "sent") {
+                logAChatDiagnostic("A_CHAT_RENDER_MESSAGE", {
+                    message_id: String(message.id),
+                    sender: "local",
+                    dom_count: String(chatMessages.children.length),
+                    rendered: String(div.isConnected)
+                });
+            }
+        }
+
+        function logAChatDiagnostic(event, details = {}) {
+            console.info(`[A CHAT DIAG] ${event}`, details);
+            if (typeof sessionDebug === "function") {
+                sessionDebug(event, details);
+            }
         }
 
         function renderChatHistory() {
@@ -924,19 +961,56 @@ window.addEventListener('DOMContentLoaded', () => {
                 type,
                 text
             };
-            chatHistory.push(message);
-            if (chatHistory.length > 500) {
-                chatHistory.shift();
-                chatMessages.firstElementChild?.remove();
+            const isLocalSend = type === "sent";
+            if (isLocalSend) {
+                logAChatDiagnostic("A_CHAT_LOCAL_APPEND_START", {
+                    message_id: String(message.id),
+                    sender: "local",
+                    state_count_before: String(chatHistory.length),
+                    dom_count_before: String(chatMessages.children.length),
+                    panel_open: String(chatPanel.classList.contains("open"))
+                });
             }
-            if (chatPanel.classList.contains("open")) {
-                renderChatMessage(message);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+            try {
+                chatHistory.push(message);
+                if (chatHistory.length > 500) {
+                    chatHistory.shift();
+                    chatMessages.firstElementChild?.remove();
+                }
+                if (chatPanel.classList.contains("open")) {
+                    renderChatMessage(message);
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+                if (isLocalSend) {
+                    const renderedMessage = chatMessages.querySelector(
+                        `[data-message-id="${message.id}"]`
+                    );
+                    logAChatDiagnostic("A_CHAT_LOCAL_APPEND_SUCCESS", {
+                        message_id: String(message.id),
+                        sender: "local",
+                        state_count_after: String(chatHistory.length),
+                        dom_count_after: String(chatMessages.children.length),
+                        rendered: String(Boolean(renderedMessage)),
+                        panel_open: String(chatPanel.classList.contains("open"))
+                    });
+                }
+            } catch (error) {
+                if (isLocalSend) {
+                    logAChatDiagnostic("A_CHAT_LOCAL_APPEND_FAILED", {
+                        message_id: String(message.id),
+                        sender: "local",
+                        state_count_after: String(chatHistory.length),
+                        dom_count_after: String(chatMessages.children.length),
+                        error: error.name || "Error"
+                    });
+                }
+                throw error;
             }
         }
 
         window.addEventListener("chat_message_received", event => {
             console.info(`[CHAT UI] direction=B->A event_received=true panel_open=${chatPanel.classList.contains("open")} characters=${event.detail.text.length}`);
+            chatPanel.classList.add("open");
             appendMessage("recv", event.detail.text);
         });
 
@@ -989,6 +1063,11 @@ window.addEventListener('DOMContentLoaded', () => {
             const msg =
                 chatInput.value.trim();
 
+            logAChatDiagnostic("A_CHAT_SEND_START", {
+                message_length: String(msg.length),
+                panel_open: String(chatPanel.classList.contains("open"))
+            });
+
             if (!msg) {
 
                 return;
@@ -1010,6 +1089,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
             const msgBytes =
                 new TextEncoder().encode(msg);
+            logAChatDiagnostic("A_CHAT_SEND_TEXT_CREATED", {
+                message_length: String(msgBytes.length)
+            });
 
             if (msgBytes.length > 65535) {
 
@@ -1047,13 +1129,27 @@ window.addEventListener('DOMContentLoaded', () => {
                     `receiveLoopAlive=${ws.readyState === WebSocket.OPEN} ` +
                     `parserBufferBytes=${wsRxBuffer.length}`
                 );
-                ws.send(pkt);
+                try {
+                    ws.send(pkt);
+                    logAChatDiagnostic("A_CHAT_WS_SEND_SUCCESS", {
+                        packet_type: "16",
+                        message_length: String(msgBytes.length)
+                    });
+                } catch (error) {
+                    logAChatDiagnostic("A_CHAT_WS_SEND_FAILED", {
+                        packet_type: "16",
+                        message_length: String(msgBytes.length),
+                        error: error.name || "Error"
+                    });
+                    throw error;
+                }
                 chatVideoSnapshot = {
                     sentAt: Date.now(),
                     packetCountBefore: streamStats.received_packets
                 };
                 console.info(`[CHAT TYPE 16 SENT] bytes=${pkt.length} payloadBytes=${msgBytes.length}`);
 
+                chatPanel.classList.add("open");
                 appendMessage(
                     "sent",
                     msg
@@ -1062,6 +1158,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 chatInput.value = "";
 
             } catch (error) {
+                logAChatDiagnostic("A_CHAT_SEND_FAILED", {
+                    error: error.name || "Error"
+                });
 
                 console.error(
                     "[CHAT] Send failed:",
@@ -1664,7 +1763,14 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         function setStreamState(newState) {
+            const oldState = currentStreamState;
             currentStreamState = newState;
+            if (oldState !== newState) {
+                sessionDebug('STATE_CHANGE', { old: oldState, new: newState });
+                if (newState === 'STREAM_ACTIVE') {
+                    sessionDebug('A_STREAM_STATE', { state: newState });
+                }
+            }
             console.log("[STREAM STATE]", newState);
             if (newState === "WAITING_FOR_KEYFRAME") {
                 console.warn(
@@ -2045,13 +2151,17 @@ window.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
-                if (!window._display_logged) {
+                const isFirstDisplayedFrame = !window._display_logged;
+                if (isFirstDisplayedFrame) {
                     console.log(`[DISPLAY]\nframeCodedWidth = ${frame.codedWidth}\nframeCodedHeight = ${frame.codedHeight}\nframeDisplayWidth = ${frame.displayWidth}\nframeDisplayHeight = ${frame.displayHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
                     console.log("[DISPLAY] Frame rendered");
                     window._display_logged = true;
                 }
 
                 ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                if (isFirstDisplayedFrame) {
+                    sessionDebug('A_FIRST_FRAME_DISPLAYED');
+                }
                 browserPerf.renderedFrames++;
                 browserPerf.renderWindow++;
                 videoDiagnostics.lastRenderedAt = Date.now();
@@ -2089,7 +2199,12 @@ window.addEventListener('DOMContentLoaded', () => {
                 videoDecoder = new VideoDecoder({
                     output(frame) {
                         if (decoderState === DecoderState.WAITING_FOR_KEYFRAME) {
+                            const previousDecoderState = decoderState;
                             decoderState = DecoderState.CONFIGURED;
+                            sessionDebug('STATE_CHANGE', {
+                                old: previousDecoderState,
+                                new: decoderState
+                            });
                             console.log("[DECODER STATE] CONFIGURED (Keyframe decoded)");
                             console.log("[WEBCODECS] KEYFRAME DECODED");
                         }
@@ -2097,6 +2212,9 @@ window.addEventListener('DOMContentLoaded', () => {
                         browserPerf.decodeWindow++;
                         videoDiagnostics.lastDecodedAt = Date.now();
                         videoFrameCount++;
+                        if (videoFrameCount === 1) {
+                            sessionDebug('A_FIRST_FRAME_DECODED');
+                        }
                         const outputAt = performance.now();
                         const timing = videoTimingByTimestamp.get(frame.timestamp);
                         if (timing) {
@@ -2930,6 +3048,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
+                        if (type === 13) {
+                            diagnosticType13Count++;
+                            if (diagnosticType13Count === 1) {
+                                sessionDebug('A_FIRST_TYPE13_RECEIVED');
+                            }
+                            if (diagnosticType13Count === 1 || diagnosticType13Count % 60 === 0) {
+                                sessionDebug('A_TYPE13_RECEIVED', { count: String(diagnosticType13Count) });
+                            }
+                        }
                         handleVideoPacket(packetBuffer);
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
                         continue;
@@ -3004,6 +3131,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     }
                     else if (type === 1) {
                         websocketAuthenticated = true;
+                        sessionDebug('A_SESSION_APPROVED', { result: 'TYPE1' });
                         console.log("[WS] Session approved by host.");
                         setStreamState("STREAM_ACTIVE");
                         wsRxBuffer = wsRxBuffer.slice(1);
@@ -3145,10 +3273,12 @@ window.addEventListener('DOMContentLoaded', () => {
         function connectWebSocket(targetUrl, isDirect) {
             directConnection = isDirect;
             resetWebSocketState();
+            sessionDebug('A_WS_CONNECT_START', { endpoint: targetUrl });
 
             try {
                 ws = new WebSocket(targetUrl);
             } catch (error) {
+                sessionDebug('A_WS_CONNECT_FAILED', { result: error.name || 'creation_error' });
                 console.error("[WS] Creation failed:", error);
                 if (!fallbackToRelay()) {
                     stopWebStream();
@@ -3159,6 +3289,8 @@ window.addEventListener('DOMContentLoaded', () => {
             ws.binaryType = "arraybuffer";
 
             ws.onopen = function () {
+                sessionDebug('A_WS_CONNECT_SUCCESS', { result: 'OPEN' });
+                sessionDebug('STATE_CHANGE', { old: 'CONNECTING', new: 'CONNECTED' });
                 console.log("[AUTH DEBUG] WebSocket OPEN");
                 console.log("[WS] OPEN");
                 setHud("AUTHENTICATING...");
@@ -3171,6 +3303,7 @@ window.addEventListener('DOMContentLoaded', () => {
             ws.onmessage = handleMessage;
 
             ws.onerror = function (error) {
+                sessionDebug('A_WS_CONNECT_FAILED', { result: 'error_event' });
                 console.error("[WS] Error event fired (point: ws.onerror handler)", error);
                 console.error(`[WS] state: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount}`);
                 if (fallbackToRelay()) {
@@ -3180,6 +3313,7 @@ window.addEventListener('DOMContentLoaded', () => {
             };
 
             ws.onclose = function (event) {
+                sessionDebug('A_DISCONNECT', { code: String(event.code) });
                 stopMicrophone();
                 stopLocalChatTyping();
                 setRemoteChatTyping(false);
@@ -3246,6 +3380,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
             videoFrameCount = 0;
+            diagnosticType13Count = 0;
             renderWidth = 0;
             renderHeight = 0;
             videoDecodeBusy = false;
