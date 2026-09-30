@@ -113,6 +113,8 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
+#[cfg(target_os = "windows")]
+use wry::WebViewBuilderExtWindows;
 
 /// The bundled desktop application UI.
 const DESKSTREAM_URL: &str = "deskstream://localhost/dashboard.html";
@@ -140,8 +142,16 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
             let _ = window.set_window_icon(Some(icon));
         }
     }
-    let _webview = WebViewBuilder::new()
+    #[cfg(target_os = "windows")]
+    let builder = WebViewBuilder::new()
         .with_url(&local_url)
+        .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required");
+
+    #[cfg(not(target_os = "windows"))]
+    let builder = WebViewBuilder::new()
+        .with_url(&local_url);
+
+    let _webview = builder
         .with_devtools(false)
         .with_ipc_handler(move |msg| {
             let body = msg.into_body();
@@ -177,15 +187,32 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         let is_max = window.is_maximized();
                         window.set_maximized(!is_max);
                     },
-                    "send_file" => {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    "send_file" | "send_folder" => {
+                        let selection = if req == "send_folder" {
+                            rfd::FileDialog::new()
+                                .pick_folder()
+                                .map(|path| vec![path])
+                        } else {
+                            rfd::FileDialog::new().pick_files()
+                        };
+                        if let Some(paths) = selection {
                             let local_app_data = std::env::var("LOCALAPPDATA")
                                 .unwrap_or_else(|_| "C:\\temp".to_string());
                             let app_dir = std::path::Path::new(&local_app_data).join("DeskStream");
                             if let Err(error) = std::fs::create_dir_all(&app_dir) {
                                 eprintln!("[FILE TX] Failed to create transfer directory: {error}");
-                            } else if let Err(error) = std::fs::write(app_dir.join("send_file.txt"), path.to_string_lossy().as_bytes()) {
-                                eprintln!("[FILE TX] Failed to queue selected file: {error}");
+                            } else {
+                                let selected_paths = paths
+                                    .iter()
+                                    .map(|path| path.to_string_lossy())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if let Err(error) = std::fs::write(
+                                    app_dir.join("send_file.txt"),
+                                    selected_paths.as_bytes(),
+                                ) {
+                                    eprintln!("[FILE TX] Failed to queue selected file: {error}");
+                                }
                             }
                         }
                     }

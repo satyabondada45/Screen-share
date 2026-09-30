@@ -1966,6 +1966,9 @@ function getRelativeTime($timestamp)
         let currentHostUid = PHP_SYSTEM_ID || PHP_DEVICE_UUID || PHP_HOST_UID;
         let currentTargetUid = currentHostUid;
         let currentRequestToken = null;
+        let approvedReverseRequesterId = null;
+        let approvedReverseExpiresAt = 0;
+        let autoAcceptingReverseToken = null;
         let pendingPollInterval = null;
         let registeredDevicesList = [];
         const registeredAgentSystemIds = new Set();
@@ -2118,7 +2121,7 @@ function getRelativeTime($timestamp)
                             clearInterval(pendingPollInterval);
                             showToast('Connection APPROVED! Launching session...');
                             setTimeout(() => {
-                                const sessionUrl = `remote/session.php?id=${encodeURIComponent(cleanId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
+                                const sessionUrl = `remote/session.php?id=${encodeURIComponent(cleanId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
                                 openIntegratedSession(sessionUrl);
                             }, 500);
                         } else if (statusData.request_status === 'rejected') {
@@ -2187,24 +2190,50 @@ function getRelativeTime($timestamp)
         async function acceptConnection() {
             const overlay = document.getElementById('incomingModalOverlay');
             overlay.classList.remove('open');
+            let isApprovedReverseRequest = false;
+            let accepted = false;
 
             if (currentRequestToken) {
-                handledTokens.add(currentRequestToken);
+                const requestToken = currentRequestToken;
+                isApprovedReverseRequest = requestToken === autoAcceptingReverseToken;
+                handledTokens.add(requestToken);
                 console.log("[REQUEST] ACCEPT clicked");
-                console.log("[REQUEST] Sending ACCEPT for Request ID:", currentRequestToken);
+                console.log("[REQUEST] Sending ACCEPT for Request ID:", requestToken);
                 try {
-                    await fetch('/DeskStream/api/connections/accept.php', {
+                    const response = await fetch('/DeskStream/api/connections/accept.php', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            request_token: currentRequestToken,
+                            request_token: requestToken,
                             target_system_id: currentHostUid
                         })
                     });
-                } catch (e) { }
+                    const result = await response.json();
+                    if (!response.ok || result.status !== 'success') {
+                        throw new Error(result.message || `HTTP ${response.status}`);
+                    }
+                    accepted = true;
+                    if (isApprovedReverseRequest) {
+                        autoAcceptingReverseToken = null;
+                        approvedReverseRequesterId = null;
+                        approvedReverseExpiresAt = 0;
+                    }
+                } catch (error) {
+                    console.error('[REQUEST] Accept failed:', error);
+                    if (isApprovedReverseRequest) {
+                        handledTokens.delete(requestToken);
+                        autoAcceptingReverseToken = null;
+                        showToast('Could not start the approved reverse session');
+                        return;
+                    }
+                    showToast('Connection acceptance failed');
+                    return;
+                }
             }
 
-            showToast('Connection accepted. Remote screen sharing active.');
+            if (accepted && !isApprovedReverseRequest) {
+                showToast('Connection accepted. Remote screen sharing active.');
+            }
         }
 
         function handleBackdropClick(e) {
@@ -2567,16 +2596,29 @@ function getRelativeTime($timestamp)
                     const incData = await incRes.json();
                     if (incData.has_request && incData.request) {
                         const req = incData.request;
-                        // If modal is not already open, display incoming request
-                        const modalOverlay = document.getElementById('incomingModalOverlay');
-                        if (!modalOverlay.classList.contains('open')) {
-                            promptIncomingModal(
-                                req.requester_name || 'Remote User',
-                                req.requester_system_id,
-                                req.requester_ip || 'Remote IP',
-                                'Just now',
-                                req.request_token
-                            );
+                        if (approvedReverseRequesterId && Date.now() > approvedReverseExpiresAt) {
+                            approvedReverseRequesterId = null;
+                            approvedReverseExpiresAt = 0;
+                        }
+                        if (approvedReverseRequesterId
+                            && req.requester_system_id === approvedReverseRequesterId
+                            && req.request_token !== autoAcceptingReverseToken) {
+                            currentRequestToken = req.request_token;
+                            autoAcceptingReverseToken = req.request_token;
+                            acceptConnection();
+                        } else {
+                            // If modal is not already open, display incoming request
+                            const modalOverlay = document.getElementById('incomingModalOverlay');
+                            if (!modalOverlay.classList.contains('open')
+                                && req.request_token !== autoAcceptingReverseToken) {
+                                promptIncomingModal(
+                                    req.requester_name || 'Remote User',
+                                    req.requester_system_id,
+                                    req.requester_ip || 'Remote IP',
+                                    'Just now',
+                                    req.request_token
+                                );
+                            }
                         }
                     }
                 } catch (e) { }
@@ -2692,7 +2734,7 @@ function getRelativeTime($timestamp)
                 const token = data.request.request_token;
                 showToast('Local session ready! Launching...');
                 setTimeout(() => {
-                    const sessionUrl = `remote/session.php?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                    const sessionUrl = `remote/session.php?id=${encodeURIComponent(currentHostUid)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
                     openIntegratedSession(sessionUrl);
                 }, 500);
 
@@ -2742,6 +2784,16 @@ function getRelativeTime($timestamp)
                     iframe.style.display = 'none';
                     inner.style.display = 'block';
                     fetchAllDevices();
+                }
+            } else if (e.source === document.getElementById('remoteSessionIframe')?.contentWindow
+                && e.data?.type === 'reverse_remote_approved') {
+                const requesterId = String(e.data.requester_system_id || '');
+                if (/^\d{9}$/.test(requesterId)) {
+                    approvedReverseRequesterId = requesterId;
+                    approvedReverseExpiresAt = Date.now() + 30000;
+                    showToast('Reverse permission approved. Reconnecting in the opposite direction...');
+                } else {
+                    console.error('[REVERSE] Approved peer identity is invalid; automatic handoff was not armed.');
                 }
             }
         });

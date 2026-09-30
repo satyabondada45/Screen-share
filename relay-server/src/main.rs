@@ -1578,6 +1578,18 @@ fn main() {
         let hosts_clone = Arc::clone(&hosts);
 
         match connection_type {
+            // LOCAL SHUTDOWN (Type 99)
+            99 => {
+                let is_local = stream.peer_addr().map(|addr| addr.ip().is_loopback()).unwrap_or(false);
+                if is_local {
+                    println!("[Relay] Received local shutdown command. Exiting...");
+                    running.store(false, Ordering::SeqCst);
+                } else {
+                    println!("[Relay] Rejected remote shutdown command from {}", peer);
+                }
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+
             // HOST REGISTRATION (Type 1)
             1 => {
                 println!("[Relay] Connection identified as HOST");

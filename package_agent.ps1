@@ -1,92 +1,76 @@
-# package_agent.ps1
-# Builds the desktop-agent and packages it into a downloadable ZIP installer.
+# Packages the verified unified DeskStream release without rebuilding it.
 
 $ErrorActionPreference = "Stop"
 
-$SourceDirAgent = "$PSScriptRoot\desktop-agent"
-$ReleaseExeAgent = "$SourceDirAgent\target\release\desktop-agent.exe"
-$DownloadsDir = "$PSScriptRoot\frontend\downloads"
-$StagingDir = "$PSScriptRoot\installer_staging"
-$ZipFile = "$DownloadsDir\DeskStream-Agent-Installer.zip"
+$ReleaseExe = Join-Path $PSScriptRoot "DESKSTREAM\DeskStream.exe"
+$DownloadsDir = Join-Path $PSScriptRoot "frontend\downloads"
+$PackagePath = Join-Path $DownloadsDir "DeskStream-verified-x64.zip"
+$ExpectedExeSha256 = "AD3CF3AF97A83FDF93CFCCCF82828C2113740BE427B42A579A4AF78EC660825F"
 
-Write-Host "======================================"
-Write-Host " DeskStream Installer Packager"
-Write-Host "======================================"
-
-Write-Host "[1/4] Building release binary..."
-Push-Location $SourceDirAgent
-cargo build --release
-if ($LASTEXITCODE -ne 0) { Write-Error "Build FAILED."; exit 1 }
-Pop-Location
-
-Write-Host "[2/4] Preparing staging directory..."
-if (Test-Path $StagingDir) { Remove-Item -Recurse -Force $StagingDir }
-if (-not (Test-Path $DownloadsDir)) { New-Item -ItemType Directory -Path $DownloadsDir | Out-Null }
-New-Item -ItemType Directory -Path $StagingDir | Out-Null
-
-Copy-Item $ReleaseExeAgent -Destination $StagingDir\desktop-agent.exe
-
-Write-Host "[3/4] Writing install scripts..."
-$InstallScript = @"
-# DeskStream Agent Installer
-`$ErrorActionPreference = "Stop"
-
-`$DeployDir = "`$env:LOCALAPPDATA\DeskStream\bin"
-`$DeployedExe = "`$DeployDir\desktop-agent.exe"
-
-Write-Host "Installing DeskStream Desktop Agent..."
-
-# 1. Stop if running
-Write-Host "- Stopping existing agent..."
-Get-Process -Name desktop-agent -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 1
-
-# 2. Copy binary
-Write-Host "- Copying files..."
-if (-not (Test-Path `$DeployDir)) { New-Item -ItemType Directory -Path `$DeployDir | Out-Null }
-Copy-Item "`$PSScriptRoot\desktop-agent.exe" `$DeployedExe -Force
-
-# 3. Register Custom Protocol (deskstream://)
-Write-Host "- Registering custom protocol..."
-New-Item -Path "HKCU:\Software\Classes\deskstream" -Force | Out-Null
-New-ItemProperty -Path "HKCU:\Software\Classes\deskstream" -Name "(Default)" -Value "URL:DeskStream Protocol" -PropertyType String -Force | Out-Null
-New-ItemProperty -Path "HKCU:\Software\Classes\deskstream" -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
-New-Item -Path "HKCU:\Software\Classes\deskstream\shell\open\command" -Force | Out-Null
-New-ItemProperty -Path "HKCU:\Software\Classes\deskstream\shell\open\command" -Name "(Default)" -Value "`"`$DeployedExe`" `"%1`"" -PropertyType String -Force | Out-Null
-
-# 4. Firewall rule - allow TCP 9001 inbound (so this laptop can connect to relay)
-Write-Host "- Adding firewall rule for TCP 9001..."
-`$fwRule = Get-NetFirewallRule -DisplayName "DeskStream Relay 9001" -ErrorAction SilentlyContinue
-if (-not `$fwRule) {
-    New-NetFirewallRule -DisplayName "DeskStream Relay 9001" -Direction Inbound -Protocol TCP -LocalPort 9001 -Action Allow -Profile Any | Out-Null
-    Write-Host "  Firewall rule created."
+if (-not (Test-Path -LiteralPath $ReleaseExe -PathType Leaf)) {
+    throw "Verified release executable was not found: $ReleaseExe"
 }
 
-# 5. Register Auto-Start
-Write-Host "- Configuring auto-start on login..."
-New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "DeskStreamAgent" -Value "`"`$DeployedExe`" `"%1`"" -PropertyType String -Force | Out-Null
+$releaseHash = (Get-FileHash -LiteralPath $ReleaseExe -Algorithm SHA256).Hash
+if ($releaseHash -ne $ExpectedExeSha256) {
+    throw "Release executable hash mismatch. Expected $ExpectedExeSha256; found $releaseHash."
+}
 
-# 5. Start Agent
-Write-Host "- Starting agent..."
-Start-Process -FilePath `$DeployedExe -WindowStyle Hidden
+if (Test-Path -LiteralPath $PackagePath) {
+    throw "Refusing to overwrite an existing package: $PackagePath"
+}
 
-Write-Host "======================================"
-Write-Host "Installation Complete! You can now use the DeskStream Dashboard."
-Write-Host "======================================"
-Start-Sleep -Seconds 3
-"@
-Set-Content -Path "$StagingDir\install.ps1" -Value $InstallScript
+New-Item -ItemType Directory -Path $DownloadsDir -Force | Out-Null
+$workDir = Join-Path ([System.IO.Path]::GetTempPath()) (
+    "DeskStream-package-" + [Guid]::NewGuid().ToString("N")
+)
+$stagedExe = Join-Path $workDir "DeskStream.exe"
+$temporaryZip = Join-Path $workDir "DeskStream-verified-x64.zip"
 
-$RunBat = @"
-@echo off
-powershell.exe -ExecutionPolicy Bypass -File "%~dp0install.ps1"
-"@
-Set-Content -Path "$StagingDir\install.bat" -Value $RunBat
+try {
+    New-Item -ItemType Directory -Path $workDir | Out-Null
+    Copy-Item -LiteralPath $ReleaseExe -Destination $stagedExe
 
-Write-Host "[4/4] Creating ZIP archive..."
-if (Test-Path $ZipFile) { Remove-Item -Force $ZipFile }
-Compress-Archive -Path "$StagingDir\*" -DestinationPath $ZipFile
+    $stagedHash = (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash
+    if ($stagedHash -ne $ExpectedExeSha256) {
+        throw "Staged executable hash mismatch. Expected $ExpectedExeSha256; found $stagedHash."
+    }
 
-Remove-Item -Recurse -Force $StagingDir
+    Compress-Archive -LiteralPath $stagedExe -DestinationPath $temporaryZip -CompressionLevel Optimal
 
-Write-Host "Packaged successfully to: $ZipFile"
+    Add-Type -AssemblyName System.IO.Compression
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($temporaryZip)
+    try {
+        if ($archive.Entries.Count -ne 1 -or $archive.Entries[0].FullName -ne "DeskStream.exe") {
+            throw "Package contents are not exactly the expected DeskStream.exe."
+        }
+
+        $entryStream = $archive.Entries[0].Open()
+        try {
+            $entryHash = (Get-FileHash -InputStream $entryStream -Algorithm SHA256).Hash
+        }
+        finally {
+            $entryStream.Dispose()
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+
+    if ($entryHash -ne $ExpectedExeSha256) {
+        throw "Packaged executable hash mismatch. Expected $ExpectedExeSha256; found $entryHash."
+    }
+
+    Move-Item -LiteralPath $temporaryZip -Destination $PackagePath
+    $packageHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash
+
+    Write-Host "Package created: $PackagePath"
+    Write-Host "Package SHA256: $packageHash"
+    Write-Host "Packaged DeskStream.exe SHA256: $entryHash"
+    Write-Host "Contents: DeskStream.exe (verified unified release)"
+}
+finally {
+    if (Test-Path -LiteralPath $workDir) {
+        Remove-Item -LiteralPath $workDir -Recurse -Force
+    }
+}

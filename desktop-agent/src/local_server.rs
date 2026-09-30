@@ -7,7 +7,7 @@ use serde_json::json;
 
 const UPSTREAM: &str = "https://friendssoftwaresolutions.in/DeskStream";
 
-pub fn start_local_server(system_id: String) -> u16 {
+pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
     
@@ -109,6 +109,15 @@ pub fn start_local_server(system_id: String) -> u16 {
                     system_id, in_session
                 );
                 let response = Response::from_string(json)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/shutdown" && request.method() == &tiny_http::Method::Post {
+                println!("[AGENT] Received graceful shutdown request from UI.");
+                quit.store(true, std::sync::atomic::Ordering::Relaxed);
+                let response = Response::from_string("{\"success\":true}")
                     .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
                 continue;
@@ -279,13 +288,40 @@ pub fn start_local_server(system_id: String) -> u16 {
             }
 
             if path == "/desktop-api/session/reverse" && request.method() == &tiny_http::Method::Post {
-                let _ = crate::status::take_session_reverse_decision();
+                let in_session = crate::status::LIVE
+                    .get()
+                    .and_then(|status| status.lock().ok())
+                    .map(|status| status.in_session)
+                    .unwrap_or(false);
+                if !in_session {
+                    let _ = request.respond(Response::from_string("No active session").with_status_code(409));
+                    continue;
+                }
+                let peer_system_id = match crate::status::session_peer_system_id() {
+                    Ok(Some(peer_system_id)) => peer_system_id,
+                    Ok(None) => {
+                        let _ = request.respond(Response::from_string("The active session has not registered its peer identity").with_status_code(409));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
+                if !crate::status::begin_session_reverse_request() {
+                    let _ = request.respond(Response::from_string("A reverse request is already pending").with_status_code(409));
+                    continue;
+                }
                 match crate::status::send_session_packet(vec![30]) {
                     Ok(()) => {
-                        let _ = request.respond(Response::from_string("{\"success\":true}")
+                        let _ = request.respond(Response::from_string(json!({
+                            "success": true,
+                            "peer_system_id": peer_system_id
+                        }).to_string())
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
                     }
                     Err(error) => {
+                        crate::status::cancel_session_reverse_request();
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
                     }
                 }
@@ -303,7 +339,8 @@ pub fn start_local_server(system_id: String) -> u16 {
 
             if path == "/desktop-api/session/reverse/decision" && request.method() == &tiny_http::Method::Get {
                 let response = Response::from_string(json!({
-                    "decision": crate::status::take_session_reverse_decision()
+                    "decision": crate::status::take_session_reverse_decision(),
+                    "peer_system_id": crate::status::session_peer_system_id().unwrap_or_default()
                 }).to_string())
                 .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
@@ -332,6 +369,7 @@ pub fn start_local_server(system_id: String) -> u16 {
                 };
                 match crate::status::send_session_packet(vec![31, u8::from(accepted)]) {
                     Ok(()) => {
+                        crate::status::clear_session_reverse_request_pending();
                         let _ = request.respond(Response::from_string("{\"success\":true}")
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
                     }

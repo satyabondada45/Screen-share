@@ -98,6 +98,80 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
     </title>
 
     <style>
+        #reversePermissionDialog {
+            position: fixed;
+            inset: auto;
+            left: 20px;
+            bottom: 20px;
+            z-index: 11000;
+            width: min(360px, calc(100vw - 40px));
+        }
+
+        .reverse-permission-card {
+            padding: 16px;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            background: #fff;
+            color: #111827;
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
+        }
+
+        .reverse-permission-card h2 {
+            margin: 0 0 8px;
+            font-size: 1rem;
+        }
+
+        .reverse-permission-card p {
+            margin: 0 0 14px;
+            color: #4b5563;
+            font-size: 0.9rem;
+            line-height: 1.45;
+        }
+
+        .reverse-permission-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        #fileTransferChoiceDialog {
+            position: fixed;
+            inset: 0;
+            z-index: 10001;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(15, 23, 42, 0.35);
+        }
+
+        .file-transfer-choice-card {
+            width: min(360px, 100%);
+            padding: 20px;
+            border-radius: 14px;
+            background: #fff;
+            box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22);
+        }
+
+        .file-transfer-choice-actions {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        #folderDestinationDialog {
+            position: fixed;
+            inset: 0;
+            z-index: 10002;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(15, 23, 42, 0.35);
+        }
+
         :root {
             --bg-dark: #000;
             --header-bg: #fff;
@@ -542,14 +616,14 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
     <div class="viewer-header">
         <div class="header-left">
-            <a href="../dashboard.php" class="logo">
+            <div class="logo" aria-label="DeskStream">
                 <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
                     <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
                     <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
                     <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" />
                 </svg>
                 DeskStream
-            </a>
+            </div>
             <div class="device-info">
                 <div class="device-name" style="display: flex; align-items: center; gap: 8px;">
                     <span style="color: #94a3b8; font-weight: normal;"><?= htmlspecialchars($_SESSION['username'] ?? 'Local Computer', ENT_QUOTES, 'UTF-8') ?></span>
@@ -582,7 +656,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 </button>
                 <button class="btn" id="audioBtn" type="button">Listen Audio</button>
                 <button class="btn" id="micBtn" type="button">Mic Off</button>
-                <button class="btn" id="fileBtn" onclick="document.getElementById('fileUploadInput').click()">
+                <button class="btn" id="fileBtn" type="button" onclick="showFileTransferChoice()">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
                         <polyline points="13 2 13 9 20 9"></polyline>
@@ -709,7 +783,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             <div class="panel-content" id="panelContentTransfers"
                 style="display:none; height: 350px; overflow-y: auto;">
                 <div style="margin-bottom: 15px;">
-                    <button onclick="document.getElementById('fileUploadInput').click()"
+                    <button onclick="showFileTransferChoice()"
                         style="width: 100%; padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
                         Send File to Host
                     </button>
@@ -720,7 +794,30 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
             <!-- Hidden File Input -->
             <input type="file" id="fileUploadInput" multiple style="display: none;" onchange="handleFileInput(event)">
+            <input type="file" id="folderUploadInput" webkitdirectory directory multiple style="display: none;" onchange="handleFileInput(event)">
 
+        </div>
+
+        <div id="fileTransferChoiceDialog" role="dialog" aria-modal="true" aria-labelledby="fileTransferChoiceTitle">
+            <div class="file-transfer-choice-card">
+                <h2 id="fileTransferChoiceTitle">Choose what to send</h2>
+                <div class="file-transfer-choice-actions">
+                    <button type="button" class="btn" onclick="chooseTransferSource('file')">Select File</button>
+                    <button type="button" class="btn btn-primary" onclick="chooseTransferSource('folder')">Select Folder</button>
+                    <button type="button" class="btn" onclick="closeFileTransferChoice()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="folderDestinationDialog" role="dialog" aria-modal="true" aria-labelledby="folderDestinationTitle">
+            <div class="file-transfer-choice-card">
+                <h2 id="folderDestinationTitle">Choose a folder for the received files</h2>
+                <p>Folder paths will be created only inside the destination you choose.</p>
+                <div class="file-transfer-choice-actions">
+                    <button type="button" class="btn btn-primary" onclick="selectFolderDestination()">Choose Destination</button>
+                    <button type="button" class="btn" onclick="cancelFolderDestination()">Cancel</button>
+                </div>
+            </div>
         </div>
 
         <!-- Chat Panel -->
@@ -738,14 +835,24 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         </div>
     </div>
 
-    <div id="reversePermissionDialog" role="dialog" aria-modal="true" aria-labelledby="reversePermissionTitle"
-        style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
-        <div style="width:min(420px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
-            <h2 id="reversePermissionTitle" style="margin:0 0 10px;font-size:1.1rem;">Reverse control request</h2>
-            <p style="margin:0 0 20px;color:#4b5563;">Remote device is requesting control. This build can exchange permission messages, but cannot hand off the active video/control roles.</p>
-            <div style="display:flex;justify-content:flex-end;gap:10px;">
-                <button type="button" id="reverseRejectBtn" class="btn">Reject</button>
+    <div id="reversePermissionDialog" role="alertdialog" aria-modal="false" aria-labelledby="reversePermissionTitle"
+        style="display:none;">
+        <div class="reverse-permission-card">
+            <h2 id="reversePermissionTitle">Reverse control requested</h2>
+            <p>Allow the remote device to take control of this computer?</p>
+            <div class="reverse-permission-actions">
+                <button type="button" id="reverseRejectBtn" class="btn">Decline</button>
                 <button type="button" id="reverseAcceptBtn" class="btn btn-primary">Accept</button>
+            </div>
+        </div>
+    </div>
+    <div id="sessionEndedDialog" role="dialog" aria-modal="true" aria-labelledby="sessionEndedTitle"
+        style="display:none;position:fixed;inset:0;z-index:1100;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
+        <div style="width:min(380px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
+            <h2 id="sessionEndedTitle" style="margin:0 0 10px;font-size:1.1rem;">Session Ended</h2>
+            <p style="margin:0 0 20px;color:#4b5563;">This session has ended.</p>
+            <div style="display:flex;justify-content:flex-end;">
+                <button type="button" class="btn btn-primary" onclick="dismissSessionEnded()">OK</button>
             </div>
         </div>
     </div>
@@ -767,6 +874,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 $device['system_id'] ?: $device['device_uid'],
                 JSON_UNESCAPED_SLASHES
             ) ?>;
+        const REQUESTER_SYSTEM_ID =
+            <?= json_encode($_GET['requester_system_id'] ?? '', JSON_UNESCAPED_SLASHES) ?>;
 
         const WS_URL = <?= json_encode($relayWsUrl) ?>;
 
@@ -781,6 +890,9 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let directConnection = false;
         let directFallbackAttempted = false;
         let websocketAuthenticated = false;
+        let reverseTransitionPending = false;
+        let sessionEndedDialogShown = false;
+        let sessionWasEstablished = false;
         let webrtcPeerConnection = null;
         let webrtcDataChannel = null;
         let activeTransport = "WS"; // "WS" or "WEBRTC"
@@ -1359,21 +1471,44 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let reverseRequestPending = false;
 
         function receiveReverseRequest() {
-            if (reverseRequestPending) return;
+            if (reverseRequestPending || !isSocketOpen() || !websocketAuthenticated) return;
             reverseRequestPending = true;
             document.getElementById("reversePermissionDialog").style.display = "flex";
         }
 
         function answerReverseRequest(accepted) {
             if (!reverseRequestPending || !isSocketOpen()) return;
-            ws.send(new Uint8Array([31, accepted ? 1 : 0]));
+            try {
+                ws.send(new Uint8Array([31, accepted ? 1 : 0]));
+            } catch (error) {
+                console.error("[REVERSE] Failed to send permission decision:", error);
+                return;
+            }
             reverseRequestPending = false;
             document.getElementById("reversePermissionDialog").style.display = "none";
             if (accepted) {
-                console.error("[REVERSE] Permission was acknowledged, but this client session has no in-place role/video ownership transition; roles remain unchanged.");
+                reverseTransitionPending = true;
+                window.parent.postMessage({
+                    type: "reverse_remote_approved",
+                    requester_system_id: DEVICE_ID
+                }, "*");
             }
         }
 
+        function showSessionEnded() {
+            if (sessionEndedDialogShown) return;
+            sessionEndedDialogShown = true;
+            document.getElementById("sessionEndedDialog").style.display = "flex";
+        }
+
+        function dismissSessionEnded() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get("integrated") === "1") {
+                window.parent.postMessage("end_integrated_session", "*");
+                return;
+            }
+            window.location.href = "../dashboard.php";
+        }
 
         /* ============================================================
            MONITOR
@@ -3142,12 +3277,14 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     }
                     else if (type === 1) {
                         websocketAuthenticated = true;
+                        sessionWasEstablished = true;
                         console.log("[WS] Session approved by host.");
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
                     else if (type === 2) {
                         websocketAuthenticated = true;
+                        sessionWasEstablished = true;
                         setStreamState("STREAM_ACTIVE");
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
@@ -3237,6 +3374,18 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             // [1 + idBytes.length .. end] is 32 bytes of zeros for default pin/auth
 
             ws.send(pkt);
+            if (/^\d{9}$/.test(REQUESTER_SYSTEM_ID)) {
+                const identityPacket = new Uint8Array(10);
+                identityPacket[0] = 32;
+                identityPacket.set(new TextEncoder().encode(REQUESTER_SYSTEM_ID), 1);
+                try {
+                    ws.send(identityPacket);
+                } catch (error) {
+                    console.error("[REVERSE] Failed to send the peer identity:", error);
+                }
+            } else {
+                console.warn("[REVERSE] Viewer identity unavailable; this session cannot be reversed.");
+            }
 
             console.log(
                 "[WS] Viewer handshake sent for host:",
@@ -3326,8 +3475,11 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 if (fallbackToRelay()) {
                     return;
                 }
-                if (isStreaming) {
-                    setHud("DISCONNECTED");
+                stopWebStream();
+                if (reverseTransitionPending) {
+                    window.parent.postMessage("end_integrated_session", "*");
+                } else if (sessionWasEstablished) {
+                    showSessionEnded();
                 }
             };
         }
@@ -3646,6 +3798,69 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
 
         let incomingFiles = {};
+        let folderDestinationHandle = null;
+        let folderDestinationResolve = null;
+
+        function requestFolderDestination() {
+            if (folderDestinationHandle) return Promise.resolve(folderDestinationHandle);
+            document.getElementById("folderDestinationDialog").style.display = "flex";
+            return new Promise(resolve => {
+                folderDestinationResolve = resolve;
+            });
+        }
+
+        function finishFolderDestination(handle) {
+            document.getElementById("folderDestinationDialog").style.display = "none";
+            const resolve = folderDestinationResolve;
+            folderDestinationResolve = null;
+            if (resolve) resolve(handle);
+        }
+
+        async function selectFolderDestination() {
+            if (!folderDestinationResolve) return;
+            try {
+                if (!window.isSecureContext || typeof window.showDirectoryPicker !== "function") {
+                    throw new Error("This browser does not support safe folder destinations. Use a current browser on HTTPS or localhost.");
+                }
+                folderDestinationHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+                finishFolderDestination(folderDestinationHandle);
+            } catch (error) {
+                if (error.name !== "AbortError") {
+                    console.error("[FILE RX] Could not choose folder destination:", error);
+                    window.alert(error.message);
+                }
+                finishFolderDestination(null);
+            }
+        }
+
+        function cancelFolderDestination() {
+            finishFolderDestination(null);
+        }
+
+        async function writeReceivedFolderFile(directoryHandle, relativePath, blob) {
+            const parts = validateRelativeTransferPath(relativePath).split("/");
+            let parent = directoryHandle;
+            for (const part of parts.slice(0, -1)) {
+                parent = await parent.getDirectoryHandle(part, { create: true });
+            }
+            const fileName = parts[parts.length - 1];
+            try {
+                await parent.getFileHandle(fileName);
+                throw new Error(`The destination already contains "${relativePath}".`);
+            } catch (error) {
+                if (error.name !== "NotFoundError") throw error;
+            }
+            const fileHandle = await parent.getFileHandle(fileName, { create: true });
+            const writable = await fileHandle.createWritable();
+            try {
+                await writable.write(blob);
+                await writable.close();
+            } catch (error) {
+                await writable.abort();
+                throw error;
+            }
+        }
+
         const outgoingFileResponses = new Map();
         const outgoingFileErrors = new Map();
         const outgoingFileIds = new Set();
@@ -3689,7 +3904,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             el.style = "padding: 8px; background: #2a2d35; border-radius: 4px; border-left: 3px solid #007bff;";
             el.innerHTML = `
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                    <span style="font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${isUpload ? '↗' : '↙'} ${filename}</span>
+                    <span id="transfer-name-${transferId}" style="font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;"></span>
                     <span id="transfer-pct-${transferId}">0%</span>
                 </div>
                 <div style="background:#1a1d24; height:4px; border-radius:2px; overflow:hidden;">
@@ -3697,6 +3912,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                 </div>
                 <div id="transfer-status-${transferId}" style="margin-top:4px; color:#aaa;">Starting...</div>
             `;
+            el.querySelector(`#transfer-name-${transferId}`).textContent = `${isUpload ? "↗" : "↙"} ${filename}`;
             feed.prepend(el);
         }
 
@@ -3747,7 +3963,23 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     return;
                 }
                 const nameBytes = bytes.subarray(19, 19 + nameLen);
-                const filename = new TextDecoder().decode(nameBytes);
+                let filename;
+                try {
+                    filename = validateRelativeTransferPath(new TextDecoder("utf-8", { fatal: true }).decode(nameBytes));
+                } catch (error) {
+                    console.error("[FILE RX] Rejected unsafe offered path:", error);
+                    sendFileControl(25, transferId);
+                    return;
+                }
+
+                const directoryOffer = filename.includes("/");
+                const destinationHandle = directoryOffer ? await requestFolderDestination() : null;
+                if (directoryOffer && !destinationHandle) {
+                    sendFileControl(25, transferId);
+                    addTransferUI(transferId, filename, false);
+                    updateTransferUI(transferId, 0, "Folder destination cancelled");
+                    return;
+                }
 
                 if (!window.confirm(`Accept "${filename}" (${Number(fileSize)} bytes)?`)) {
                     sendFileControl(25, transferId);
@@ -3759,7 +3991,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     filename: filename,
                     size: Number(fileSize),
                     chunks: [],
-                    receivedBytes: 0
+                    receivedBytes: 0,
+                    directoryHandle: destinationHandle
                 };
                 console.log(`[FILE] Incoming file start: ${filename}`);
                 addTransferUI(transferId, filename, false);
@@ -3817,17 +4050,29 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     delete incomingFiles[transferId];
                     return;
                 }
-                sendFileControl(27, transferId);
                 console.log(`[FILE] Transfer verified: ${incoming.filename}`);
-                updateTransferUI(transferId, 100, "Complete");
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = incoming.filename;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                try {
+                    if (incoming.directoryHandle) {
+                        await writeReceivedFolderFile(incoming.directoryHandle, incoming.filename, blob);
+                    } else {
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = incoming.filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    }
+                    updateTransferUI(transferId, 100, "Complete");
+                    sendFileControl(27, transferId);
+                } catch (error) {
+                    console.error("[FILE RX] Could not save verified file:", error);
+                    sendFileError(transferId, `Could not save file: ${error.message}`);
+                    updateTransferUI(transferId, 0, "Save failed");
+                    const bar = document.getElementById(`transfer-bar-${transferId}`);
+                    if (bar) bar.style.background = "#dc3545";
+                }
                 delete incomingFiles[transferId];
             } else if (type === 23 || type === 24) {
                 const message = type === 24
@@ -3855,7 +4100,8 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         }
 
         async function sendSingleFile(file) {
-            const nameBytes = new TextEncoder().encode(file.name);
+            const filename = validateRelativeTransferPath(file.webkitRelativePath || file.name);
+            const nameBytes = new TextEncoder().encode(filename);
             if (nameBytes.length > 4096) throw new Error("Filename too long.");
 
             const transferIdBytes = new Uint8Array(8);
@@ -3867,7 +4113,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             let acceptedByReceiver = false;
 
             try {
-            addTransferUI(transferIdStr, file.name, true);
+            addTransferUI(transferIdStr, filename, true);
             updateTransferUI(transferIdStr, 0, "Waiting for receiver...");
 
             // TYPE 20: 1 + 8 + 8 + 2 + nameBytes.length = 19 + nameBytes.length
@@ -3881,7 +4127,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             const accepted = waitForFileResponse(transferIdStr, 26);
             ws.send(metaPkt);
             offerSent = true;
-            console.info(`[FILE TX OFFER] direction=A->B transfer_id=${transferIdStr} filename=${JSON.stringify(file.name)} total_bytes=${file.size}`);
+            console.info(`[FILE TX OFFER] direction=A->B transfer_id=${transferIdStr} filename=${JSON.stringify(filename)} total_bytes=${file.size}`);
             await accepted;
             acceptedByReceiver = true;
             console.info(`[FILE TX ACCEPT] direction=A->B transfer_id=${transferIdStr}`);
@@ -4399,6 +4645,41 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             }
         }
 
+        function showFileTransferChoice() {
+            document.getElementById("fileTransferChoiceDialog").style.display = "flex";
+        }
+
+        function closeFileTransferChoice() {
+            document.getElementById("fileTransferChoiceDialog").style.display = "none";
+        }
+
+        function chooseTransferSource(kind) {
+            closeFileTransferChoice();
+            const input = document.getElementById(kind === "folder" ? "folderUploadInput" : "fileUploadInput");
+            if (kind === "folder" && !("webkitdirectory" in input)) {
+                window.alert("Folder selection is not supported by this browser. Select files individually or use a supported browser.");
+                return;
+            }
+            input.value = "";
+            input.click();
+        }
+
+        function validateRelativeTransferPath(path) {
+            const normalized = String(path).replace(/\\/g, "/");
+            if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || normalized.includes("\0")) {
+                throw new Error("The transfer path is not a safe relative path.");
+            }
+            const parts = normalized.split("/");
+            if (parts.some(part => !part || part === "." || part === ".."
+                || part.length > 240
+                || /[<>:"|?*\x00-\x1f]/.test(part)
+                || /[. ]$/.test(part)
+                || /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part))) {
+                throw new Error("The transfer path contains an unsafe component.");
+            }
+            return parts.join("/");
+        }
+
         function handleFileInput(event) {
             if (event.target.files && event.target.files.length > 0) {
                 if (!isSocketOpen()) {
@@ -4413,16 +4694,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
         function endSessionAndRedirect(event) {
             event.preventDefault();
-            stopWebStream();
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                ws.close(1000, "Session ended by user");
+            } else if (sessionWasEstablished) {
+                showSessionEnded();
+            }
             addActivityLog("Session manually ended by user.");
-            setTimeout(() => {
-                const urlParams = new URLSearchParams(window.location.search);
-                if (urlParams.get('integrated') === '1') {
-                    window.parent.postMessage('end_integrated_session', '*');
-                } else {
-                    window.location.href = "../dashboard.php";
-                }
-            }, 500);
         }
 
         let sessionStartTime = null;

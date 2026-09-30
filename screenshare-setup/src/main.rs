@@ -265,19 +265,28 @@ fn write_server_config(dir: &str, server_addr: &str) {
     let _ = std::fs::write(&config_path, json);
 }
 
+fn stop_agent_gracefully() {
+    use std::io::Write;
+    use std::time::Duration;
+
+    if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:49182") {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let request = "POST /desktop-api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(request.as_bytes());
+    }
+
+    if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:9001") {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.write_all(&[99]);
+    }
+}
+
 fn do_install(label: HWND) {
     let dir = program_dir();
     set_text(label, "Installing Screen Share...");
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "desktop-agent.exe"])
-        .output();
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "ScreenShare.exe"])
-        .output();
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "relay-server.exe"])
-        .output();
-    std::thread::sleep(Duration::from_millis(500));
+    
+    stop_agent_gracefully();
+    std::thread::sleep(Duration::from_millis(1500));
 
     let _ = std::fs::create_dir_all(&dir);
 
@@ -389,16 +398,8 @@ fn extract_server_addr(contents: &str) -> Option<String> {
 
 fn do_uninstall() {
     // Stop running processes
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "desktop-agent.exe"])
-        .output();
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "ScreenShare.exe"])
-        .output();
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "relay-server.exe"])
-        .output();
-    std::thread::sleep(Duration::from_millis(500));
+    stop_agent_gracefully();
+    std::thread::sleep(Duration::from_millis(1500));
 
     // Remove the deskstream:// custom URL protocol registration
     unregister_protocol();

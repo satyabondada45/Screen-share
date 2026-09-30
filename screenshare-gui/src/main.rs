@@ -927,12 +927,21 @@ fn launch_agent(relay: &str, backend: &str) {
 }
 
 fn stop_agent() {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "desktop-agent.exe"])
-        .output();
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "relay-server.exe"])
-        .output();
+    use std::io::Write;
+    use std::time::Duration;
+
+    // 1. Shut down agent gracefully via local HTTP API
+    if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:49182") {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let request = "POST /desktop-api/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(request.as_bytes());
+    }
+
+    // 2. Shut down relay gracefully via local TCP control byte 99
+    if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:9001") {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.write_all(&[99]);
+    }
 }
 
 // ------------------------------------------------------------

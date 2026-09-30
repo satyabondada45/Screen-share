@@ -16,10 +16,15 @@ if ($Uninstall) {
     Write-Host " DeskStream Uninstall"
     Write-Host "======================================"
 
-    # Stop processes
-    Get-Process -Name "desktop-agent" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Get-Process -Name "relay-server" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Get-Process -Name "ScreenShare-Tray" -ErrorAction SilentlyContinue | Stop-Process -Force
+    # Stop processes gracefully
+    try { Invoke-RestMethod -Uri "http://127.0.0.1:49182/desktop-api/shutdown" -Method Post -ErrorAction SilentlyContinue } catch {}
+    try {
+        $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 9001)
+        $stream = $socket.GetStream()
+        $stream.Write([byte[]]@(99), 0, 1)
+        $socket.Close()
+    } catch {}
+    Start-Sleep -Milliseconds 1500
 
     # Remove auto-start
     Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "DeskStreamRelay" -ErrorAction SilentlyContinue
@@ -70,11 +75,15 @@ Pop-Location
 Write-Host "      Build OK"
 
 # Step 2: Stop running instances
-Write-Host "[2/5] Stopping running instances..."
-Get-Process -Name "desktop-agent" -ErrorAction SilentlyContinue | Stop-Process -Force
-Get-Process -Name "relay-server" -ErrorAction SilentlyContinue | Stop-Process -Force
-Get-Process -Name "ScreenShare-Tray" -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 500
+Write-Host "[2/5] Stopping running instances gracefully..."
+try { Invoke-RestMethod -Uri "http://127.0.0.1:49182/desktop-api/shutdown" -Method Post -ErrorAction SilentlyContinue } catch {}
+try {
+    $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 9001)
+    $stream = $socket.GetStream()
+    $stream.Write([byte[]]@(99), 0, 1)
+    $socket.Close()
+} catch {}
+Start-Sleep -Milliseconds 1500
 
 # Step 3: Create directories and copy binaries
 Write-Host "[3/5] Installing to $deployDir..."

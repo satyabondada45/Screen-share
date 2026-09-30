@@ -44,12 +44,29 @@ pub fn session_audio_enabled() -> bool {
     SESSION_AUDIO_ENABLED.load(Ordering::Acquire)
 }
 
-pub fn set_session_reverse_request_pending() {
-    SESSION_REVERSE_REQUEST.store(true, Ordering::Release);
+pub fn set_session_reverse_request_pending() -> bool {
+    SESSION_REVERSE_REQUEST
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
 pub fn take_session_reverse_request() -> bool {
-    SESSION_REVERSE_REQUEST.swap(false, Ordering::AcqRel)
+    SESSION_REVERSE_REQUEST.load(Ordering::Acquire)
+}
+
+pub fn clear_session_reverse_request_pending() {
+    SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
+}
+
+pub fn begin_session_reverse_request() -> bool {
+    SESSION_REVERSE_REQUEST_OUTSTANDING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+pub fn cancel_session_reverse_request() {
+    SESSION_REVERSE_DECISION.store(0, Ordering::Release);
+    SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
 }
 
 pub fn set_session_reverse_decision(accepted: bool) {
@@ -57,7 +74,30 @@ pub fn set_session_reverse_decision(accepted: bool) {
 }
 
 pub fn take_session_reverse_decision() -> u8 {
-    SESSION_REVERSE_DECISION.swap(0, Ordering::AcqRel)
+    let decision = SESSION_REVERSE_DECISION.swap(0, Ordering::AcqRel);
+    if decision != 0 {
+        SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+    }
+    decision
+}
+
+pub fn set_session_peer_system_id(system_id: String) -> Result<(), String> {
+    if system_id.len() != 9 || !system_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("peer system ID must contain exactly 9 digits".to_string());
+    }
+    *SESSION_PEER_SYSTEM_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "session peer ID lock poisoned".to_string())? = Some(system_id);
+    Ok(())
+}
+
+pub fn session_peer_system_id() -> Result<Option<String>, String> {
+    SESSION_PEER_SYSTEM_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map(|peer| peer.clone())
+        .map_err(|_| "session peer ID lock poisoned".to_string())
 }
 
 impl AgentStatus {
@@ -84,7 +124,9 @@ static SESSION_CHAT_HISTORY: OnceLock<Mutex<SessionChatHistory>> = OnceLock::new
 static SESSION_REMOTE_TYPING: AtomicBool = AtomicBool::new(false);
 static SESSION_AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
 static SESSION_REVERSE_REQUEST: AtomicBool = AtomicBool::new(false);
+static SESSION_REVERSE_REQUEST_OUTSTANDING: AtomicBool = AtomicBool::new(false);
 static SESSION_REVERSE_DECISION: AtomicU8 = AtomicU8::new(0);
+static SESSION_PEER_SYSTEM_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SESSION_FILE_OFFERS: OnceLock<Mutex<HashMap<u64, SessionFileOffer>>> = OnceLock::new();
 static SESSION_ACCEPTED_FILES: OnceLock<Mutex<HashMap<u64, bool>>> = OnceLock::new();
 static SESSION_FILE_RESPONSES: OnceLock<Mutex<HashMap<u64, mpsc::Sender<u8>>>> = OnceLock::new();
@@ -155,7 +197,12 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
     SESSION_REMOTE_TYPING.store(false, Ordering::Release);
     SESSION_AUDIO_ENABLED.store(false, Ordering::Release);
     SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
+    SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
     SESSION_REVERSE_DECISION.store(0, Ordering::Release);
+    *SESSION_PEER_SYSTEM_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "session peer ID lock poisoned".to_string())? = None;
     if writer.is_some() {
         SESSION_FILE_OFFERS
             .get_or_init(|| Mutex::new(HashMap::new()))

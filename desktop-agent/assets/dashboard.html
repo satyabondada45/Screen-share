@@ -1596,7 +1596,7 @@
                         </svg>
                         Chat
                     </button>
-                    <button class="btn" id="bFileBtn" type="button" onclick="selectBSessionFile()">
+                    <button class="btn" id="bFileBtn" type="button" onclick="showBSessionTransferChoice()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
                             <polyline points="13 2 13 9 20 9"></polyline>
@@ -1640,14 +1640,35 @@
             </form>
         </section>
     </div>
-    <div id="bReversePermissionDialog" role="dialog" aria-modal="true"
-        style="display:none;position:fixed;inset:0;z-index:1002;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
-        <div style="width:min(420px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
-            <h2 style="margin:0 0 10px;font-size:1.1rem;">Reverse control request</h2>
-            <p style="margin:0 0 20px;color:#4b5563;">The remote controller is requesting control. This build can exchange permission messages, but cannot hand off the active video/control roles.</p>
-            <div style="display:flex;justify-content:flex-end;gap:10px;">
+    <div id="bReversePermissionDialog" role="alertdialog" aria-modal="false"
+        style="display:none;position:fixed;left:20px;bottom:20px;z-index:11000;width:min(360px,calc(100vw - 40px));">
+        <div style="padding:16px;background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 12px 32px rgba(15,23,42,.22);color:#111827;">
+            <h2 style="margin:0 0 8px;font-size:1rem;">Reverse control request</h2>
+            <p style="margin:0 0 14px;color:#4b5563;font-size:.9rem;line-height:1.45;">The remote controller is requesting to reverse the session. Accepting will end this connection and start a new session in the opposite direction.</p>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
                 <button type="button" class="btn" onclick="answerBReverseRequest(false)">Reject</button>
                 <button type="button" class="btn" onclick="answerBReverseRequest(true)">Accept</button>
+            </div>
+        </div>
+    </div>
+    <div id="bSessionTransferChoiceDialog" role="dialog" aria-modal="true"
+        style="display:none;position:fixed;inset:0;z-index:11001;background:rgba(15,23,42,.35);align-items:center;justify-content:center;padding:20px;">
+        <div style="width:min(360px,100%);padding:20px;background:#fff;border-radius:14px;box-shadow:0 16px 40px rgba(15,23,42,.22);color:#111827;">
+            <h2 style="margin:0 0 16px;font-size:1rem;">Choose what to send</h2>
+            <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
+                <button type="button" class="btn" onclick="selectBSessionTransfer('file')">Select Files</button>
+                <button type="button" class="btn btn-primary" onclick="selectBSessionTransfer('folder')">Select Folder</button>
+                <button type="button" class="btn" onclick="closeBSessionTransferChoice()">Cancel</button>
+            </div>
+        </div>
+    </div>
+    <div id="bSessionEndedDialog" role="dialog" aria-modal="true" aria-labelledby="bSessionEndedTitle"
+        style="display:none;position:fixed;inset:0;z-index:10003;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
+        <div style="width:min(380px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
+            <h2 id="bSessionEndedTitle" style="margin:0 0 10px;font-size:1.1rem;">Session Ended</h2>
+            <p style="margin:0 0 20px;color:#4b5563;">This session has ended.</p>
+            <div style="display:flex;justify-content:flex-end;">
+                <button type="button" class="btn btn-primary" onclick="dismissBSessionEnded()">OK</button>
             </div>
         </div>
     </div>
@@ -2132,6 +2153,9 @@
         let currentRequestToken = null;
         let deviceRefreshInProgress = false;
         let isAuthenticated = false;
+        let approvedReverseRequesterId = null;
+        let approvedReverseExpiresAt = 0;
+        let autoAcceptingReverseToken = null;
 
         // ── Boot ─────────────────────────────────────────────────────
         window.addEventListener('DOMContentLoaded', () => {
@@ -2346,6 +2370,18 @@
                 if (data.has_request && data.request) {
                     const req = data.request;
                     const overlay = document.getElementById('incomingModalOverlay');
+                    if (autoAcceptingReverseToken && req.request_token === autoAcceptingReverseToken) return;
+                    if (approvedReverseRequesterId && Date.now() > approvedReverseExpiresAt) {
+                        approvedReverseRequesterId = null;
+                        approvedReverseExpiresAt = 0;
+                    }
+                    if (approvedReverseRequesterId
+                        && req.requester_system_id === approvedReverseRequesterId) {
+                        currentRequestToken = req.request_token;
+                        autoAcceptingReverseToken = req.request_token;
+                        acceptConnection();
+                        return;
+                    }
                     if (!overlay.classList.contains('open')) {
                         promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token);
                     }
@@ -2441,10 +2477,14 @@
         }
         let connectionPollInterval = null;
 
-        async function startConnection() {
-            const raw = document.getElementById('remoteIdInput').value.trim();
+        async function startConnection(targetOverride = null) {
+            const raw = targetOverride || document.getElementById('remoteIdInput').value.trim();
             if (!raw) { showToast('Please enter a Remote ID'); return; }
             const targetId = raw.replace(/[^0-9]/g, '');
+            if (!/^\d{9}$/.test(targetId)) {
+                showToast('Remote ID must contain 9 digits');
+                return;
+            }
             showToast('Sending request to ' + formatId(targetId) + '...');
 
             const connectBtn = document.querySelector('.btn-connect-primary');
@@ -2648,25 +2688,49 @@
         let _bAcceptPollTimer = null;
 
         async function acceptConnection() {
-            if (currentRequestToken) {
+            const requestToken = currentRequestToken;
+            const isApprovedReverse = requestToken && requestToken === autoAcceptingReverseToken;
+            let accepted = false;
+            if (requestToken) {
                 try {
                     const res = await fetch(`${BACKEND}/api/connections/accept.php`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ request_token: currentRequestToken }),
+                        body: JSON.stringify({ request_token: requestToken }),
                         credentials: 'include'
                     });
                     const data = await res.json();
                     if (data.status === 'success') {
+                        accepted = true;
                         // API accept confirmed — the Rust agent has queued the response.
                         // Do NOT show the overlay yet. The real session is only live once
                         // main.rs completes the relay TCP handshake and sets in_session=true
                         // (which is exposed via /local-health). Poll until that is true.
                         waitForRealBSession();
+                        if (isApprovedReverse) {
+                            autoAcceptingReverseToken = null;
+                            approvedReverseRequesterId = null;
+                            approvedReverseExpiresAt = 0;
+                        }
+                    } else if (isApprovedReverse) {
+                        autoAcceptingReverseToken = null;
+                        showToast(data.message || 'Could not start the approved reverse session');
+                    } else {
+                        showToast(data.message || 'Connection acceptance failed');
                     }
-                } catch (e) { }
+                } catch (error) {
+                    console.error('[SESSION] Connection acceptance failed:', error);
+                    if (isApprovedReverse) {
+                        autoAcceptingReverseToken = null;
+                        showToast('Could not start the approved reverse session');
+                    } else {
+                        showToast('Connection acceptance failed');
+                    }
+                }
             }
-            showToast('Connection accepted — remote session starting...');
+            if (!isApprovedReverse && accepted) {
+                showToast('Connection accepted — remote session starting...');
+            }
             closeModal();
         }
 
@@ -2768,6 +2832,16 @@
                     inner.style.display = 'block';
                     fetchAllDevices();
                 }
+            } else if (e.source === document.getElementById('remoteSessionIframe')?.contentWindow
+                && e.data?.type === 'reverse_remote_approved') {
+                const requesterId = String(e.data.requester_system_id || '');
+                if (/^\d{9}$/.test(requesterId)) {
+                    approvedReverseRequesterId = requesterId;
+                    approvedReverseExpiresAt = Date.now() + 30000;
+                    showToast('Reverse permission approved. Reconnecting in the opposite direction...');
+                } else {
+                    console.error('[REVERSE] Approved peer identity is invalid; automatic handoff was not armed.');
+                }
             }
         });
     </script>
@@ -2826,6 +2900,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let _bSessionWatchdog = null;
         let _bSessionActive = false;
         let _bSessionDisconnecting = false;
+        let _bSessionEndedDialogShown = false;
+        let _bReverseHandoffPending = false;
         let _bSessionChatPoll = null;
         let _bSessionTypingPoll = null;
         let _bSessionOfferPoll = null;
@@ -2840,6 +2916,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (_bSessionActive) return;
             _bSessionActive = true;
             _bSessionDisconnecting = false;
+            _bSessionEndedDialogShown = false;
+            _bReverseHandoffPending = false;
+            document.getElementById('bSessionEndedDialog').style.display = 'none';
             _bSessionChatLastId = 0n;
             _bSessionChatRenderedIds.clear();
             document.getElementById('bSessionChatMessages')?.replaceChildren();
@@ -2878,8 +2957,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     const res = await fetch(AGENT_HEALTH);
                     const health = await res.json();
                     if (health.in_session === false) {
-                        // Rust says session ended — dismiss overlay.
-                        _dismissBSessionOverlay();
+                        if (_bReverseHandoffPending) {
+                            _dismissBSessionOverlay();
+                        } else {
+                            showBSessionEnded();
+                        }
                     }
                 } catch (e) { /* ignore transient errors */ }
             }, 2000);
@@ -2931,10 +3013,26 @@ document.addEventListener('DOMContentLoaded', () => {
             _bSessionHandledOffers.clear();
         }
 
-        function disconnectBSession() {
+        function showBSessionEnded() {
+            if (_bSessionEndedDialogShown) return;
+            _bSessionEndedDialogShown = true;
+            if (_bSessionWatchdog) {
+                clearInterval(_bSessionWatchdog);
+                _bSessionWatchdog = null;
+            }
+            document.getElementById('bSessionEndedDialog').style.display = 'flex';
+        }
+
+        function dismissBSessionEnded() {
+            document.getElementById('bSessionEndedDialog').style.display = 'none';
+            _dismissBSessionOverlay();
+        }
+
+        function disconnectBSession(reverseTargetId = null) {
             if (!_bSessionActive || _bSessionDisconnecting) return;
             stopBSessionChatTyping();
             _bSessionDisconnecting = true;
+            if (reverseTargetId) _bReverseHandoffPending = true;
             const button = document.getElementById('bDisconnectBtn');
             if (button) {
                 button.disabled = true;
@@ -2956,7 +3054,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     const health = await healthResponse.json();
                     if (health.in_session === false) {
-                        _dismissBSessionOverlay();
+                        if (reverseTargetId) {
+                            _dismissBSessionOverlay();
+                            showToast('Starting the approved reverse session...');
+                            await startConnection(reverseTargetId);
+                        } else {
+                            showBSessionEnded();
+                        }
                         return;
                     }
                 }
@@ -2964,6 +3068,7 @@ document.addEventListener('DOMContentLoaded', () => {
             })().catch(error => {
                     console.error('[SESSION] Disconnect failed:', error);
                     _bSessionDisconnecting = false;
+                    _bReverseHandoffPending = false;
                     if (button) {
                         button.disabled = false;
                         button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
@@ -3111,12 +3216,21 @@ document.addEventListener('DOMContentLoaded', () => {
             if (_bReverseRequestOutstanding) await pollBSessionReverseDecision();
         }
 
-        function selectBSessionFile() {
+        function showBSessionTransferChoice() {
+            document.getElementById('bSessionTransferChoiceDialog').style.display = 'flex';
+        }
+
+        function closeBSessionTransferChoice() {
+            document.getElementById('bSessionTransferChoiceDialog').style.display = 'none';
+        }
+
+        function selectBSessionTransfer(kind) {
+            closeBSessionTransferChoice();
             if (!window.ipc) {
                 showToast('File picker is available in the DeskStream desktop app.');
                 return;
             }
-            window.ipc.postMessage('send_file');
+            window.ipc.postMessage(kind === 'folder' ? 'send_folder' : 'send_file');
         }
 
         let _bSessionMicEnabled = false;
@@ -3168,7 +3282,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             document.getElementById('bReversePermissionDialog').style.display = 'none';
             if (accepted) {
-                showToast('Permission acknowledged; the current session roles remain unchanged.');
+                showToast('Reverse request approved.');
             }
         }
 
@@ -3178,9 +3292,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (result.decision === 0) return;
             _bReverseRequestOutstanding = false;
-            showToast(result.decision === 1
-                ? 'Request approved, but this client cannot hand off the active session roles.'
-                : 'Reverse-control request was rejected.');
+            if (result.decision === 1) {
+                if (!/^\d{9}$/.test(result.peer_system_id || '')) {
+                    showToast('Reverse request was approved, but the peer ID is unavailable.');
+                    return;
+                }
+                disconnectBSession(result.peer_system_id);
+                return;
+            }
+            showToast('Reverse-control request was rejected.');
         }
     </script>
 </body>

@@ -26,7 +26,17 @@ function Start-HiddenProcess($filePath) {
 
 # --- Helper: Stop a process ---
 function Stop-AgentProcess($name) {
-    Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force
+    if ($name -eq "desktop-agent") {
+        try { Invoke-RestMethod -Uri "http://127.0.0.1:49182/desktop-api/shutdown" -Method Post -ErrorAction SilentlyContinue } catch {}
+    }
+    elseif ($name -eq "relay-server") {
+        try {
+            $socket = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 9001)
+            $stream = $socket.GetStream()
+            $stream.Write([byte[]]@(99), 0, 1)
+            $socket.Close()
+        } catch {}
+    }
 }
 
 # --- Create the tray icon ---
