@@ -3999,7 +3999,11 @@ window.addEventListener('DOMContentLoaded', () => {
                     destinationHandle = window.currentFolderTransferApproval.destinationHandle;
                 }
 
-                if (!autoAllow) {
+                let resolveResult = { accept: false, allowAll: false };
+                
+                if (autoAllow) {
+                    resolveResult = { accept: true, allowAll: true };
+                } else {
                     const decision = await new Promise(resolve => {
                         const modal = document.createElement("div");
                         modal.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,0.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:sans-serif;";
@@ -4059,24 +4063,26 @@ window.addEventListener('DOMContentLoaded', () => {
                         btnAllowAll.onclick = () => { cleanup(); resolve({ accept: true, allowAll: true }); };
                     });
 
-                    if (!decision.accept) {
-                        sendFileControl(25, transferId);
-                        addTransferUI(transferId, filename, false);
-                        updateTransferUI(transferId, 0, "Rejected");
-                        return;
-                    }
+                    resolveResult = decision;
+                }
+                
+                if (!resolveResult.accept) {
+                    sendFileControl(25, transferId);
+                    addTransferUI(transferId, filename, false);
+                    updateTransferUI(transferId, 0, "Rejected");
+                    return;
+                }
 
-                    if (decision.allowAll && directoryOffer) {
-                        const parts = filename.split("/");
-                        window.currentFolderTransferApproval = {
-                            folderName: parts[0],
-                            allowAll: true,
-                            destinationHandle: destinationHandle,
-                            timeoutId: setTimeout(() => {
-                                window.currentFolderTransferApproval = null;
-                            }, 5000)
-                        };
-                    }
+                if (resolveResult.allowAll && directoryOffer && !autoAllow) {
+                    const parts = filename.split("/");
+                    window.currentFolderTransferApproval = {
+                        folderName: parts[0],
+                        allowAll: true,
+                        destinationHandle: destinationHandle,
+                        timeoutId: setTimeout(() => {
+                            window.currentFolderTransferApproval = null;
+                        }, 5000)
+                    };
                 }
 
                 incomingFiles[transferId] = {
@@ -4830,9 +4836,10 @@ window.addEventListener('DOMContentLoaded', () => {
                     alert(isStreaming ? `Session disconnected (state: ${stateNames[socketState]||socketState}). Reconnect and retry.` : 'Connect to a device first before sending files.');
                     return;
                 }
-                console.log(`[FILE_TRANSFER_REQUEST] sending ${event.target.files.length} file(s) over active session`);
-                sendFiles(event.target.files);
-                addActivityLog(`Started sending ${event.target.files.length} file(s)`);
+                const filesArray = Array.from(event.target.files);
+                console.log(`[FILE_TRANSFER_REQUEST] sending ${filesArray.length} file(s) over active session`);
+                sendFiles(filesArray);
+                addActivityLog(`Started sending ${filesArray.length} file(s)`);
             }
             event.target.value = "";
         }
