@@ -119,51 +119,6 @@ fn attach_thread_to_input_desktop() {
 #[cfg(not(windows))]
 fn attach_thread_to_input_desktop() {}
 
-// ============================================================
-// AUTOSTART
-// ============================================================
-
-#[cfg(windows)]
-fn enable_autostart(app_name: &str) -> Result<String, String> {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyW, RegSetValueExW, HKEY_CURRENT_USER, REG_SZ,
-    };
-
-    let current_exe = env::current_exe().map_err(|e| e.to_string())?;
-    let exe_path_str = current_exe.to_str().ok_or("Invalid path")?;
-    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
-        .encode_utf16()
-        .collect();
-
-    let name_utf16: Vec<u16> = format!("{}\0", app_name).encode_utf16().collect();
-    let val_utf16: Vec<u16> = format!("\"{}\"\0", exe_path_str).encode_utf16().collect();
-
-    unsafe {
-        let mut key = 0;
-        if RegCreateKeyW(HKEY_CURRENT_USER, subkey.as_ptr(), &mut key) != 0 {
-            return Err("Failed to open registry key".to_string());
-        }
-        let res = RegSetValueExW(
-            key,
-            name_utf16.as_ptr(),
-            0,
-            REG_SZ,
-            val_utf16.as_ptr() as *const u8,
-            (val_utf16.len() * 2) as u32,
-        );
-        RegCloseKey(key);
-        if res == 0 {
-            Ok(exe_path_str.to_string())
-        } else {
-            Err(format!("RegSetValueExW failed with code {}", res))
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn enable_autostart(_app_name: &str) -> Result<String, String> {
-    Ok("non-windows".to_string())
-}
 
 // ============================================================
 // HIDE CONSOLE & LOGGING
@@ -615,7 +570,7 @@ fn create_session_transfer_file(
 ) -> std::io::Result<(File, PathBuf)> {
     let relative_path = validate_relative_transfer_path(relative_filename)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    let destination = drop_dir.join(relative_path);
+    let mut destination = drop_dir.join(&relative_path);
     let parent = destination.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid destination path")
     })?;
@@ -627,6 +582,20 @@ fn create_session_transfer_file(
             "Destination escapes the DeskStream download folder",
         ));
     }
+    
+    let file_stem = relative_path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let extension = relative_path.extension().map(|e| e.to_string_lossy().into_owned());
+    let mut counter = 1;
+    while destination.exists() {
+        let new_name = if let Some(ext) = &extension {
+            format!("{} ({}).{}", file_stem, counter, ext)
+        } else {
+            format!("{} ({})", file_stem, counter)
+        };
+        destination = destination.with_file_name(new_name);
+        counter += 1;
+    }
+
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -634,9 +603,16 @@ fn create_session_transfer_file(
     Ok((file, destination))
 }
 
+
 fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
+    let root_folder_name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "folder".to_string());
+
     fn visit(
         root: &Path,
+        root_folder_name: &str,
         current: &Path,
         files: &mut Vec<(PathBuf, String)>,
     ) -> std::io::Result<()> {
@@ -655,15 +631,16 @@ fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>
                 ));
             }
             if metadata.is_dir() {
-                visit(root, &path, files)?;
+                visit(root, root_folder_name, &path, files)?;
             } else if metadata.is_file() {
                 let relative = path.strip_prefix(root).map_err(|error| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
                 })?;
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                validate_relative_transfer_path(&relative)
+                let relative_str = relative.to_string_lossy().replace('\\', "/");
+                let relative_prefixed = format!("{}/{}", root_folder_name, relative_str);
+                validate_relative_transfer_path(&relative_prefixed)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-                files.push((path, relative));
+                files.push((path, relative_prefixed));
             } else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -678,7 +655,7 @@ fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>
     }
 
     let mut files = Vec::new();
-    visit(root, root, &mut files)?;
+    visit(root, &root_folder_name, root, &mut files)?;
     let folder_name = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1357,6 +1334,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             }
                                             attach_thread_to_input_desktop();
                                             let event_type = pkt_type_buf[0];
+                                            
+                                            if event_type < 10 && !crate::status::session_perm_control_input() {
+                                                continue;
+                                            }
+
                                             let type_name = match event_type {
                                                 0 => "MOUSE_MOVE",
                                                 1 | 3 | 7 => "MOUSE_DOWN",
@@ -1653,6 +1635,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
                                             if name_len > 4096 { break; }
                                             let mut name_buf = vec![0u8; name_len];
+                                            
+                                            if !crate::status::session_perm_file_transfer() {
+                                                if read_stream.read_exact(&mut name_buf).is_err() { break; }
+                                                eprintln!("[FILE RX OFFER] Rejected because File Transfer permission is OFF");
+                                                let mut reject = vec![25u8];
+                                                reject.extend_from_slice(&transfer_id.to_be_bytes());
+                                                let _ = write_stream_input.send(reject);
+                                                continue;
+                                            }
+                                            
                                             if read_stream.read_exact(&mut name_buf).is_err() { break; }
                                             let received_name = match String::from_utf8(name_buf) {
                                                 Ok(name) => name,
@@ -1799,6 +1791,9 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     false
                                                 }
                                             };
+                                            if current_transfer_id.is_none() && final_size == 0 {
+                                                current_transfer_id = Some(transfer_id);
+                                            }
                                             if current_transfer_id == Some(transfer_id)
                                                 && accepted
                                                 && final_size == 0
@@ -1967,6 +1962,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let mut last_capture_log = Instant::now();
 
                                 while is_conn_capture.load(Ordering::SeqCst) {
+                                    if !crate::status::session_perm_view_screen() {
+                                        thread::sleep(Duration::from_millis(50));
+                                        continue;
+                                    }
+
                                     let current_idx = active_idx_capture.load(Ordering::SeqCst);
 
                                     if current_idx != last_idx || screens.is_empty() {

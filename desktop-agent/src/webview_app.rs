@@ -176,7 +176,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
 
         match event {
             Event::UserEvent(req) => {
-                match req.as_str() {
+                match req.trim_matches('"') {
                     "minimize" => window.set_minimized(true),
                     "maximize" => {
                         if !window.is_maximized() {
@@ -188,7 +188,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         window.set_maximized(!is_max);
                     },
                     "send_file" | "send_folder" => {
-                        let selection = if req == "send_folder" {
+                        let selection = if req.trim_matches('"') == "send_folder" {
                             rfd::FileDialog::new()
                                 .pick_folder()
                                 .map(|path| vec![path])

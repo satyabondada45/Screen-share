@@ -44,6 +44,27 @@ pub fn session_audio_enabled() -> bool {
     SESSION_AUDIO_ENABLED.load(Ordering::Acquire)
 }
 
+pub fn set_session_perm_view_screen(allowed: bool) {
+    SESSION_PERM_VIEW_SCREEN.store(allowed, Ordering::Release);
+}
+pub fn session_perm_view_screen() -> bool {
+    SESSION_PERM_VIEW_SCREEN.load(Ordering::Acquire)
+}
+
+pub fn set_session_perm_control_input(allowed: bool) {
+    SESSION_PERM_CONTROL_INPUT.store(allowed, Ordering::Release);
+}
+pub fn session_perm_control_input() -> bool {
+    SESSION_PERM_CONTROL_INPUT.load(Ordering::Acquire)
+}
+
+pub fn set_session_perm_file_transfer(allowed: bool) {
+    SESSION_PERM_FILE_TRANSFER.store(allowed, Ordering::Release);
+}
+pub fn session_perm_file_transfer() -> bool {
+    SESSION_PERM_FILE_TRANSFER.load(Ordering::Acquire)
+}
+
 pub fn set_session_reverse_request_pending() -> bool {
     SESSION_REVERSE_REQUEST
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -123,6 +144,9 @@ static SESSION_WRITER: OnceLock<Mutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::
 static SESSION_CHAT_HISTORY: OnceLock<Mutex<SessionChatHistory>> = OnceLock::new();
 static SESSION_REMOTE_TYPING: AtomicBool = AtomicBool::new(false);
 static SESSION_AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+static SESSION_PERM_VIEW_SCREEN: AtomicBool = AtomicBool::new(true);
+static SESSION_PERM_CONTROL_INPUT: AtomicBool = AtomicBool::new(true);
+static SESSION_PERM_FILE_TRANSFER: AtomicBool = AtomicBool::new(true);
 static SESSION_REVERSE_REQUEST: AtomicBool = AtomicBool::new(false);
 static SESSION_REVERSE_REQUEST_OUTSTANDING: AtomicBool = AtomicBool::new(false);
 static SESSION_REVERSE_DECISION: AtomicU8 = AtomicU8::new(0);
@@ -196,6 +220,9 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
     }
     SESSION_REMOTE_TYPING.store(false, Ordering::Release);
     SESSION_AUDIO_ENABLED.store(false, Ordering::Release);
+    SESSION_PERM_VIEW_SCREEN.store(true, Ordering::Release);
+    SESSION_PERM_CONTROL_INPUT.store(true, Ordering::Release);
+    SESSION_PERM_FILE_TRANSFER.store(true, Ordering::Release);
     SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
     SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
     SESSION_REVERSE_DECISION.store(0, Ordering::Release);

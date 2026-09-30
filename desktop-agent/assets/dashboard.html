@@ -1667,6 +1667,19 @@
             </div>
         </div>
     </div>
+    
+    <div id="bSessionFileApprovalDialog" role="dialog" aria-modal="true"
+        style="display:none;position:fixed;inset:0;z-index:12001;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
+        <div style="width:min(400px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
+            <h2 id="fileApprovalTitle" style="margin:0 0 10px;font-size:1.1rem;">Incoming File Transfer</h2>
+            <p id="fileApprovalMessage" style="margin:0 0 20px;color:#4b5563;word-wrap:break-word;">Accept file?</p>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+                <button type="button" class="btn" id="btnRejectFile">Reject</button>
+                <button type="button" class="btn btn-primary" id="btnAllowFile">Allow</button>
+                <button type="button" class="btn btn-primary" id="btnAllowAllFiles" style="display:none;">Allow All</button>
+            </div>
+        </div>
+    </div>
 
 
     <!-- ============================================================
@@ -2685,6 +2698,21 @@
         async function acceptConnection() {
             const requestToken = currentRequestToken;
             const isApprovedReverse = requestToken && requestToken === autoAcceptingReverseToken;
+            
+            const viewScreen = document.getElementById('permViewScreen') ? document.getElementById('permViewScreen').checked : true;
+            const controlInput = document.getElementById('permControlInput') ? document.getElementById('permControlInput').checked : true;
+            const fileTransfer = document.getElementById('permFileTransfer') ? document.getElementById('permFileTransfer').checked : true;
+            
+            try {
+                await fetch('http://127.0.0.1:49182/desktop-api/session/permissions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ view_screen: viewScreen, control_input: controlInput, file_transfer: fileTransfer })
+                });
+            } catch (e) {
+                console.error('Failed to set local session permissions', e);
+            }
+
             let accepted = false;
             if (requestToken) {
                 try {
@@ -2972,6 +3000,9 @@ document.addEventListener('DOMContentLoaded', () => {
             stopBSessionChatTyping();
             _bSessionActive = false;
             _bSessionDisconnecting = false;
+            currentFolderBatch = null;
+            currentFolderAllowAll = false;
+            currentFolderFilesReceived = 0;
             if (_bSessionMicEnabled) {
                 fetch('/desktop-api/session/audio', {
                     method: 'POST',
@@ -3186,6 +3217,44 @@ document.addEventListener('DOMContentLoaded', () => {
         const bSessionChatInput = document.getElementById('bSessionChatInput');
         bSessionChatInput.addEventListener('input', updateBSessionChatTyping);
 
+        let currentFolderBatch = null;
+        let currentFolderAllowAll = false;
+        let currentFolderFilesReceived = 0;
+
+        function showFileApprovalModal(offer, isFolder, folderName) {
+            return new Promise(resolve => {
+                const dialog = document.getElementById('bSessionFileApprovalDialog');
+                const title = document.getElementById('fileApprovalTitle');
+                const message = document.getElementById('fileApprovalMessage');
+                const btnReject = document.getElementById('btnRejectFile');
+                const btnAllow = document.getElementById('btnAllowFile');
+                const btnAllowAll = document.getElementById('btnAllowAllFiles');
+
+                if (isFolder) {
+                    title.textContent = 'Incoming Folder Transfer';
+                    message.innerHTML = `Folder: <b>${folderName}</b><br>File: <b>${offer.filename}</b><br>File ${currentFolderFilesReceived + 1} of Folder<br><br>Size: ${offer.size} bytes`;
+                    btnAllowAll.style.display = 'inline-block';
+                } else {
+                    title.textContent = 'Incoming File Transfer';
+                    message.innerHTML = `Accept file <b>${offer.filename}</b> (${offer.size} bytes)?<br>It will be saved in Downloads\\DeskStream.`;
+                    btnAllowAll.style.display = 'none';
+                }
+
+                dialog.style.display = 'flex';
+
+                const cleanup = () => {
+                    dialog.style.display = 'none';
+                    btnReject.onclick = null;
+                    btnAllow.onclick = null;
+                    btnAllowAll.onclick = null;
+                };
+
+                btnReject.onclick = () => { cleanup(); resolve('reject'); };
+                btnAllow.onclick = () => { cleanup(); resolve('allow'); };
+                btnAllowAll.onclick = () => { cleanup(); resolve('allow_all'); };
+            });
+        }
+
         async function pollBSessionFileOffers() {
             const response = await fetch('/desktop-api/session/offers');
             if (!response.ok) throw new Error(`File offer poll failed: ${response.status}`);
@@ -3193,7 +3262,44 @@ document.addEventListener('DOMContentLoaded', () => {
             for (const offer of offers) {
                 if (_bSessionHandledOffers.has(offer.transfer_id)) continue;
                 _bSessionHandledOffers.add(offer.transfer_id);
-                const accept = window.confirm(`Accept "${offer.filename}" (${offer.size} bytes)? It will be saved in Downloads\\DeskStream.`);
+                
+                const filenamePath = offer.filename.replace(/\\/g, '/');
+                const isFolderBatch = filenamePath.includes('/');
+                const folderName = isFolderBatch ? filenamePath.split('/')[0] : null;
+
+                let accept = false;
+
+                if (isFolderBatch) {
+                    if (currentFolderBatch !== folderName) {
+                        currentFolderBatch = folderName;
+                        currentFolderAllowAll = false;
+                        currentFolderFilesReceived = 0;
+                    }
+
+                    if (currentFolderAllowAll) {
+                        accept = true;
+                        currentFolderFilesReceived++;
+                    } else {
+                        const choice = await showFileApprovalModal(offer, true, folderName);
+                        if (choice === 'allow_all') {
+                            currentFolderAllowAll = true;
+                            accept = true;
+                            currentFolderFilesReceived++;
+                        } else if (choice === 'allow') {
+                            accept = true;
+                            currentFolderFilesReceived++;
+                        } else {
+                            accept = false;
+                        }
+                    }
+                } else {
+                    currentFolderBatch = null;
+                    currentFolderAllowAll = false;
+                    currentFolderFilesReceived = 0;
+                    const choice = await showFileApprovalModal(offer, false, null);
+                    accept = (choice === 'allow');
+                }
+
                 console.info(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} filename=${JSON.stringify(offer.filename)} total_bytes=${offer.size} decision=${accept ? 'accept' : 'reject'}`);
                 const decision = await fetch('/desktop-api/session/offer', {
                     method: 'POST',
@@ -3205,6 +3311,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     console.error(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} response_failed=${decision.status} error=${error}`);
                     showToast(`File offer response failed: ${error}`);
                     _bSessionHandledOffers.delete(offer.transfer_id);
+                    currentFolderAllowAll = false;
                 }
             }
             await pollBSessionReverseRequest();

@@ -4207,7 +4207,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         async function sendSingleFile(file) {
-            const filename = validateRelativeTransferPath(file.webkitRelativePath || file.name);
+            const filename = validateRelativeTransferPath(file.customPath || file.webkitRelativePath || file.name);
             const nameBytes = new TextEncoder().encode(filename);
             if (nameBytes.length > 4096) throw new Error("Filename too long.");
 
@@ -4671,7 +4671,38 @@ window.addEventListener('DOMContentLoaded', () => {
                         return;
                     }
 
-                    await sendFiles(event.dataTransfer.files);
+                    const items = event.dataTransfer.items;
+                    if (items) {
+                        const files = [];
+                        async function traverse(entry, path) {
+                            if (entry.isFile) {
+                                const file = await new Promise(resolve => entry.file(resolve));
+                                file.customPath = path + file.name;
+                                files.push(file);
+                            } else if (entry.isDirectory) {
+                                const dirReader = entry.createReader();
+                                let entries = [];
+                                let readEntries = await new Promise(resolve => dirReader.readEntries(resolve));
+                                while (readEntries.length > 0) {
+                                    entries.push(...readEntries);
+                                    readEntries = await new Promise(resolve => dirReader.readEntries(resolve));
+                                }
+                                for (const e of entries) {
+                                    await traverse(e, path + entry.name + "/");
+                                }
+                            }
+                        }
+                        for (let i = 0; i < items.length; i++) {
+                            const item = items[i];
+                            if (item.webkitGetAsEntry) {
+                                const entry = item.webkitGetAsEntry();
+                                if (entry) await traverse(entry, "");
+                            }
+                        }
+                        await sendFiles(files);
+                    } else {
+                        await sendFiles(event.dataTransfer.files);
+                    }
                 }
             );
         }
