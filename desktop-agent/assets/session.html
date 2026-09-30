@@ -558,12 +558,7 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="viewer-header">
         <div class="header-left">
             <div class="logo" aria-label="DeskStream">
-                <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
-                    <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
-                    <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
-                    <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" />
-                </svg>
-                DeskStream
+                <img src="deskstream-logo.png" style="height: 24px; width: auto;" alt="DeskStream" />
             </div>
             <div class="device-info">
                 <div class="device-name" style="display: flex; align-items: center; gap: 8px;">
@@ -3975,20 +3970,115 @@ window.addEventListener('DOMContentLoaded', () => {
                 }
 
                 const directoryOffer = filename.includes("/");
-                const destinationHandle = directoryOffer ? await requestFolderDestination() : null;
-                if (directoryOffer && !destinationHandle) {
-                    sendFileControl(25, transferId);
-                    addTransferUI(transferId, filename, false);
-                    updateTransferUI(transferId, 0, "Folder destination cancelled");
-                    return;
+                let autoAllow = false;
+                
+                if (directoryOffer) {
+                    const parts = filename.split("/");
+                    const folderName = parts[0];
+                    if (window.currentFolderTransferApproval && window.currentFolderTransferApproval.folderName === folderName) {
+                        if (window.currentFolderTransferApproval.allowAll) {
+                            autoAllow = true;
+                            clearTimeout(window.currentFolderTransferApproval.timeoutId);
+                            window.currentFolderTransferApproval.timeoutId = setTimeout(() => {
+                                window.currentFolderTransferApproval = null;
+                            }, 5000);
+                        }
+                    }
+                }
+                
+                let destinationHandle = null;
+                if (!autoAllow && directoryOffer) {
+                    destinationHandle = await requestFolderDestination();
+                    if (!destinationHandle) {
+                        sendFileControl(25, transferId);
+                        addTransferUI(transferId, filename, false);
+                        updateTransferUI(transferId, 0, "Folder destination cancelled");
+                        return;
+                    }
+                } else if (autoAllow && directoryOffer) {
+                    destinationHandle = window.currentFolderTransferApproval.destinationHandle;
                 }
 
-                if (!window.confirm(`Accept "${filename}" (${Number(fileSize)} bytes)?`)) {
-                    sendFileControl(25, transferId);
-                    addTransferUI(transferId, filename, false);
-                    updateTransferUI(transferId, 0, "Rejected");
-                    return;
+                if (!autoAllow) {
+                    const decision = await new Promise(resolve => {
+                        const modal = document.createElement("div");
+                        modal.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,0.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:sans-serif;";
+                        
+                        const card = document.createElement("div");
+                        card.style.cssText = "background:#1e293b;border-radius:8px;padding:20px;box-shadow:0 10px 15px -3px rgba(0,0,0,0.5);color:#f8fafc;width:400px;max-width:90%;";
+                        
+                        const title = document.createElement("h2");
+                        title.style.cssText = "margin-top:0;margin-bottom:8px;font-size:18px;";
+                        title.innerText = directoryOffer ? "Incoming Folder Transfer" : "Incoming File Transfer";
+                        
+                        const message = document.createElement("p");
+                        message.style.cssText = "margin-bottom:8px;font-size:14px;color:#cbd5e1;";
+                        message.innerText = directoryOffer ? "Allow files from this folder to be transferred?" : `Accept file (${Number(fileSize)} bytes)?`;
+                        
+                        const filenameDiv = document.createElement("div");
+                        filenameDiv.style.cssText = "font-weight:bold;word-break:break-all;margin-bottom:16px;color:#e2e8f0;background:#0f172a;padding:8px;border-radius:4px;";
+                        filenameDiv.innerText = filename;
+                        
+                        const actions = document.createElement("div");
+                        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+                        
+                        const btnReject = document.createElement("button");
+                        btnReject.innerText = "Reject";
+                        btnReject.style.cssText = "padding:8px 16px;border:1px solid #64748b;background:transparent;color:#f8fafc;border-radius:4px;cursor:pointer;";
+                        btnReject.onmouseover = () => btnReject.style.background = "#334155";
+                        btnReject.onmouseout = () => btnReject.style.background = "transparent";
+                        
+                        const btnAllow = document.createElement("button");
+                        btnAllow.innerText = "Allow";
+                        btnAllow.style.cssText = "padding:8px 16px;border:none;background:#2563eb;color:#fff;border-radius:4px;cursor:pointer;";
+                        btnAllow.onmouseover = () => btnAllow.style.background = "#1d4ed8";
+                        btnAllow.onmouseout = () => btnAllow.style.background = "#2563eb";
+                        
+                        const btnAllowAll = document.createElement("button");
+                        btnAllowAll.innerText = "Allow All";
+                        btnAllowAll.style.cssText = "padding:8px 16px;border:none;background:#10b981;color:#fff;border-radius:4px;cursor:pointer;";
+                        btnAllowAll.onmouseover = () => btnAllowAll.style.background = "#059669";
+                        btnAllowAll.onmouseout = () => btnAllowAll.style.background = "#10b981";
+                        if (!directoryOffer) btnAllowAll.style.display = "none";
+                        
+                        actions.appendChild(btnReject);
+                        actions.appendChild(btnAllow);
+                        actions.appendChild(btnAllowAll);
+                        
+                        card.appendChild(title);
+                        card.appendChild(message);
+                        card.appendChild(filenameDiv);
+                        card.appendChild(actions);
+                        modal.appendChild(card);
+                        document.body.appendChild(modal);
+                        
+                        const cleanup = () => document.body.removeChild(modal);
+                        
+                        btnReject.onclick = () => { cleanup(); resolve({ accept: false, allowAll: false }); };
+                        btnAllow.onclick = () => { cleanup(); resolve({ accept: true, allowAll: false }); };
+                        btnAllowAll.onclick = () => { cleanup(); resolve({ accept: true, allowAll: true }); };
+                    });
+
+                    if (!decision.accept) {
+                        sendFileControl(25, transferId);
+                        addTransferUI(transferId, filename, false);
+                        updateTransferUI(transferId, 0, "Rejected");
+                        return;
+                    }
+
+                    if (decision.allowAll && directoryOffer) {
+                        const parts = filename.split("/");
+                        window.currentFolderTransferApproval = {
+                            folderName: parts[0],
+                            allowAll: true,
+                            destinationHandle: destinationHandle,
+                            timeoutId: setTimeout(() => {
+                                window.currentFolderTransferApproval = null;
+                            }, 5000)
+                        };
+                    }
                 }
+
                 incomingFiles[transferId] = {
                     filename: filename,
                     size: Number(fileSize),
@@ -4028,6 +4118,13 @@ window.addEventListener('DOMContentLoaded', () => {
                     ? 0
                     : Math.floor((incoming.receivedBytes / incoming.size) * 100);
                 updateTransferUI(transferId, pct, "Receiving...");
+
+                if (window.currentFolderTransferApproval && incoming.filename.startsWith(window.currentFolderTransferApproval.folderName + "/")) {
+                    clearTimeout(window.currentFolderTransferApproval.timeoutId);
+                    window.currentFolderTransferApproval.timeoutId = setTimeout(() => {
+                        window.currentFolderTransferApproval = null;
+                    }, 5000);
+                }
             } else if (type === 22) {
                 if (bytes.length !== 49) {
                     console.error(`[FILE RX FRAMING ERROR] type=22 packet_bytes=${bytes.length} expected=49`);
@@ -4053,6 +4150,14 @@ window.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
                 console.log(`[FILE] Transfer verified: ${incoming.filename}`);
+
+                if (window.currentFolderTransferApproval && incoming.filename.startsWith(window.currentFolderTransferApproval.folderName + "/")) {
+                    clearTimeout(window.currentFolderTransferApproval.timeoutId);
+                    window.currentFolderTransferApproval.timeoutId = setTimeout(() => {
+                        window.currentFolderTransferApproval = null;
+                    }, 5000);
+                }
+                
                 try {
                     if (incoming.directoryHandle) {
                         await writeReceivedFolderFile(incoming.directoryHandle, incoming.filename, blob);
