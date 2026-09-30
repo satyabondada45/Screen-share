@@ -1128,7 +1128,7 @@
             font-size: 0.85rem;
             font-weight: 600;
             box-shadow: var(--shadow-modal);
-            z-index: 2000;
+            z-index: 11000;
             opacity: 0;
             transform: translateY(20px);
             transition: all 0.25s ease;
@@ -2077,7 +2077,7 @@
                                     <line x1="8" y1="21" x2="16" y2="21" />
                                     <line x1="12" y1="17" x2="12" y2="21" />
                                 </svg></div>
-                            <label class="switch"><input type="checkbox" id="permViewScreen" checked><span
+                            <label class="switch" for="permViewScreen"><input type="checkbox" id="permViewScreen" checked><span
                                     class="slider"></span></label>
                         </div>
                         <div>
@@ -2092,7 +2092,7 @@
                                     <rect x="5" y="2" width="14" height="20" rx="7" />
                                     <line x1="12" y1="6" x2="12" y2="10" />
                                 </svg></div>
-                            <label class="switch"><input type="checkbox" id="permControlInput" checked><span
+                            <label class="switch" for="permControlInput"><input type="checkbox" id="permControlInput" checked><span
                                     class="slider"></span></label>
                         </div>
                         <div>
@@ -2107,7 +2107,7 @@
                                     <path
                                         d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                                 </svg></div>
-                            <label class="switch"><input type="checkbox" id="permFileTransfer" checked><span
+                            <label class="switch" for="permFileTransfer"><input type="checkbox" id="permFileTransfer" checked><span
                                     class="slider"></span></label>
                         </div>
                         <div>
@@ -2391,7 +2391,7 @@
                         return;
                     }
                     if (!overlay.classList.contains('open')) {
-                        promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token);
+                        promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token, req);
                     }
                 }
             } catch (e) { }
@@ -2655,12 +2655,24 @@
         }
 
         // ── Incoming modal ───────────────────────────────────────────
-        function promptIncomingModal(name, remoteId, ip, time, token) {
+        function promptIncomingModal(name, remoteId, ip, time, token, reqData) {
             document.getElementById('modalDeviceName').textContent = name;
             document.getElementById('modalRemoteId').textContent = formatId(remoteId);
             document.getElementById('modalIpAddress').textContent = ip;
             document.getElementById('modalRequestTime').textContent = time;
             currentRequestToken = token;
+            
+            // Initialize toggle switches from request data (default to true if missing)
+            if (document.getElementById('permViewScreen')) {
+                document.getElementById('permViewScreen').checked = (reqData && reqData.view_screen !== undefined) ? reqData.view_screen : true;
+            }
+            if (document.getElementById('permControlInput')) {
+                document.getElementById('permControlInput').checked = (reqData && reqData.control_input !== undefined) ? reqData.control_input : true;
+            }
+            if (document.getElementById('permFileTransfer')) {
+                document.getElementById('permFileTransfer').checked = (reqData && reqData.file_transfer !== undefined) ? reqData.file_transfer : true;
+            }
+
             const overlay = document.getElementById('incomingModalOverlay');
             overlay.style.display = 'flex';
             requestAnimationFrame(() => overlay.classList.add('open'));
@@ -3404,6 +3416,21 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             showToast('Reverse-control request was rejected.');
         }
+        
+        // Initialize static event listeners
+        document.addEventListener('DOMContentLoaded', () => {
+            const bSettingsBtn = document.getElementById('bSettingsBtn');
+            if (bSettingsBtn) {
+                bSettingsBtn.addEventListener('click', () => {
+                    const sidebarSettingsBtn = Array.from(document.querySelectorAll('.sidebar .nav-item')).find(el => el.textContent.includes('Settings'));
+                    if (sidebarSettingsBtn) {
+                        sidebarSettingsBtn.click();
+                    } else {
+                        showToast('Settings opened');
+                    }
+                });
+            }
+        });
     </script>
 </body>
 
