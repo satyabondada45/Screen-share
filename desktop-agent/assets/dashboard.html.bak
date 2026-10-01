@@ -73,11 +73,23 @@
         }
 
         .brand-logo {
-            width: 28px;
-            height: 28px;
+            width: auto;
+            height: auto;
             display: flex;
             align-items: center;
             justify-content: center;
+            max-width: 210px;
+            overflow: visible;
+        }
+
+        .brand-logo img {
+            display: block;
+            width: 190px;
+            max-width: 190px;
+            height: auto;
+            object-fit: contain;
+            object-position: left center;
+            filter: drop-shadow(0 1px 0 rgba(15, 23, 42, 0.04));
         }
 
         .brand-name {
@@ -140,6 +152,16 @@
             align-items: center;
             gap: 16px;
             color: var(--text-muted);
+        }
+
+        .auth-window-controls {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            z-index: 30;
         }
 
         .win-btn {
@@ -1128,7 +1150,7 @@
             font-size: 0.85rem;
             font-weight: 600;
             box-shadow: var(--shadow-modal);
-            z-index: 2000;
+            z-index: 11000;
             opacity: 0;
             transform: translateY(20px);
             transition: all 0.25s ease;
@@ -1302,19 +1324,343 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* ============================================================
+           B-SIDE CONNECTED SESSION OVERLAY
+        ============================================================ */
+        #bSessionOverlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 10000;
+            flex-direction: column;
+            pointer-events: none;
+            background: #0f172a;
+            --header-bg: #fff;
+            --border: #e5e5e5;
+            --accent: #ef4444;
+            --text-dark: #111827;
+            --text-muted: #6b7280;
+            --online: #22c55e;
+            --btn-bg: #fff;
+            --btn-border: #d1d5db;
+        }
+        #bSessionOverlay.active { display: flex; }
+        #bSessionOverlay .viewer-header,
+        #bSessionOverlay .viewer-header * {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        #bSessionOverlay .viewer-header {
+            height: 54px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 16px;
+            flex-shrink: 0;
+            z-index: 100;
+            pointer-events: auto;
+        }
+        #bSessionOverlay .header-left {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+        #bSessionOverlay .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            color: var(--text-dark);
+            font-weight: 800;
+            font-size: 1.1rem;
+            letter-spacing: -0.02em;
+        }
+        #bSessionOverlay .device-info {
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border);
+            padding-left: 20px;
+        }
+        #bSessionOverlay .device-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #bSessionOverlay .device-meta {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 2px;
+        }
+        #bSessionOverlay .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--online);
+        }
+        #bSessionOverlay .dot-text {
+            color: var(--online);
+            font-weight: 500;
+        }
+        #bSessionOverlay .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        #bSessionOverlay .action-group {
+            display: flex;
+            gap: 8px;
+            margin-right: 16px;
+            border-right: 1px solid var(--border);
+            padding-right: 16px;
+        }
+        #bSessionOverlay .btn {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            padding: 4px 12px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            color: var(--text-dark);
+            cursor: pointer;
+            transition: 0.15s;
+            text-decoration: none;
+            min-width: 60px;
+        }
+        #bSessionOverlay .btn:hover {
+            background: #f9fafb;
+            border-color: #9ca3af;
+        }
+        #bSessionOverlay .btn svg { margin-bottom: 2px; }
+        #bSessionOverlay .btn-end {
+            border-color: var(--accent);
+            color: var(--accent);
+            flex-direction: row;
+            gap: 6px;
+            padding: 6px 16px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        #bSessionOverlay .btn-end:hover {
+            background: #fef2f2;
+            border-color: #dc2626;
+            color: #dc2626;
+        }
+        #bSessionOverlay .btn-end svg { margin-bottom: 0; }
+        #bSessionNavbar {
+            width: 100%;
+            margin: 0;
+        }
+        #bSessionContent {
+            flex: 1;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            justify-content:center;
+            gap:14px;
+            padding:24px;
+            pointer-events:none;
+        }
+        #bSessionContent .bsc-icon {
+            width:64px; height:64px; border-radius:50%;
+            background:#1e293b; border:2px solid #334155;
+            display:flex; align-items:center; justify-content:center;
+        }
+        #bSessionContent .bsc-title { font-size:1.05rem; font-weight:700; color:#e2e8f0; }
+        #bSessionContent .bsc-sub { font-size:0.82rem; color:#64748b; text-align:center; max-width:320px; line-height:1.5; }
+        #bSessionContent .bsc-timer { font-size:0.78rem; font-family:'JetBrains Mono',monospace; color:#22c55e; letter-spacing:0.08em; }
+        #bSessionChatPanel {
+            position: fixed;
+            top: 78px;
+            right: 16px;
+            width: 300px;
+            max-height: calc(100vh - 94px);
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+            z-index: 10002;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            pointer-events: auto;
+            color: #111827;
+        }
+        #bSessionChatPanel.open { display: flex; }
+        #bSessionChatPanel .chat-header {
+            background: #f9fafb;
+            padding: 12px;
+            font-weight: bold;
+            border-bottom: 1px solid #e5e5e5;
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+        }
+        #bSessionChatPanel .chat-close {
+            border: 0;
+            background: transparent;
+            cursor: pointer;
+            color: #6b7280;
+            font-size: 1.25rem;
+        }
+        #bSessionChatMessages {
+            flex: 0 1 250px;
+            height: 250px;
+            overflow-y: auto;
+            padding: 12px;
+            font-size: 0.8rem;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            background: white;
+        }
+        #bSessionTypingIndicator {
+            display: none;
+            padding: 0 12px 8px;
+            color: #6b7280;
+            font-size: 0.75rem;
+            font-style: italic;
+        }
+        #bSessionTypingIndicator.visible { display: block; }
+        #bSessionChatPanel .msg {
+            padding: 8px 12px;
+            border-radius: 8px;
+            max-width: 85%;
+            overflow-wrap: anywhere;
+        }
+        #bSessionChatPanel .msg.sent {
+            background: #eff6ff;
+            align-self: flex-end;
+            color: #1e3a8a;
+        }
+        #bSessionChatPanel .msg.recv {
+            background: #f3f4f6;
+            align-self: flex-start;
+            color: #111827;
+        }
+        #bSessionChatForm {
+            display: flex;
+            border-top: 1px solid #e5e5e5;
+        }
+        #bSessionChatInput {
+            flex: 1;
+            min-width: 0;
+            padding: 10px;
+            border: 0;
+            outline: 0;
+            font-size: 0.8rem;
+            background: white;
+            color: #111827;
+        }
+        #bSessionChatForm button {
+            background: #ef4444;
+            border: 0;
+            color: white;
+            padding: 0 12px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.8rem;
+        }
+        /* Removed body.b-session-active > .topbar, .workspace { display: none } to keep normal dashboard */
     </style>
 </head>
 
 <body>
+    <!-- B-Side Chat Panel (moved out of the huge overlay) -->
+        <section id="bSessionChatPanel" class="chat-panel" aria-label="Session chat">
+            <div class="chat-header">
+                <span>Session Chat</span>
+                <button class="chat-close" type="button" onclick="toggleBSessionChat()" aria-label="Close chat">&times;</button>
+            </div>
+            <div id="bSessionChatMessages" class="chat-messages" aria-live="polite"></div>
+            <div id="bSessionTypingIndicator" aria-live="polite">Remote user is typing…</div>
+            <form id="bSessionChatForm" class="chat-input">
+                <input id="bSessionChatInput" maxlength="65535" autocomplete="off" placeholder="Type a message...">
+                <button type="submit">Send</button>
+            </form>
+        </section>
+    <div id="bReversePermissionDialog" role="alertdialog" aria-modal="false"
+        style="display:none;position:fixed;left:20px;bottom:20px;z-index:11000;width:min(360px,calc(100vw - 40px));">
+        <div style="padding:16px;background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 12px 32px rgba(15,23,42,.22);color:#111827;">
+            <h2 style="margin:0 0 8px;font-size:1rem;">Reverse control request</h2>
+            <p style="margin:0 0 14px;color:#4b5563;font-size:.9rem;line-height:1.45;">The remote controller is requesting to reverse the session. Accepting will end this connection and start a new session in the opposite direction.</p>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+                <button type="button" class="btn" onclick="answerBReverseRequest(false)">Reject</button>
+                <button type="button" class="btn" onclick="answerBReverseRequest(true)">Accept</button>
+            </div>
+        </div>
+    </div>
+    <div id="bSessionTransferChoiceDialog" role="dialog" aria-modal="true"
+        style="display:none;position:fixed;inset:0;z-index:11001;background:rgba(15,23,42,.35);align-items:center;justify-content:center;padding:20px;">
+        <div style="width:min(360px,100%);padding:20px;background:#fff;border-radius:14px;box-shadow:0 16px 40px rgba(15,23,42,.22);color:#111827;">
+            <h2 style="margin:0 0 16px;font-size:1rem;">Choose what to send</h2>
+            <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
+                <button type="button" class="btn" onclick="selectBSessionTransfer('file')">Select Files</button>
+                <button type="button" class="btn btn-primary" onclick="selectBSessionTransfer('folder')">Select Folder</button>
+                <button type="button" class="btn" onclick="closeBSessionTransferChoice()">Cancel</button>
+            </div>
+        </div>
+    </div>
+    <div id="bSessionEndedDialog" role="dialog" aria-modal="true" aria-labelledby="bSessionEndedTitle"
+        style="display:none;position:fixed;inset:0;z-index:10003;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
+        <div style="width:min(380px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
+            <h2 id="bSessionEndedTitle" style="margin:0 0 10px;font-size:1.1rem;">Session Ended</h2>
+            <p style="margin:0 0 20px;color:#4b5563;">This session has ended.</p>
+            <div style="display:flex;justify-content:flex-end;">
+                <button type="button" class="btn btn-primary" onclick="dismissBSessionEnded()">OK</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="bSessionFileApprovalDialog" role="dialog" aria-modal="true"
+        style="display:none;position:fixed;inset:0;z-index:12001;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
+        <div style="width:min(400px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
+            <h2 id="fileApprovalTitle" style="margin:0 0 10px;font-size:1.1rem;">Incoming File Transfer</h2>
+            <p id="fileApprovalMessage" style="margin:0 0 20px;color:#4b5563;word-wrap:break-word;">Accept file?</p>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+                <button type="button" class="btn" id="btnRejectFile">Reject</button>
+                <button type="button" class="btn btn-primary" id="btnAllowFile">Allow</button>
+                <button type="button" class="btn btn-primary" id="btnAllowAllFiles" style="display:none;">Allow All</button>
+            </div>
+        </div>
+    </div>
+
 
     <!-- ============================================================
      LOGIN OVERLAY — shown until user authenticates
      ============================================================ -->
-    <div class="login-overlay" id="loginOverlay">
+    <div class="login-overlay" id="loginOverlay" style="position: relative;">
+        <div class="auth-window-controls">
+            <button class="win-btn" onclick="minimizeWindow()" title="Minimize" aria-label="Minimize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="4" y1="12" x2="20" y2="12"></line>
+                </svg>
+            </button>
+            <button id="loginMaximizeBtn" class="win-btn maximize-window-btn" onclick="maximizeWindow()" title="Maximize" aria-label="Maximize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                </svg>
+            </button>
+            <button class="win-btn close-btn" onclick="closeWindow()" title="Close" aria-label="Close window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        </div>
         <div class="login-card">
             <div class="login-logo">
                 <div class="brand-logo">
-                    <img src="deskstream-logo.png" style="height: 26px; width: auto;" />
+                    <img src="deskstream-logo.png" style="width: 250px; height: auto;" />
                 </div>
             </div>
             <div class="login-heading">Sign in to continue</div>
@@ -1336,11 +1682,29 @@
         </div>
     </div>
 
-    <div class="login-overlay" id="registerOverlay" style="display: none;">
+    <div class="login-overlay" id="registerOverlay" style="display:none; position: relative;">
+        <div class="auth-window-controls">
+            <button class="win-btn" onclick="minimizeWindow()" title="Minimize" aria-label="Minimize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="4" y1="12" x2="20" y2="12"></line>
+                </svg>
+            </button>
+            <button id="registerMaximizeBtn" class="win-btn maximize-window-btn" onclick="maximizeWindow()" title="Maximize" aria-label="Maximize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                </svg>
+            </button>
+            <button class="win-btn close-btn" onclick="closeWindow()" title="Close" aria-label="Close window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        </div>
         <div class="login-card">
             <div class="login-logo">
                 <div class="brand-logo">
-                    <img src="deskstream-logo.png" style="height: 26px; width: auto;" />
+                    <img src="deskstream-logo.png" style="width: 250px; height: auto;" />
                 </div>
             </div>
             <div class="login-heading">Create an account</div>
@@ -1372,7 +1736,7 @@
     <header class="topbar">
         <div class="brand-container" onclick="location.reload()">
             <div class="brand-logo">
-                <img src="deskstream-logo.png" alt="DeskStream" style="height: 28px; width: auto;" />
+                <img src="deskstream-logo.png" style="width: 200px; height: auto;" />
             </div>
         </div>
 
@@ -1404,6 +1768,11 @@
                         <line x1="4" y1="12" x2="20" y2="12"></line>
                     </svg>
                 </button>
+                <button class="win-btn maximize-window-btn" onclick="maximizeWindow()" title="Maximize">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                    </svg>
+                </button>
                 <button class="win-btn close-btn" onclick="closeWindow()" title="Close">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -1422,7 +1791,7 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="nav-menu">
-                <button class="nav-item active" onclick="setSidebarActive(this)">
+                <button class="nav-item active" data-page="home" onclick="setSidebarActive(this); showDashboardPage('home');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <rect x="2" y="3" width="20" height="14" rx="2" />
                         <line x1="8" y1="21" x2="16" y2="21" />
@@ -1430,22 +1799,15 @@
                     </svg>
                     New Session
                 </button>
-                <button class="nav-item" onclick="setSidebarActive(this); scrollToSection('recent-section');">
+                <button class="nav-item" data-page="home" onclick="setSidebarActive(this); showDashboardPage('home'); scrollToSection('recent-section');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <circle cx="12" cy="12" r="10" />
                         <polyline points="12 6 12 12 16 14" />
                     </svg>
                     Recent Sessions
                 </button>
-                <button class="nav-item" onclick="setSidebarActive(this); showToast('Address Book synced');">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                        <circle cx="12" cy="7" r="4" />
-                    </svg>
-                    Address Book
-                </button>
                 <div class="sidebar-divider"></div>
-                <button class="nav-item" onclick="setSidebarActive(this); showToast('Settings opened');">
+                <button class="nav-item" data-page="settings" onclick="setSidebarActive(this); showDashboardPage('settings');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <circle cx="12" cy="12" r="3" />
                         <path
@@ -1453,7 +1815,7 @@
                     </svg>
                     Settings
                 </button>
-                <button class="nav-item" onclick="setSidebarActive(this); showToast('DeskStream Agent v1.1.3');">
+                <button class="nav-item" data-page="about" onclick="setSidebarActive(this); showDashboardPage('about');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <circle cx="12" cy="12" r="10" />
                         <line x1="12" y1="16" x2="12" y2="12" />
@@ -1485,7 +1847,7 @@
                     </button>
                 </div>
                 <div class="sidebar-alias-val">
-                    Alias: <strong id="sidebarAliasDisplay">Loading...</strong>
+                    Alias: <strong id="sidebarAliasDisplay">DeskStream User</strong>
                     <button class="mini-edit-btn" onclick="triggerAliasEdit()" title="Edit Alias">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">
@@ -1525,7 +1887,7 @@
 
                             <div class="field-label">Alias</div>
                             <div class="alias-display-row">
-                                <span id="mainHostAlias">Loading...</span>
+                                <span id="mainHostAlias">DeskStream User</span>
                                 <input type="text" id="hostAliasInput" class="alias-input-inline" value=""
                                     onblur="saveAliasInline()" onkeydown="handleAliasKey(event)">
                                 <button class="edit-alias-btn" onclick="triggerAliasEdit()" title="Edit Alias">
@@ -1538,15 +1900,6 @@
                         </div>
 
                         <div class="connection-ready-badge" id="hostStatusBadge"></div>
-                        <button class="btn-connect-local" type="button" id="disconnectActiveSessionBtn"
-                            style="display: none; background: #fee2e2; color: #dc2626; border-color: #fca5a5;"
-                            onclick="endActiveSession()">
-                            Disconnect to <span id="disconnectTargetName">B</span>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                            </svg>
-                        </button>
                     </div>
 
                     <!-- Panel 2: Connect to Remote -->
@@ -1586,16 +1939,85 @@
 
                 <!-- Recent Sessions Grid -->
                 <div id="recent-section">
-                                <div class="section-header-row">
-                                    <h3 class="section-heading">Recent Sessions</h3>
-                                    <a class="view-all-link" href="#"
-                                        onclick="fetchAllDevices(true); return false;">View All</a>
-                                </div>
-                                <div class="workstations-grid" id="workstationsContainer">
-                                    <div class="empty-grid-box">Loading devices...</div>
-                                </div>
+                    <div class="section-header-row">
+                        <h3 class="section-heading">Recent Sessions</h3>
+                        <a class="view-all-link" href="#" onclick="fetchAllDevices(true); return false;">View All</a>
+                    </div>
+                    <div class="workstations-grid" id="workstationsContainer">
+                        <div class="empty-grid-box">Loading devices...</div>
+                    </div>
+                </div>
+            </div>
+
+            <section id="settingsPage" class="page-panel" style="display:none;">
+                <div class="panel-card" style="max-width: 900px; width: 100%; margin: 0 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Settings</h2>
+                    </div>
+                    <p class="panel-subtitle">DeskStream local application settings.</p>
+                    <div class="permissions-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin-top:10px;">
+                        <div class="mode-option-card active">
+                            <div class="mode-icon-box">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>General</h5>
+                                <p>Application window, startup behavior, and local settings.</p>
                             </div>
                         </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-icon-box">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>Security</h5>
+                                <p>Device permissions and trusted access policies.</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-icon-box">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>Notifications</h5>
+                                <p>Connection prompts and session alerts.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="aboutPage" class="page-panel" style="display:none;">
+                <div class="panel-card" style="max-width: 900px; width: 100%; margin: 0 auto;">
+                    <div class="panel-header" style="align-items:center; gap:16px;">
+                        <div class="brand-logo">
+                            <img src="deskstream-logo.png" alt="DeskStream logo" />
+                        </div>
+                        <h2 class="panel-title">About DeskStream</h2>
+                    </div>
+                    <p class="panel-subtitle">DeskStream Desktop Agent</p>
+                    <div class="permissions-grid" style="display:grid; gap:16px; margin-top:10px;">
+                        <div class="mode-option-card active">
+                            <div class="mode-text-box">
+                                <h5>Version</h5>
+                                <p>1.1.3</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-text-box">
+                                <h5>Build</h5>
+                                <p>Local embedded Windows desktop client</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-text-box">
+                                <h5>Copyright</h5>
+                                <p>Copyright (c) Friends Software Solutions</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -1706,7 +2128,7 @@
                                     <line x1="8" y1="21" x2="16" y2="21" />
                                     <line x1="12" y1="17" x2="12" y2="21" />
                                 </svg></div>
-                            <label class="switch"><input type="checkbox" id="permViewScreen" checked><span
+                            <label class="switch" for="permViewScreen"><input type="checkbox" id="permViewScreen" checked><span
                                     class="slider"></span></label>
                         </div>
                         <div>
@@ -1721,7 +2143,7 @@
                                     <rect x="5" y="2" width="14" height="20" rx="7" />
                                     <line x1="12" y1="6" x2="12" y2="10" />
                                 </svg></div>
-                            <label class="switch"><input type="checkbox" id="permControlInput" checked><span
+                            <label class="switch" for="permControlInput"><input type="checkbox" id="permControlInput" checked><span
                                     class="slider"></span></label>
                         </div>
                         <div>
@@ -1736,7 +2158,7 @@
                                     <path
                                         d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                                 </svg></div>
-                            <label class="switch"><input type="checkbox" id="permFileTransfer" checked><span
+                            <label class="switch" for="permFileTransfer"><input type="checkbox" id="permFileTransfer" checked><span
                                     class="slider"></span></label>
                         </div>
                         <div>
@@ -1790,13 +2212,55 @@
         let currentRequestToken = null;
         let deviceRefreshInProgress = false;
         let isAuthenticated = false;
+        let approvedReverseRequesterId = null;
+        let approvedReverseExpiresAt = 0;
+        let autoAcceptingReverseToken = null;
 
         // ── Boot ─────────────────────────────────────────────────────
         window.addEventListener('DOMContentLoaded', () => {
+            applyDisplayIdentity();
+            requestWindowState();
             tryRestoreSession();
             pollAgentHealth();
             setInterval(pollAgentHealth, 5000);
         });
+
+        function normalizeDisplayName(value) {
+            if (typeof value !== 'string') return '';
+            return value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+
+        function getBestAvailableDisplayName() {
+            const candidates = [
+                normalizeDisplayName(localStorage.getItem('ds_username')),
+                normalizeDisplayName(localStorage.getItem('ds_display_name')),
+                normalizeDisplayName(localStorage.getItem('ds_device_alias')),
+                normalizeDisplayName(localStorage.getItem('ds_device_name')),
+                normalizeDisplayName(currentHostAlias)
+            ];
+
+            const filtered = candidates.filter(name =>
+                name &&
+                name !== 'Loading...' &&
+                name !== 'Connecting...' &&
+                name !== 'ID unavailable' &&
+                name !== 'DeskStream User'
+            );
+
+            return filtered[0] || 'DeskStream User';
+        }
+
+        function applyDisplayIdentity(name) {
+            const resolvedName = normalizeDisplayName(name) || getBestAvailableDisplayName();
+            const safeName = resolvedName || 'DeskStream User';
+            const aliasNodes = document.querySelectorAll('#mainHostAlias, #sidebarAliasDisplay');
+            aliasNodes.forEach(node => {
+                if (node) node.textContent = safeName;
+            });
+            const aliasInput = document.getElementById('hostAliasInput');
+            if (aliasInput) aliasInput.value = safeName;
+            currentHostAlias = safeName;
+        }
 
         // ── Auth helpers ─────────────────────────────────────────────
         function tryRestoreSession() {
@@ -1831,10 +2295,12 @@
         function showLoginOverlay() {
             document.getElementById('registerOverlay').style.display = 'none';
             document.getElementById('loginOverlay').style.display = 'flex';
+            requestWindowState();
         }
         function showRegisterOverlay() {
             document.getElementById('loginOverlay').style.display = 'none';
             document.getElementById('registerOverlay').style.display = 'flex';
+            requestWindowState();
         }
 
         async function doLogin() {
@@ -1915,10 +2381,13 @@
 
         function onAuthenticated(username) {
             isAuthenticated = true;
+            const safeUsername = normalizeDisplayName(username) || getBestAvailableDisplayName();
             document.getElementById('loginOverlay').style.display = 'none';
             const badge = document.getElementById('topbarUserBadge');
             badge.style.display = 'flex';
-            document.getElementById('topbarUsername').textContent = '👤 ' + username;
+            document.getElementById('topbarUsername').textContent = '👤 ' + safeUsername;
+            applyDisplayIdentity(safeUsername);
+            showDashboardPage('home');
             fetchAllDevices(false);
             setInterval(() => fetchAllDevices(false), 5000);
             setInterval(checkIncoming, 4000);
@@ -1931,6 +2400,50 @@
             document.getElementById('topbarUserBadge').style.display = 'none';
             showLoginOverlay();
         }
+
+        function windowIconMarkup(maximized) {
+            if (maximized) {
+                return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="8" width="12" height="12" rx="2" ry="2"></rect><rect x="4" y="4" width="12" height="12" rx="2" ry="2"></rect></svg>';
+            }
+            return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>';
+        }
+
+        function updateMaximizeIcon(maximized) {
+            const maximizeButtons = document.querySelectorAll('.maximize-window-btn');
+            maximizeButtons.forEach(button => {
+                button.innerHTML = windowIconMarkup(maximized);
+                button.setAttribute('title', maximized ? 'Restore' : 'Maximize');
+                button.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
+            });
+        }
+
+        function requestWindowState() {
+            if (window.ipc) {
+                window.ipc.postMessage('get_maximize_state');
+            } else {
+                updateMaximizeIcon(false);
+            }
+        }
+
+        function minimizeWindow() {
+            if (window.ipc) window.ipc.postMessage('minimize');
+        }
+
+        function maximizeWindow() {
+            if (window.ipc) {
+                window.ipc.postMessage('toggle_maximize');
+                setTimeout(requestWindowState, 150);
+            }
+        }
+
+        function closeWindow() {
+            if (window.ipc) window.ipc.postMessage('close');
+        }
+
+        window.updateMaximizeIcon = updateMaximizeIcon;
+        window.minimizeWindow = minimizeWindow;
+        window.maximizeWindow = maximizeWindow;
+        window.closeWindow = closeWindow;
 
         // ── Agent health poll ────────────────────────────────────────
         async function pollAgentHealth() {
@@ -1976,17 +2489,23 @@
                     const others = data.devices.filter(d =>
                         d.system_id !== currentHostUid && d.device_uid !== currentHostUid
                     );
-                    renderDevicesGrid(others);
-                    populateRecentDropdown(others);
-                    // Alias from DB
+                    const recent = getRecentSessionEntries();
+                    const displayDevices = others.length > 0 ? others : recent;
+                    renderDevicesGrid(displayDevices);
+                    populateRecentDropdown(displayDevices);
                     const mine = data.devices.find(d =>
                         d.system_id === currentHostUid || d.device_uid === currentHostUid
                     );
                     if (mine && mine.name) {
-                        currentHostAlias = mine.name;
-                        document.getElementById('mainHostAlias').textContent = mine.name;
-                        document.getElementById('sidebarAliasDisplay').textContent = mine.name;
-                        document.getElementById('hostAliasInput').value = mine.name;
+                        const deviceName = normalizeDisplayName(mine.name);
+                        if (deviceName && !normalizeDisplayName(localStorage.getItem('ds_username'))) {
+                            currentHostAlias = deviceName;
+                            applyDisplayIdentity(deviceName);
+                        } else {
+                            applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || deviceName || 'DeskStream User');
+                        }
+                    } else {
+                        applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || 'DeskStream User');
                     }
                     if (isManual) showToast('Workstation inventory synchronized');
                 }
@@ -2004,8 +2523,20 @@
                 if (data.has_request && data.request) {
                     const req = data.request;
                     const overlay = document.getElementById('incomingModalOverlay');
+                    if (autoAcceptingReverseToken && req.request_token === autoAcceptingReverseToken) return;
+                    if (approvedReverseRequesterId && Date.now() > approvedReverseExpiresAt) {
+                        approvedReverseRequesterId = null;
+                        approvedReverseExpiresAt = 0;
+                    }
+                    if (approvedReverseRequesterId
+                        && req.requester_system_id === approvedReverseRequesterId) {
+                        currentRequestToken = req.request_token;
+                        autoAcceptingReverseToken = req.request_token;
+                        acceptConnection();
+                        return;
+                    }
                     if (!overlay.classList.contains('open')) {
-                        promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token);
+                        promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token, req);
                     }
                 }
             } catch (e) { }
@@ -2033,6 +2564,53 @@
             if (!currentHostUid) return;
             navigator.clipboard && navigator.clipboard.writeText(currentHostUid.replace(/\s/g, ''));
             showToast('System ID copied: ' + formatId(currentHostUid));
+        }
+
+        function getRecentSessionEntries() {
+            try {
+                const raw = localStorage.getItem('ds_recent_sessions');
+                const parsed = raw ? JSON.parse(raw) : [];
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function saveRecentSessionEntries(entries) {
+            localStorage.setItem('ds_recent_sessions', JSON.stringify(entries.slice(0, 6)));
+        }
+
+        function recordRecentSession(device) {
+            const entry = {
+                system_id: device.system_id || device.device_uid || '',
+                device_uid: device.device_uid || device.system_id || '',
+                name: device.name || 'Workstation',
+                ip_address: device.ip_address || 'Local network',
+                last_seen_at: new Date().toISOString(),
+                is_online: 1,
+                os_type: device.os_type || 'windows'
+            };
+            if (!entry.system_id && !entry.device_uid) return;
+            const existing = getRecentSessionEntries().filter(item => {
+                const itemId = item.system_id || item.device_uid || '';
+                const matchId = entry.system_id || entry.device_uid || '';
+                return itemId && matchId && itemId !== matchId;
+            });
+            const next = [entry, ...existing].slice(0, 6);
+            saveRecentSessionEntries(next);
+        }
+
+        function showDashboardPage(page) {
+            const home = document.getElementById('dashboardInnerContent');
+            const settings = document.getElementById('settingsPage');
+            const about = document.getElementById('aboutPage');
+            const isHome = page === 'home';
+            if (home) home.style.display = isHome ? 'block' : 'none';
+            if (settings) settings.style.display = page === 'settings' ? 'block' : 'none';
+            if (about) about.style.display = page === 'about' ? 'block' : 'none';
+            if (page === 'home') {
+                document.getElementById('recent-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
         }
 
         function showToast(msg) {
@@ -2078,6 +2656,12 @@
         function setSidebarActive(el) {
             document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
             el.classList.add('active');
+            const page = el.dataset.page;
+            if (page === 'settings' || page === 'about') {
+                showDashboardPage(page);
+            } else if (page === 'home') {
+                showDashboardPage('home');
+            }
         }
 
         function scrollToSection(id) {
@@ -2099,10 +2683,14 @@
         }
         let connectionPollInterval = null;
 
-        async function startConnection() {
-            const raw = document.getElementById('remoteIdInput').value.trim();
+        async function startConnection(targetOverride = null) {
+            const raw = targetOverride || document.getElementById('remoteIdInput').value.trim();
             if (!raw) { showToast('Please enter a Remote ID'); return; }
             const targetId = raw.replace(/[^0-9]/g, '');
+            if (!/^\d{9}$/.test(targetId)) {
+                showToast('Remote ID must contain 9 digits');
+                return;
+            }
             showToast('Sending request to ' + formatId(targetId) + '...');
 
             const connectBtn = document.querySelector('.btn-connect-primary');
@@ -2121,9 +2709,15 @@
                 const data = await res.json();
                 if (data.status === 'success' && data.request) {
                     const token = data.request.request_token;
-                    const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
+                    const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
                     
                     if (data.request.status === 'accepted') {
+                        recordRecentSession({
+                            system_id: targetId,
+                            name: currentHostAlias || 'Remote Device',
+                            ip_address: 'Connected',
+                            os_type: 'windows'
+                        });
                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                         openIntegratedSession(sessionUrl);
                     } else {
@@ -2144,6 +2738,12 @@
                                 const statusData = await statusRes.json();
                                 if (statusData.status === 'success') {
                                     if (statusData.request_status === 'accepted') {
+                                        recordRecentSession({
+                                            system_id: targetId,
+                                            name: currentHostAlias || 'Remote Device',
+                                            ip_address: 'Connected',
+                                            os_type: 'windows'
+                                        });
                                         clearInterval(connectionPollInterval);
                                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                                         openIntegratedSession(sessionUrl);
@@ -2182,7 +2782,7 @@
                 const data = await res.json();
                 if (data.status === 'success' && data.request) {
                     const token = data.request.request_token;
-                    const sessionUrl = `session.html?id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
+                    const sessionUrl = `session.html?id=${encodeURIComponent(currentHostUid)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&local=1`;
                     openIntegratedSession(sessionUrl);
                 } else {
                     showToast(data.message || 'Failed to initiate local connection');
@@ -2265,12 +2865,24 @@
         }
 
         // ── Incoming modal ───────────────────────────────────────────
-        function promptIncomingModal(name, remoteId, ip, time, token) {
+        function promptIncomingModal(name, remoteId, ip, time, token, reqData) {
             document.getElementById('modalDeviceName').textContent = name;
             document.getElementById('modalRemoteId').textContent = formatId(remoteId);
             document.getElementById('modalIpAddress').textContent = ip;
             document.getElementById('modalRequestTime').textContent = time;
             currentRequestToken = token;
+            
+            // Initialize toggle switches from request data (default to true if missing)
+            if (document.getElementById('permViewScreen')) {
+                document.getElementById('permViewScreen').checked = (reqData && reqData.view_screen !== undefined) ? reqData.view_screen : true;
+            }
+            if (document.getElementById('permControlInput')) {
+                document.getElementById('permControlInput').checked = (reqData && reqData.control_input !== undefined) ? reqData.control_input : true;
+            }
+            if (document.getElementById('permFileTransfer')) {
+                document.getElementById('permFileTransfer').checked = (reqData && reqData.file_transfer !== undefined) ? reqData.file_transfer : true;
+            }
+
             const overlay = document.getElementById('incomingModalOverlay');
             overlay.style.display = 'flex';
             requestAnimationFrame(() => overlay.classList.add('open'));
@@ -2302,20 +2914,99 @@
             closeModal();
         }
 
+        // Tracks the pending post-accept session poll so we can cancel it if needed.
+        let _bAcceptPollTimer = null;
+
         async function acceptConnection() {
-            if (currentRequestToken) {
+            const requestToken = currentRequestToken;
+            const isApprovedReverse = requestToken && requestToken === autoAcceptingReverseToken;
+            
+            const viewScreen = document.getElementById('permViewScreen') ? document.getElementById('permViewScreen').checked : true;
+            const controlInput = document.getElementById('permControlInput') ? document.getElementById('permControlInput').checked : true;
+            const fileTransfer = document.getElementById('permFileTransfer') ? document.getElementById('permFileTransfer').checked : true;
+            
+            try {
+                await fetch('http://127.0.0.1:49182/desktop-api/session/permissions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ view_screen: viewScreen, control_input: controlInput, file_transfer: fileTransfer })
+                });
+            } catch (e) {
+                console.error('Failed to set local session permissions', e);
+            }
+
+            let accepted = false;
+            if (requestToken) {
                 try {
                     const res = await fetch(`${BACKEND}/api/connections/accept.php`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ request_token: currentRequestToken }),
+                        body: JSON.stringify({ request_token: requestToken }),
                         credentials: 'include'
                     });
                     const data = await res.json();
-                } catch (e) { }
+                    if (data.status === 'success') {
+                        accepted = true;
+                        // API accept confirmed — the Rust agent has queued the response.
+                        // Do NOT show the overlay yet. The real session is only live once
+                        // main.rs completes the relay TCP handshake and sets in_session=true
+                        // (which is exposed via /local-health). Poll until that is true.
+                        waitForRealBSession();
+                        if (isApprovedReverse) {
+                            autoAcceptingReverseToken = null;
+                            approvedReverseRequesterId = null;
+                            approvedReverseExpiresAt = 0;
+                        }
+                    } else if (isApprovedReverse) {
+                        autoAcceptingReverseToken = null;
+                        showToast(data.message || 'Could not start the approved reverse session');
+                    } else {
+                        showToast(data.message || 'Connection acceptance failed');
+                    }
+                } catch (error) {
+                    console.error('[SESSION] Connection acceptance failed:', error);
+                    if (isApprovedReverse) {
+                        autoAcceptingReverseToken = null;
+                        showToast('Could not start the approved reverse session');
+                    } else {
+                        showToast('Connection acceptance failed');
+                    }
+                }
             }
-            showToast('Connection accepted — remote session starting...');
+            if (!isApprovedReverse && accepted) {
+                showToast('Connection accepted — remote session starting...');
+            }
             closeModal();
+        }
+
+        // Poll /local-health every 500 ms after B accepts.
+        // Only show the overlay when in_session=true (set by Rust AFTER the real TCP handshake).
+        // Stops polling after 30 s to avoid leaking if the relay never connects.
+        function waitForRealBSession() {
+            if (_bAcceptPollTimer) return;
+            let elapsed = 0;
+            const MAX_WAIT_MS = 30000;
+            const INTERVAL_MS = 500;
+
+            _bAcceptPollTimer = setInterval(async () => {
+                elapsed += INTERVAL_MS;
+                try {
+                    const res = await fetch(AGENT_HEALTH);
+                    const health = await res.json();
+                    if (health.in_session === true) {
+                        clearInterval(_bAcceptPollTimer);
+                        _bAcceptPollTimer = null;
+                        enterBConnectedSession();
+                    }
+                } catch (e) {
+                    // Local agent unreachable — keep trying until timeout
+                }
+                if (elapsed >= MAX_WAIT_MS) {
+                    clearInterval(_bAcceptPollTimer);
+                    _bAcceptPollTimer = null;
+                    console.warn('[DESKSTREAM] waitForRealBSession: timed out after 30s');
+                }
+            }, INTERVAL_MS);
         }
 
         // Close dropdown on outside click
@@ -2330,18 +3021,17 @@
             const iframe = document.getElementById('remoteSessionIframe');
 
             if (inner && iframe) {
+                integratedSessionEntered = false;
                 // Ensure dashboard remains visible to show the Disconnect button
                 inner.style.display = 'block'; 
                 
-                iframe.style.display = 'block'; 
+                iframe.style.display = 'none'; 
                 iframe.src = url + "&integrated=1";
 
-                document.getElementById('disconnectActiveSessionBtn').style.display = 'inline-flex';
-                
                 try {
                     const urlObj = new URL(url, window.location.origin);
                     const targetId = urlObj.searchParams.get('id');
-                    if (targetId) document.getElementById('disconnectTargetName').textContent = formatId(targetId);
+                    if (targetId) console.log('[SESSION] Integrated session target:', formatId(targetId));
                 } catch(e) {}
             }
         }
@@ -2354,32 +3044,120 @@
             }
             // Fallback UI reset
             setTimeout(() => {
-                document.getElementById('disconnectActiveSessionBtn').style.display = 'none';
+                integratedSessionEntered = false;
                 if (iframe) {
                     iframe.src = 'about:blank';
                     iframe.style.display = 'none';
+                    iframe.style.position = '';
+                    iframe.style.top = '';
+                    iframe.style.left = '';
+                    iframe.style.width = '100%';
+                    iframe.style.height = 'calc(100vh - 200px)';
+                    iframe.style.zIndex = '50';
+                    iframe.style.margin = '20px 0 0 0';
+                }
+                // Restore navigation
+                const sidebar = document.querySelector('.sidebar');
+                const topbar = document.querySelector('.topbar');
+                if (sidebar) sidebar.style.display = '';
+                if (topbar) topbar.style.display = '';
+                const mainContent = document.getElementById('mainContentArea');
+                if (mainContent) {
+                    mainContent.style.margin = '';
+                    mainContent.style.padding = '';
+                    mainContent.style.width = '';
+                    mainContent.style.height = '';
+                    mainContent.style.maxWidth = '';
                 }
                 fetchAllDevices();
             }, 500);
         }
 
+        let integratedSessionEntered = false;
         window.addEventListener('message', function (e) {
-            if (e.data === 'end_integrated_session') {
+            if (e.data === 'session_connected') {
+                enterConnectedSession();
+            } else if (e.data === 'end_integrated_session') {
                 const inner = document.getElementById('dashboardInnerContent');
                 const iframe = document.getElementById('remoteSessionIframe');
                 if (inner && iframe) {
+                    integratedSessionEntered = false;
                     iframe.src = 'about:blank';
                     iframe.style.display = 'none';
+                    iframe.style.position = '';
+                    iframe.style.top = '';
+                    iframe.style.left = '';
+                    iframe.style.width = '100%';
+                    iframe.style.height = 'calc(100vh - 200px)';
+                    iframe.style.zIndex = '50';
+                    iframe.style.margin = '20px 0 0 0';
+                    iframe.style.border = 'none';
+                    
+                    const mainContent = document.getElementById('mainContentArea');
+                    if (mainContent) {
+                        mainContent.style.margin = '';
+                        mainContent.style.padding = '';
+                        mainContent.style.width = '';
+                        mainContent.style.height = '';
+                        mainContent.style.maxWidth = '';
+                    }
+                    
+                    const sidebar = document.querySelector('.sidebar');
+                    const topbar = document.querySelector('.topbar');
+                    if (sidebar) sidebar.style.display = '';
+                    if (topbar) topbar.style.display = '';
                     inner.style.display = 'block';
-                    document.getElementById('disconnectActiveSessionBtn').style.display = 'none';
                     fetchAllDevices();
+                }
+            } else if (e.source === document.getElementById('remoteSessionIframe')?.contentWindow
+                && e.data?.type === 'reverse_remote_approved') {
+                const requesterId = String(e.data.requester_system_id || '');
+                if (/^\d{9}$/.test(requesterId)) {
+                    approvedReverseRequesterId = requesterId;
+                    approvedReverseExpiresAt = Date.now() + 30000;
+                    showToast('Reverse permission approved. Reconnecting in the opposite direction...');
+                } else {
+                    console.error('[REVERSE] Approved peer identity is invalid; automatic handoff was not armed.');
                 }
             }
         });
     </script>
 <script>
-function minimizeWindow() { if(window.ipc) { window.ipc.postMessage('minimize'); } }
-function closeWindow() { if(window.ipc) { window.ipc.postMessage('close'); } }
+function enterConnectedSession() {
+    if (integratedSessionEntered) return;
+    integratedSessionEntered = true;
+    console.log('[DESKSTREAM] session_state_changed: CONNECTED. Navbar visible.');
+    const inner = document.getElementById('dashboardInnerContent');
+    const iframe = document.getElementById('remoteSessionIframe');
+    
+    // Hide navigation to use full available area as requested
+    const sidebar = document.querySelector('.sidebar');
+    const topbar = document.querySelector('.topbar');
+    if (sidebar) sidebar.style.display = 'none';
+    if (topbar) topbar.style.display = 'none';
+    
+    const mainContent = document.getElementById('mainContentArea');
+    if (mainContent) {
+        mainContent.style.margin = '0';
+        mainContent.style.padding = '0';
+        mainContent.style.width = '100vw';
+        mainContent.style.height = '100vh';
+        mainContent.style.maxWidth = 'none';
+    }
+
+    if (inner && iframe) {
+        inner.style.display = 'none';
+        iframe.style.display = 'block';
+        iframe.style.position = 'fixed';
+        iframe.style.top = '0';
+        iframe.style.left = '0';
+        iframe.style.width = '100vw';
+        iframe.style.height = '100vh';
+        iframe.style.zIndex = '999999';
+        iframe.style.margin = '0';
+        iframe.style.border = 'none';
+    }
+}
 document.addEventListener('DOMContentLoaded', () => {
     const topbar = document.querySelector('.topbar');
     if(topbar) {
@@ -2388,10 +3166,552 @@ document.addEventListener('DOMContentLoaded', () => {
             if(e.buttons === 1 && window.ipc) { window.ipc.postMessage('drag_window'); }
         });
     }
+    fetch(AGENT_HEALTH)
+            .then(response => response.json())
+            .then(health => {
+                document.querySelectorAll('.b-session-username').forEach(el => {
+                    el.textContent = localStorage.getItem('ds_username') || '';
+                });
+                const deviceId = document.getElementById('bSessionDeviceId');
+                if (deviceId) deviceId.textContent = health.system_id || '';
+                if (health.in_session === true) enterBConnectedSession();
+            })
+            .catch(error => console.error('[SESSION] Initial health check failed:', error));
 });
-</script>
+
+        /* ============================================================
+           B-SIDE SESSION FUNCTIONS
+        ============================================================ */
+        let _bSessionTimerInterval = null;
+        let _bSessionStartTime = null;
+        let _bSessionWatchdog = null;
+        let _bSessionActive = false;
+        let _bSessionDisconnecting = false;
+        let _bSessionEndedDialogShown = false;
+        let _bReverseHandoffPending = false;
+        let _bSessionChatPoll = null;
+        let _bSessionTypingPoll = null;
+        let _bSessionOfferPoll = null;
+        let _bSessionChatLastId = 0n;
+        let _bLocalChatTyping = false;
+        let _bRemoteChatTyping = false;
+        let _bChatTypingIdleTimer = null;
+        const _bSessionChatRenderedIds = new Set();
+        const _bSessionHandledOffers = new Set();
+
+        function enterBConnectedSession() {
+            if (_bSessionActive) return;
+            _bSessionActive = true;
+            _bSessionDisconnecting = false;
+            _bSessionEndedDialogShown = false;
+            _bReverseHandoffPending = false;
+            document.getElementById('bSessionEndedDialog').style.display = 'none';
+            _bSessionChatLastId = 0n;
+            _bSessionChatRenderedIds.clear();
+            document.getElementById('bSessionChatMessages')?.replaceChildren();
+            _bLocalChatTyping = false;
+            _bRemoteChatTyping = false;
+            _bSessionMicEnabled = false;
+            document.getElementById('bMicBtn').textContent = 'Mic Off';
+            _bReverseRequestOutstanding = false;
+            const disconnectButton = document.getElementById('bDisconnectBtn');
+            if (disconnectButton) {
+                disconnectButton.disabled = false;
+                disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
+            }
+            document.body.classList.add('b-session-active');
+            if (window.ipc) {
+                window.ipc.postMessage('open_overlay');
+            }
+            // Start session timer
+            _bSessionStartTime = Date.now();
+            if (_bSessionTimerInterval) clearInterval(_bSessionTimerInterval);
+            _bSessionTimerInterval = setInterval(function() {
+                const elapsed = Math.floor((Date.now() - _bSessionStartTime) / 1000);
+                const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+                const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+                const s = String(elapsed % 60).padStart(2, '0');
+                const timerEl = document.getElementById('bSessionTimer');
+                if (timerEl) timerEl.textContent = h + ':' + m + ':' + s;
+            }, 1000);
+
+            // Watchdog: auto-dismiss overlay when Rust signals in_session=false
+            // (i.e., when the session ends on the controlled-device side).
+            if (_bSessionWatchdog) clearInterval(_bSessionWatchdog);
+            _bSessionWatchdog = setInterval(async () => {
+                try {
+                    const res = await fetch(AGENT_HEALTH);
+                    const health = await res.json();
+                    if (health.in_session === false) {
+                        if (_bReverseHandoffPending) {
+                            _dismissBSessionOverlay();
+                        } else {
+                            showBSessionEnded();
+                        }
+                    }
+                } catch (e) { /* ignore transient errors */ }
+            }, 2000);
+            pollBSessionChat().catch(error => console.error('[CHAT] Initial history load failed:', error));
+            _bSessionChatPoll = setInterval(() => pollBSessionChat().catch(error => console.error('[CHAT] Poll failed:', error)), 300);
+            pollBSessionRemoteTyping().catch(error => console.error('[CHAT] Initial typing state failed:', error));
+            _bSessionTypingPoll = setInterval(() => pollBSessionRemoteTyping().catch(error => console.error('[CHAT] Typing state poll failed:', error)), 250);
+            _bSessionOfferPoll = setInterval(() => pollBSessionFileOffers().catch(error => console.error('[FILE] Offer poll failed:', error)), 500);
+        }
+
+        function _dismissBSessionOverlay() {
+            if (!_bSessionActive) return;
+            stopBSessionChatTyping();
+            _bSessionActive = false;
+            _bSessionDisconnecting = false;
+            currentFolderBatch = null;
+            currentFolderAllowAll = false;
+            currentFolderFilesReceived = 0;
+            if (_bSessionMicEnabled) {
+                fetch('/desktop-api/session/audio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: false })
+                }).catch(error => console.error('[MIC] Failed to stop microphone:', error));
+            }
+            _bSessionMicEnabled = false;
+            document.getElementById('bMicBtn').textContent = 'Mic Off';
+            _bReverseRequestOutstanding = false;
+            document.getElementById('bReversePermissionDialog').style.display = 'none';
+            const disconnectButton = document.getElementById('bDisconnectBtn');
+            if (disconnectButton) {
+                disconnectButton.disabled = false;
+                disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
+            }
+            document.body.classList.remove('b-session-active');
+            if (window.ipc) {
+                window.ipc.postMessage('close_overlay');
+            }
+            document.getElementById('bSessionChatPanel')?.classList.remove('open');
+            document.getElementById('bSessionChatMessages')?.replaceChildren();
+            if (_bSessionTimerInterval) { clearInterval(_bSessionTimerInterval); _bSessionTimerInterval = null; }
+            if (_bSessionWatchdog) { clearInterval(_bSessionWatchdog); _bSessionWatchdog = null; }
+            if (_bSessionChatPoll) { clearInterval(_bSessionChatPoll); _bSessionChatPoll = null; }
+            if (_bSessionTypingPoll) { clearInterval(_bSessionTypingPoll); _bSessionTypingPoll = null; }
+            if (_bSessionOfferPoll) { clearInterval(_bSessionOfferPoll); _bSessionOfferPoll = null; }
+            _bSessionChatLastId = 0n;
+            _bSessionChatRenderedIds.clear();
+            _bRemoteChatTyping = false;
+            renderBSessionRemoteTyping();
+            _bSessionStartTime = null;
+            const timerEl = document.getElementById('bSessionTimer');
+            if (timerEl) timerEl.textContent = '00:00:00';
+            _bSessionHandledOffers.clear();
+        }
+
+        function showBSessionEnded() {
+            if (_bSessionEndedDialogShown) return;
+            _bSessionEndedDialogShown = true;
+            if (_bSessionWatchdog) {
+                clearInterval(_bSessionWatchdog);
+                _bSessionWatchdog = null;
+            }
+            document.getElementById('bSessionEndedDialog').style.display = 'flex';
+        }
+
+        function dismissBSessionEnded() {
+            document.getElementById('bSessionEndedDialog').style.display = 'none';
+            _dismissBSessionOverlay();
+        }
+
+        function disconnectBSession(reverseTargetId = null) {
+            if (!_bSessionActive || _bSessionDisconnecting) return;
+            stopBSessionChatTyping();
+            _bSessionDisconnecting = true;
+            if (reverseTargetId) _bReverseHandoffPending = true;
+            const button = document.getElementById('bDisconnectBtn');
+            if (button) {
+                button.disabled = true;
+                button.textContent = 'Disconnecting...';
+            }
+            (async () => {
+                const response = await fetch('/desktop-api/session/disconnect', { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error(`Disconnect request failed: ${response.status} ${await response.text()}`);
+                }
+                showToast('Disconnecting session...');
+
+                const deadline = Date.now() + 15000;
+                while (Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 250));
+                    const healthResponse = await fetch(AGENT_HEALTH);
+                    if (!healthResponse.ok) {
+                        throw new Error(`Session status request failed: ${healthResponse.status}`);
+                    }
+                    const health = await healthResponse.json();
+                    if (health.in_session === false) {
+                        if (reverseTargetId) {
+                            _dismissBSessionOverlay();
+                            showToast('Starting the approved reverse session...');
+                            await startConnection(reverseTargetId);
+                        } else {
+                            showBSessionEnded();
+                        }
+                        return;
+                    }
+                }
+                throw new Error('The agent did not confirm that the session ended.');
+            })().catch(error => {
+                    console.error('[SESSION] Disconnect failed:', error);
+                    _bSessionDisconnecting = false;
+                    _bReverseHandoffPending = false;
+                    if (button) {
+                        button.disabled = false;
+                        button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
+                    }
+                    showToast('Could not disconnect session');
+                });
+        }
+
+        function toggleBSessionChat() {
+            const panel = document.getElementById('bSessionChatPanel');
+            panel?.classList.toggle('open');
+            if (panel?.classList.contains('open')) {
+                pollBSessionChat().catch(error => console.error('[CHAT] History refresh failed:', error));
+                renderBSessionRemoteTyping();
+                document.getElementById('bSessionChatInput')?.focus();
+            } else {
+                stopBSessionChatTyping();
+            }
+        }
+
+        function renderBSessionRemoteTyping() {
+            document.getElementById('bSessionTypingIndicator')
+                ?.classList.toggle('visible', _bRemoteChatTyping && document.getElementById('bSessionChatPanel')?.classList.contains('open'));
+        }
+
+        function setBSessionRemoteTyping(typing) {
+            _bRemoteChatTyping = typing;
+            renderBSessionRemoteTyping();
+        }
+
+        async function setBSessionChatTyping(typing) {
+            if (_bLocalChatTyping === typing) return;
+            _bLocalChatTyping = typing;
+            try {
+                const response = await fetch('/desktop-api/session/typing', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ typing })
+                });
+                if (!response.ok) throw new Error(`Typing update failed: ${response.status}`);
+            } catch (error) {
+                _bLocalChatTyping = false;
+                console.error('[CHAT] Failed to update typing state:', error);
+            }
+        }
+
+        function stopBSessionChatTyping() {
+            if (_bChatTypingIdleTimer) {
+                clearTimeout(_bChatTypingIdleTimer);
+                _bChatTypingIdleTimer = null;
+            }
+            void setBSessionChatTyping(false);
+        }
+
+        function updateBSessionChatTyping() {
+            const input = document.getElementById('bSessionChatInput');
+            if (!input?.value.trim()) {
+                stopBSessionChatTyping();
+                return;
+            }
+            void setBSessionChatTyping(true);
+            if (_bChatTypingIdleTimer) clearTimeout(_bChatTypingIdleTimer);
+            _bChatTypingIdleTimer = setTimeout(stopBSessionChatTyping, 900);
+        }
+
+        async function pollBSessionRemoteTyping() {
+            const response = await fetch('/desktop-api/session/typing');
+            if (!response.ok) throw new Error(`Typing state request failed: ${response.status}`);
+            const state = await response.json();
+            setBSessionRemoteTyping(state.typing === true);
+        }
+
+        function appendBSessionChat(message) {
+            const messageId = String(message.id);
+            if (_bSessionChatRenderedIds.has(messageId)) return;
+            _bSessionChatRenderedIds.add(messageId);
+            const messages = document.getElementById('bSessionChatMessages');
+            if (!message.from_local) {
+                document.getElementById('bSessionChatPanel')?.classList.add('open');
+            }
+            const item = document.createElement('div');
+            item.className = `msg ${message.from_local ? 'sent' : 'recv'}`;
+            item.dataset.messageId = messageId;
+            item.textContent = message.text;
+            messages.appendChild(item);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        async function pollBSessionChat() {
+            const response = await fetch(`/desktop-api/session/messages?after=${_bSessionChatLastId}`);
+            if (!response.ok) throw new Error(`Chat poll failed: ${response.status}`);
+            const messages = await response.json();
+            for (const message of messages) {
+                appendBSessionChat(message);
+                const messageId = BigInt(message.id);
+                if (messageId > _bSessionChatLastId) _bSessionChatLastId = messageId;
+            }
+        }
+
+        document.getElementById('bSessionChatForm').addEventListener('submit', async event => {
+            event.preventDefault();
+            const input = document.getElementById('bSessionChatInput');
+            const message = input.value.trim();
+            if (!message) return;
+            stopBSessionChatTyping();
+            const response = await fetch('/desktop-api/session/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message })
+            });
+            if (!response.ok) {
+                const error = await response.text();
+                showToast(`Chat send failed: ${error}`);
+                return;
+            }
+            const result = await response.json();
+            appendBSessionChat(result.message);
+            input.value = '';
+        });
+        const bSessionChatInput = document.getElementById('bSessionChatInput');
+        bSessionChatInput.addEventListener('input', updateBSessionChatTyping);
+
+        let currentFolderBatch = null;
+        let currentFolderAllowAll = false;
+        let currentFolderFilesReceived = 0;
+
+        function showFileApprovalModal(offer, isFolder, folderName) {
+            return new Promise(resolve => {
+                const dialog = document.getElementById('bSessionFileApprovalDialog');
+                const title = document.getElementById('fileApprovalTitle');
+                const message = document.getElementById('fileApprovalMessage');
+                const btnReject = document.getElementById('btnRejectFile');
+                const btnAllow = document.getElementById('btnAllowFile');
+                const btnAllowAll = document.getElementById('btnAllowAllFiles');
+
+                if (isFolder) {
+                    title.textContent = 'Incoming Folder Transfer';
+                    message.innerHTML = `Folder: <b>${folderName}</b><br>File: <b>${offer.filename}</b><br>File ${currentFolderFilesReceived + 1} of Folder<br><br>Size: ${offer.size} bytes`;
+                    btnAllowAll.style.display = 'inline-block';
+                } else {
+                    title.textContent = 'Incoming File Transfer';
+                    message.innerHTML = `Accept file <b>${offer.filename}</b> (${offer.size} bytes)?<br>It will be saved in Downloads\\DeskStream.`;
+                    btnAllowAll.style.display = 'none';
+                }
+
+                dialog.style.display = 'flex';
+
+                const cleanup = () => {
+                    dialog.style.display = 'none';
+                    btnReject.onclick = null;
+                    btnAllow.onclick = null;
+                    btnAllowAll.onclick = null;
+                };
+
+                btnReject.onclick = () => { cleanup(); resolve('reject'); };
+                btnAllow.onclick = () => { cleanup(); resolve('allow'); };
+                btnAllowAll.onclick = () => { cleanup(); resolve('allow_all'); };
+            });
+        }
+
+        async function pollBSessionFileOffers() {
+            const response = await fetch('/desktop-api/session/offers');
+            if (!response.ok) throw new Error(`File offer poll failed: ${response.status}`);
+            const offers = await response.json();
+            for (const offer of offers) {
+                if (_bSessionHandledOffers.has(offer.transfer_id)) continue;
+                _bSessionHandledOffers.add(offer.transfer_id);
+                
+                const filenamePath = offer.filename.replace(/\\/g, '/');
+                const isFolderBatch = filenamePath.includes('/');
+                const folderName = isFolderBatch ? filenamePath.split('/')[0] : null;
+
+                let accept = false;
+
+                if (isFolderBatch) {
+                    if (currentFolderBatch !== folderName) {
+                        currentFolderBatch = folderName;
+                        currentFolderAllowAll = false;
+                        currentFolderFilesReceived = 0;
+                    }
+
+                    if (currentFolderAllowAll) {
+                        accept = true;
+                        currentFolderFilesReceived++;
+                    } else {
+                        const choice = await showFileApprovalModal(offer, true, folderName);
+                        if (choice === 'allow_all') {
+                            currentFolderAllowAll = true;
+                            accept = true;
+                            currentFolderFilesReceived++;
+                        } else if (choice === 'allow') {
+                            accept = true;
+                            currentFolderFilesReceived++;
+                        } else {
+                            accept = false;
+                        }
+                    }
+                } else {
+                    currentFolderBatch = null;
+                    currentFolderAllowAll = false;
+                    currentFolderFilesReceived = 0;
+                    const choice = await showFileApprovalModal(offer, false, null);
+                    accept = (choice === 'allow');
+                }
+
+                console.info(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} filename=${JSON.stringify(offer.filename)} total_bytes=${offer.size} decision=${accept ? 'accept' : 'reject'}`);
+                const decision = await fetch('/desktop-api/session/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transfer_id: offer.transfer_id, accept })
+                });
+                if (!decision.ok) {
+                    const error = await decision.text();
+                    console.error(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} response_failed=${decision.status} error=${error}`);
+                    showToast(`File offer response failed: ${error}`);
+                    _bSessionHandledOffers.delete(offer.transfer_id);
+                    currentFolderAllowAll = false;
+                }
+            }
+            await pollBSessionReverseRequest();
+            if (_bReverseRequestOutstanding) await pollBSessionReverseDecision();
+        }
+
+        function showBSessionTransferChoice() {
+            document.getElementById('bSessionTransferChoiceDialog').style.display = 'flex';
+        }
+
+        function closeBSessionTransferChoice() {
+            document.getElementById('bSessionTransferChoiceDialog').style.display = 'none';
+        }
+
+        function selectBSessionTransfer(kind) {
+            closeBSessionTransferChoice();
+            if (!window.ipc) {
+                showToast('File picker is available in the DeskStream desktop app.');
+                return;
+            }
+            window.ipc.postMessage(kind === 'folder' ? 'send_folder' : 'send_file');
+        }
+
+        let _bSessionMicEnabled = false;
+        let _bReverseRequestOutstanding = false;
+
+        async function toggleBSessionMic() {
+            const nextEnabled = !_bSessionMicEnabled;
+            const response = await fetch('/desktop-api/session/audio', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: nextEnabled })
+            });
+            if (!response.ok) {
+                showToast(`Microphone update failed: ${await response.text()}`);
+                return;
+            }
+            _bSessionMicEnabled = nextEnabled;
+            document.getElementById('bMicBtn').textContent = nextEnabled ? 'Mic On' : 'Mic Off';
+        }
+
+        async function requestBSessionReverse() {
+            const response = await fetch('/desktop-api/session/reverse', { method: 'POST' });
+            if (!response.ok) {
+                showToast(`Reverse request failed: ${await response.text()}`);
+                return;
+            }
+            _bReverseRequestOutstanding = true;
+            showToast('Reverse-control request sent. The controller must approve it.');
+        }
+
+        async function pollBSessionReverseRequest() {
+            const response = await fetch('/desktop-api/session/reverse/request');
+            if (!response.ok) throw new Error(`Reverse request poll failed: ${response.status}`);
+            const state = await response.json();
+            if (state.pending) {
+                document.getElementById('bReversePermissionDialog').style.display = 'flex';
+            }
+        }
+
+        async function answerBReverseRequest(accepted) {
+            const response = await fetch('/desktop-api/session/reverse/decision', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accepted })
+            });
+            if (!response.ok) {
+                showToast(`Reverse response failed: ${await response.text()}`);
+                return;
+            }
+            document.getElementById('bReversePermissionDialog').style.display = 'none';
+            if (accepted) {
+                showToast('Reverse request approved.');
+            }
+        }
+
+        async function pollBSessionReverseDecision() {
+            const response = await fetch('/desktop-api/session/reverse/decision');
+            if (!response.ok) throw new Error(`Reverse decision poll failed: ${response.status}`);
+            const result = await response.json();
+            if (result.decision === 0) return;
+            _bReverseRequestOutstanding = false;
+            if (result.decision === 1) {
+                if (!/^\d{9}$/.test(result.peer_system_id || '')) {
+                    showToast('Reverse request was approved, but the peer ID is unavailable.');
+                    return;
+                }
+                disconnectBSession(result.peer_system_id);
+                return;
+            }
+            showToast('Reverse-control request was rejected.');
+        }
+        
+        // Initialize static event listeners
+        document.addEventListener('DOMContentLoaded', () => {
+            const bSettingsBtn = document.getElementById('bSettingsBtn');
+            if (bSettingsBtn) {
+                bSettingsBtn.addEventListener('click', () => {
+                    const sidebarSettingsBtn = Array.from(document.querySelectorAll('.sidebar .nav-item')).find(el => el.textContent.includes('Settings'));
+                    if (sidebarSettingsBtn) {
+                        sidebarSettingsBtn.click();
+                    } else {
+                        showToast('Settings opened');
+                    }
+                });
+            }
+        });
+    </script>
+    
+    <!-- B-Side Overlay Container -->
+    <div id="bSessionOverlay" style="display: none; flex-direction: column; width: 56px; background: rgba(30, 41, 59, 0.95); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); overflow: hidden; position: fixed; top: 0; left: 0; margin: 0; padding: 0;">
+        <div id="bSessionDragHandle" style="height: 24px; cursor: move; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05);" onmousedown="if(window.ipc){window.ipc.postMessage('drag_overlay');}">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><line x1="8" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>
+        </div>
+        <div style="display: flex; flex-direction: column; padding: 4px; gap: 4px;">
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: white;" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');}" title="Chat">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            </button>
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: white;" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');}" title="Mic">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M17 17A7 7 0 0 1 5 12H3a9 9 0 0 0 8 8.94V23h2v-2.06a9 9 0 0 0 8-8.94h-2a7 7 0 0 1-2 5z"></path></svg>
+            </button>
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: white;" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');}" title="Reverse">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>
+            </button>
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: #ef4444; margin-top: 4px;" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');}" title="Disconnect">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+            </button>
+        </div>
+    </div>
+    <script>
+        if (window.location.search.includes('overlay=1')) {
+            document.body.innerHTML = '';
+            document.body.appendChild(document.getElementById('bSessionOverlay'));
+            document.getElementById('bSessionOverlay').style.display = 'flex';
+            document.body.style.background = 'transparent';
+        }
+    </script>
 </body>
-
 </html>
-
-

@@ -474,9 +474,12 @@
 window.addEventListener('DOMContentLoaded', () => {
     const params = new URLSearchParams(window.location.search);
     const id = params.get('id');
-    const username = localStorage.getItem('ds_username') || 'Local User';
+    const localUsername = localStorage.getItem('ds_username');
+    // For A-side (Controller), the remote target's name is passed in target_name
+    const targetName = params.get('target_name');
+    const displayAlias = targetName || localUsername || 'Remote Device';
     
-    document.querySelectorAll('.username-span').forEach(el => el.textContent = username);
+    document.querySelectorAll('.username-span').forEach(el => el.textContent = displayAlias);
     
     // Hide window controls if integrated
     if (params.get('integrated') === '1') {
