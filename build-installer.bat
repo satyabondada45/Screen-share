@@ -80,12 +80,12 @@ echo.
 
 REM -- Step 2: Locate fresh EXE --
 echo [2/7] Locating fresh binaries...
-set AGENT_EXE=%AGENT_DIR%\target\release\desktop-agent.exe
+set AGENT_EXE=%AGENT_DIR%\target\release\DeskStream.exe
 set RELAY_EXE=%RELAY_DIR%\target\release\relay-server.exe
 set GUI_EXE=%GUI_DIR%\target\release\ScreenShare.exe
 
 if not exist "%AGENT_EXE%" (
-    echo ERROR: desktop-agent.exe not found at %AGENT_EXE%
+    echo ERROR: DeskStream.exe not found at %AGENT_EXE%
     exit /b 1
 )
 if not exist "%GUI_EXE%" (
@@ -185,8 +185,19 @@ copy /Y "%RAW_INSTALLER%" "%DOWNLOADS_DIR%\ScreenShare-Setup.exe" >nul
 
 echo   Versioned installer: %VERSIONED_INSTALLER%
 for %%I in ("%VERSIONED_INSTALLER%") do echo   Size: %%~zI bytes
+
+REM Verify architecture using a simple powershell script to check PE header
+powershell -Command "$bytes = [System.IO.File]::ReadAllBytes('%VERSIONED_INSTALLER%'); $peHeaderOffset = [BitConverter]::ToInt32($bytes, 0x3C); $machine = [BitConverter]::ToUInt16($bytes, $peHeaderOffset + 4); if ($machine -eq 0x8664) { Write-Host '  Architecture: x64' } else { Write-Host '  ERROR: Not x64 architecture!'; exit 1 }"
+if errorlevel 1 exit /b 1
+
 echo   SHA256:
-certutil -hashfile "%VERSIONED_INSTALLER%" SHA256 | findstr /v "hash" | findstr /v "CertUtil"
+certutil -hashfile "%VERSIONED_INSTALLER%" SHA256 | findstr /v "hash" | findstr /v "CertUtil" > "%TEMP%\final_hash.txt"
+set /p FINAL_HASH=<"%TEMP%\final_hash.txt"
+echo   %FINAL_HASH%
+
+echo.
+echo   SIGNING STATUS: NOT CONFIGURED
+echo   SIGNATURE: NotSigned
 
 echo.
 echo ========================================
@@ -196,6 +207,7 @@ echo.
 echo Final installer:
 echo   %VERSIONED_INSTALLER%
 echo   Version: %VERSION%
+echo   SHA256: %FINAL_HASH%
 echo.
 echo   latest\ copy: %LATEST_DIR%\ScreenShare-Setup.exe
 echo   downloads\ copy: %DOWNLOADS_DIR%\ScreenShare-Setup.exe

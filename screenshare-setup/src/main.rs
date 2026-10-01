@@ -8,7 +8,7 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{COLOR_WINDOW, HBRUSH};
 use windows_sys::Win32::System::Registry::{
-    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, KEY_READ, KEY_WRITE,
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_WOW64_64KEY, KEY_READ, KEY_WRITE,
     REG_SZ, RegDeleteTreeW,
 };
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
@@ -44,7 +44,9 @@ fn set_text(hwnd: HWND, s: &str) {
 struct SetupState {
     hwnd: HWND,
     label: HWND,
+    edit_dir: HWND,
     btn: HWND,
+    is_installing: bool,
 }
 
 fn is_admin() -> bool {
@@ -112,12 +114,12 @@ fn delete_run_key(name: &str) {
     }
 }
 
-fn reg_set_hklm(subkey: &str, value_name: &str, data: &str) {
+fn reg_set_hkcu(subkey: &str, value_name: &str, data: &str) {
     let mut hkey = 0isize;
     let sk = to_wide(subkey);
     unsafe {
         if windows_sys::Win32::System::Registry::RegCreateKeyW(
-            HKEY_LOCAL_MACHINE,
+            HKEY_CURRENT_USER,
             sk.as_ptr(),
             &mut hkey,
         ) == 0
@@ -137,7 +139,7 @@ fn reg_set_hklm(subkey: &str, value_name: &str, data: &str) {
     }
 }
 
-fn reg_delete_hklm(subkey_full: &str) {
+fn reg_delete_hkcu(subkey_full: &str) {
     let (parent, leaf) = match subkey_full.rsplit_once('\\') {
         Some((p, l)) => (p, l),
         None => ("", subkey_full),
@@ -146,7 +148,7 @@ fn reg_delete_hklm(subkey_full: &str) {
     let pk = to_wide(parent);
     unsafe {
         if windows_sys::Win32::System::Registry::RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
+            HKEY_CURRENT_USER,
             pk.as_ptr(),
             0,
             KEY_WRITE | KEY_WOW64_64KEY,
@@ -252,8 +254,10 @@ fn create_shortcut(lnk: &str, target: &str) {
 }
 
 fn program_dir() -> String {
-    let pf = env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
-    format!("{}\\Screen Share", pf)
+    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+        return format!("{}\\DeskStream\\bin", localappdata);
+    }
+    "C:\\DeskStream\\bin".to_string()
 }
 
 fn write_server_config(dir: &str, server_addr: &str) {
@@ -281,8 +285,8 @@ fn stop_agent_gracefully() {
     }
 }
 
-fn do_install(label: HWND) {
-    let dir = program_dir();
+fn do_install(label: HWND, override_dir: &str) {
+    let dir = if override_dir.is_empty() { program_dir() } else { override_dir.to_string() };
     set_text(label, "Installing Screen Share...");
     
     stop_agent_gracefully();
@@ -308,7 +312,7 @@ fn do_install(label: HWND) {
     }
 
     // Start with Windows (HKCU Run -> the GUI owns the agent lifecycle)
-    set_run_key("ScreenShare", &format!("\"{}\" --hidden", gui_path));
+    set_run_key("DeskStream", &format!("\"{}\" --hidden", gui_path));
 
     // Register the deskstream:// custom URL protocol (points directly to the agent)
     register_protocol(&agent_path);
@@ -319,16 +323,16 @@ fn do_install(label: HWND) {
         .unwrap_or_default();
     let uninstall_str = format!("\"{}\" /uninstall", setup_exe);
     let base = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ScreenShare";
-    reg_set_hklm(base, "DisplayName", "Screen Share");
-    reg_set_hklm(base, "UninstallString", &uninstall_str);
-    reg_set_hklm(base, "DisplayIcon", &gui_path);
-    reg_set_hklm(base, "InstallLocation", &dir);
-    reg_set_hklm(base, "Publisher", "Screen Share");
-    reg_set_hklm(base, "NoModify", "1");
-    reg_set_hklm(base, "NoRepair", "1");
+    reg_set_hkcu(base, "DisplayName", "Screen Share");
+    reg_set_hkcu(base, "UninstallString", &uninstall_str);
+    reg_set_hkcu(base, "DisplayIcon", &gui_path);
+    reg_set_hkcu(base, "InstallLocation", &dir);
+    reg_set_hkcu(base, "Publisher", "Screen Share");
+    reg_set_hkcu(base, "NoModify", "1");
+    reg_set_hkcu(base, "NoRepair", "1");
 
     // Shortcuts
-    let progdata = env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+    let progdata = env::var("APPDATA").unwrap_or_else(|_| "C:\\ProgramData".to_string());
     let start_menu = format!(
         "{}\\Microsoft\\Windows\\Start Menu\\Programs\\Screen Share.lnk",
         progdata
@@ -344,8 +348,7 @@ fn do_install(label: HWND) {
         "Installation complete.\n\nScreen Share has been installed and will start with Windows.\nClick Finish to open it.",
     );
 
-    // Launch the application
-    let _ = std::process::Command::new(&gui_path).spawn();
+    // Application launch removed from here. Handled by the 'Finish' button click.
 }
 
 fn resolve_server_addr() -> String {
@@ -425,7 +428,7 @@ fn do_uninstall() {
     }
 
     // Remove uninstall registry entry
-    reg_delete_hklm("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ScreenShare");
+    reg_delete_hkcu("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ScreenShare");
 
     // Restore server-config.json for future reinstalls (preserves production server address)
     if let Some(cfg) = server_config {
@@ -455,7 +458,7 @@ unsafe extern "system" fn wndproc(
             st.hwnd = hwnd;
 
             let cls = to_wide("STATIC");
-            let t = to_wide("");
+            let t = to_wide("Install DeskStream to:");
             st.label = CreateWindowExW(
                 0,
                 cls.as_ptr(),
@@ -464,7 +467,7 @@ unsafe extern "system" fn wndproc(
                 20,
                 20,
                 420,
-                180,
+                20,
                 hwnd,
                 ID_LABEL as HMENU,
                 0,
@@ -472,16 +475,34 @@ unsafe extern "system" fn wndproc(
             );
             set_font(st.label);
 
+            let ecls = to_wide("EDIT");
+            let et = to_wide(&program_dir());
+            st.edit_dir = CreateWindowExW(
+                0x00000200, // WS_EX_CLIENTEDGE
+                ecls.as_ptr(),
+                et.as_ptr(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0080, // ES_AUTOHSCROLL
+                20,
+                50,
+                400,
+                24,
+                hwnd,
+                3 as HMENU,
+                0,
+                ptr::null(),
+            );
+            set_font(st.edit_dir);
+
             let bcls = to_wide("BUTTON");
-            let bt = to_wide("Finish");
+            let bt = to_wide("Install");
             st.btn = CreateWindowExW(
                 0,
                 bcls.as_ptr(),
                 bt.as_ptr(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                170,
-                220,
-                140,
+                160,
+                200,
+                120,
                 34,
                 hwnd,
                 ID_BTN as HMENU,
@@ -489,14 +510,39 @@ unsafe extern "system" fn wndproc(
                 ptr::null(),
             );
             set_font(st.btn);
-
-            do_install(st.label);
             0
         }
         WM_COMMAND => {
             let id = (wparam & 0xffff) as i32;
             if id == ID_BTN {
-                PostQuitMessage(0);
+                let ptr = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SetupState;
+                if !ptr.is_null() {
+                    let st = unsafe { &mut *ptr };
+                    if st.is_installing {
+                        // Launch on Finish using the directory from the edit control
+                        let mut buf = vec![0u16; 1024];
+                        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW(st.edit_dir, buf.as_mut_ptr(), 1024); }
+                        let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+                        let dest = String::from_utf16_lossy(&buf[..len]);
+                        let dir = if dest.is_empty() { program_dir() } else { dest };
+                        let gui_path = format!("{}\\ScreenShare.exe", dir);
+                        let _ = std::process::Command::new(&gui_path).spawn();
+                        unsafe { PostQuitMessage(0); }
+                    } else {
+                        st.is_installing = true;
+                        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(st.edit_dir, SW_HIDE); }
+                        
+                        let mut buf = vec![0u16; 1024];
+                        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW(st.edit_dir, buf.as_mut_ptr(), 1024); }
+                        let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+                        let dest = String::from_utf16_lossy(&buf[..len]);
+                        
+                        do_install(st.label, &dest);
+                        
+                        let fin = to_wide("Finish");
+                        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(st.btn, fin.as_ptr()); }
+                    }
+                }
             }
             0
         }
@@ -525,10 +571,10 @@ fn main() {
         .iter()
         .any(|a| a.eq_ignore_ascii_case("/uninstall") || a.eq_ignore_ascii_case("/u"));
 
-    if !is_admin() {
-        elevate_and_relaunch(&args);
-        return;
-    }
+    // if !is_admin() {
+    //     elevate_and_relaunch(&args);
+    //     return;
+    // }
 
     if uninstall {
         do_uninstall();
@@ -540,7 +586,7 @@ fn main() {
         .any(|a| a.eq_ignore_ascii_case("/S") || a.eq_ignore_ascii_case("/silent"));
 
     if silent {
-        do_install(0);
+        do_install(0, "");
         return;
     }
 
@@ -548,7 +594,9 @@ fn main() {
     let mut state = Box::new(SetupState {
         hwnd: 0,
         label: 0,
+        edit_dir: 0,
         btn: 0,
+        is_installing: false,
     });
     let state_ptr = Box::into_raw(state) as *mut std::ffi::c_void;
 

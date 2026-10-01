@@ -151,21 +151,37 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let builder = WebViewBuilder::new()
         .with_url(&local_url);
 
+    let proxy_main = proxy.clone();
     let _webview = builder
         .with_devtools(false)
         .with_ipc_handler(move |msg| {
             let body = msg.into_body();
             if !handle_session_debug_ipc(&body) {
-                let _ = proxy.send_event(body);
+                let _ = proxy_main.send_event(body);
             }
         })
         .with_initialization_script(r#"
             window.__deskstreamDesktop = true;
+            window.ipc = {
+                postMessage: function (message) {
+                    try {
+                        if (window.chrome && window.chrome.webview) {
+                            window.chrome.webview.postMessage(String(message));
+                            return;
+                        }
+                    } catch (error) {
+                        console.error('[DeskStream IPC]', error);
+                    }
+                }
+            };
         "#)
         .build(&window)
         .expect("Failed to create WebView2 — is Microsoft Edge WebView2 Runtime installed?");
 
-    event_loop.run(move |event, _, control_flow| {
+    let mut overlay_window: Option<tao::window::Window> = None;
+    let mut overlay_webview: Option<wry::WebView> = None;
+
+    event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Poll;
 
         // Check quit signal from tray
@@ -217,12 +233,81 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         }
                     }
                     "close" => { quit.store(true, Ordering::Relaxed); *control_flow = ControlFlow::Exit; },
+                    "get_maximize_state" => {
+                        let is_max = window.is_maximized();
+                        let script = format!("if(window.updateMaximizeIcon) window.updateMaximizeIcon({});", is_max);
+                        let _ = _webview.evaluate_script(&script);
+                    }
                     "drag_window" => { let _ = window.drag_window(); },
+                    "open_overlay" => {
+                        if overlay_webview.is_none() {
+                            let url = format!("{}?overlay=1", local_url);
+                            let overlay_win = WindowBuilder::new()
+                                .with_title("DeskStream Overlay")
+                                .with_inner_size(LogicalSize::new(60_u32, 180_u32))
+                                .with_resizable(false)
+                                .with_decorations(false)
+                                .with_always_on_top(true)
+                                .with_transparent(true)
+                                .build(target)
+                                .expect("Failed to build overlay window");
+                                
+                            #[cfg(target_os = "windows")]
+                            let builder = WebViewBuilder::new()
+                                .with_url(&url)
+                                .with_transparent(true)
+                                .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required");
+                                
+                            #[cfg(not(target_os = "windows"))]
+                            let builder = WebViewBuilder::new().with_url(&url).with_transparent(true);
+                            
+                            let proxy_clone = proxy.clone();
+                            let overlay_wv = builder
+                                .with_ipc_handler(move |msg| {
+                                    let _ = proxy_clone.send_event(msg.into_body());
+                                })
+                                .build(&overlay_win)
+                                .expect("Failed to build overlay webview");
+                                
+                            overlay_window = Some(overlay_win);
+                            overlay_webview = Some(overlay_wv);
+                        }
+                    },
+                    "close_overlay" => {
+                        overlay_webview = None;
+                        overlay_window = None;
+                    },
+                    "drag_overlay" => {
+                        if let Some(win) = &overlay_window {
+                            let _ = win.drag_window();
+                        }
+                    },
+                    "toggle_b_chat" => {
+                        let _ = _webview.evaluate_script("if(typeof toggleBSessionChat === 'function') toggleBSessionChat();");
+                    },
+                    "toggle_b_mic" => {
+                        let _ = _webview.evaluate_script("if(typeof toggleBSessionMic === 'function') toggleBSessionMic();");
+                    },
+                    "request_b_reverse" => {
+                        let _ = _webview.evaluate_script("if(typeof requestBSessionReverse === 'function') requestBSessionReverse();");
+                    },
+                    "disconnect_b" => {
+                        let _ = _webview.evaluate_script("if(typeof disconnectBSession === 'function') disconnectBSession();");
+                    },
                     _ => {}
                 }
             }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                quit.store(true, Ordering::Relaxed); *control_flow = ControlFlow::Exit;
+            Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
+                if window_id == window.id() {
+                    quit.store(true, Ordering::Relaxed); *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::WindowEvent { window_id, event: WindowEvent::Resized(_), .. } => {
+                if window_id == window.id() {
+                    let is_max = window.is_maximized();
+                    let script = format!("if(window.updateMaximizeIcon) window.updateMaximizeIcon({});", is_max);
+                    let _ = _webview.evaluate_script(&script);
+                }
             }
             _ => {}
         }

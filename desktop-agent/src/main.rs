@@ -874,8 +874,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
     backend.start_heartbeat_thread(global_status.clone());
 
     let mut backoff_secs = 1;
+    let mut intentional_reconnect = false;
 
     loop {
+        if intentional_reconnect {
+            intentional_reconnect = false;
+        } else {
+            // sleep happens at the end of the loop
+        }
+
         agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
         crate::session_debug::log(&system_id, "B_TCP_CONNECT_START");
 
@@ -1067,26 +1074,42 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             // ====================================================
                             // CONNECTION STATE & STREAMING PIPELINE
                             // ====================================================
-
-                            let is_connected = Arc::new(AtomicBool::new(true));
-                            let is_conn_read = Arc::clone(&is_connected);
-                            let is_conn_write = Arc::clone(&is_connected);
-                            let is_conn_capture = Arc::clone(&is_connected);
-                            let is_conn_clip = Arc::clone(&is_connected);
-                            let is_conn_audio = Arc::clone(&is_connected);
-                            let is_conn_ping = Arc::clone(&is_connected);
-                            
-                            if let Err(e) = stream.set_nodelay(true) {
-                                eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
-                            }
-
-                            // TCP INPUT
-                            let mut read_stream = match stream.try_clone() {
+                            let session_stream = match stream.try_clone() {
                                 Ok(s) => s,
-                                Err(_) => {
-                                    is_connected.store(false, Ordering::Release);
+                                Err(e) => {
+                                    eprintln!("[Agent] Failed to clone stream for session thread: {}", e);
                                     break 'viewer_loop;
                                 }
+                            };
+                            let backend_clone = backend.clone();
+                            let system_id_clone = system_id.clone();
+                            let is_in_session_clone = Arc::clone(&is_in_session);
+                            
+                            thread::spawn(move || {
+                                let mut stream = session_stream;
+                                let system_id = system_id_clone;
+                                let backend = backend_clone;
+                                let is_in_session = is_in_session_clone;
+
+                                let is_connected = Arc::new(AtomicBool::new(true));
+                                let is_conn_read = Arc::clone(&is_connected);
+                                let is_conn_write = Arc::clone(&is_connected);
+                                let is_conn_capture = Arc::clone(&is_connected);
+                                let is_conn_clip = Arc::clone(&is_connected);
+                                let is_conn_audio = Arc::clone(&is_connected);
+                                let is_conn_ping = Arc::clone(&is_connected);
+                                
+                                if let Err(e) = stream.set_nodelay(true) {
+                                    eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
+                                }
+
+                                // TCP INPUT
+                                let mut read_stream = match stream.try_clone() {
+                                    Ok(s) => s,
+                                    Err(_) => {
+                                        is_connected.store(false, Ordering::Release);
+                                        return;
+                                    }
                             };
                             let _ = read_stream.set_read_timeout(None);
 
@@ -1119,7 +1142,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 Ok(s) => s,
                                 Err(_) => {
                                     is_connected.store(false, Ordering::Release);
-                                    break 'viewer_loop;
+                                    return;
                                 }
                             };
                             let _ = write_tcp.set_write_timeout(None);
@@ -1191,23 +1214,38 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 };
 
                                 while write_connected.load(Ordering::Acquire) {
-                                    match out_rx.recv_timeout(Duration::from_millis(5)) {
-                                        Ok(packet) => {
-                                            if !write_packet(packet) {
-                                                break;
-                                            }
-                                        }
-                                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                                    }
+                                    let mut sent_control = false;
+                                    let mut error = false;
 
+                                    // Drain all available control/audio packets first (high priority)
+                                    while let Ok(packet) = out_rx.try_recv() {
+                                        sent_control = true;
+                                        if !write_packet(packet) {
+                                            error = true;
+                                            break;
+                                        }
+                                    }
+                                    if error { break; }
+
+                                    // Then send ONE video packet if available
                                     let video_packet = video_slot_writer
                                         .lock()
                                         .ok()
                                         .and_then(|mut q| q.pop_front());
+                                    
                                     if let Some(packet) = video_packet {
                                         if !write_packet(packet) {
                                             break;
+                                        }
+                                    } else if !sent_control {
+                                        // Wait a bit to avoid busy loop if both queues are empty
+                                        match out_rx.recv_timeout(Duration::from_millis(5)) {
+                                            Ok(packet) => {
+                                                if !write_packet(packet) {
+                                                    break;
+                                                }
+                                            }
+                                            Err(_) => {}
                                         }
                                     }
                                 }
@@ -1611,7 +1649,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 audio_output_rate,
                                             ) {
                                                 if let Ok(mut queue) = audio_playback_queue.lock() {
-                                                    let max_samples = audio_output_rate as usize * 2;
+                                                    let max_samples = (audio_output_rate as f32 * 0.3) as usize; // 300ms max latency
                                                     if queue.len().saturating_add(samples.len()) > max_samples {
                                                         queue.clear();
                                                     }
@@ -2272,6 +2310,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 eprintln!("[SESSION UI] Failed to clear session bridge: {}", error);
                             }
                             thread::sleep(Duration::from_millis(500));
+                            }); // END OF THREAD
+
+                            intentional_reconnect = true;
+                            break 'viewer_loop;
                         }
 
                         // Type 99: Session disconnect signal
@@ -2307,6 +2349,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
         is_running_conn.store(false, Ordering::SeqCst);
         let _ = heartbeat_handle.join();
+
+        if intentional_reconnect {
+            intentional_reconnect = false;
+            backoff_secs = 1;
+            println!("[Agent] Pairing complete. Immediately replenishing listener socket...");
+            continue;
+        }
 
         println!("[Agent] Relay connection lost. Reconnecting in {}s...", backoff_secs);
         thread::sleep(Duration::from_secs(backoff_secs));
@@ -2370,32 +2419,45 @@ mod session_feature_tests {
 }
 
 fn main() {
-    // STARTUP TRACE: Log instantly before anything can fail!
+    // ---------------------------------------------------------
+    // PHASE 8: ENTERPRISE BOOT LOGGER & PHASE 4: PROVISIONING
+    // ---------------------------------------------------------
     let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\temp".to_string());
     let deskstream_dir = std::path::Path::new(&local_app_data).join("DeskStream");
-    let logs_dir = deskstream_dir.join("logs");
-    let _ = std::fs::create_dir_all(&logs_dir);
-    let boot_log_path = logs_dir.join("boot.log");
+    let _ = std::fs::create_dir_all(&deskstream_dir);
+    
+    // Create the boot logger in the %TEMP% directory as requested (or a subfolder there)
+    let temp_dir = std::env::var("TEMP").unwrap_or_else(|_| "C:\\temp".to_string());
+    let boot_log_path = std::path::Path::new(&temp_dir).join("DeskStream-boot.log");
 
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    // Clear old boot log or keep appending if we prefer
+    let mut boot_log = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&boot_log_path)
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "[BOOT TRACE] desktop-agent.exe launched at {:?}", std::time::SystemTime::now());
-    }
+        .expect("Failed to open boot log");
 
-    // 1. Ensure correct working directory regardless of how it was launched
+    use std::io::Write;
+    let now = || -> String {
+        // Very basic ISO-like format using SystemTime (for standard Rust without chrono)
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        format!("[{}]", secs)
+    };
+
+    let _ = writeln!(boot_log, "{} DeskStream starting", now());
+    let _ = writeln!(boot_log, "{} Version: {}", now(), env!("CARGO_PKG_VERSION"));
+    
     if let Ok(exe_path) = std::env::current_exe() {
+        let _ = writeln!(boot_log, "{} Executable: {}", now(), exe_path.display());
         if let Some(parent) = exe_path.parent() {
             let _ = std::env::set_current_dir(parent);
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&boot_log_path) {
-                use std::io::Write;
-                let _ = writeln!(file, "[BOOT TRACE] Working directory set to: {:?}", parent);
-            }
         }
     }
+    
+    let _ = writeln!(boot_log, "{} Operating System: Windows", now());
+    let _ = writeln!(boot_log, "{} Architecture: x64", now());
+    let _ = writeln!(boot_log, "{} User data: {}", now(), deskstream_dir.display());
 
     // Single-instance enforcement via port 49182
     let listener = match std::net::TcpListener::bind("127.0.0.1:49182") {
@@ -2435,16 +2497,23 @@ fn main() {
     // FIRST-LAUNCH CONFIG PROVISIONING
     let config_path = deskstream_dir.join("config.json");
     if !config_path.exists() {
-        let _ = std::fs::write(&config_path, "{}");
+        let default_config = r#"{
+    "version": 1,
+    "initialized": true
+}"#;
+        let _ = std::fs::write(&config_path, default_config);
     }
+    let _ = writeln!(boot_log, "{} Configuration initialized", now());
+
     let keys_path = deskstream_dir.join("keys.json");
     if !keys_path.exists() {
         let _ = std::fs::write(&keys_path, "{}");
     }
     let env_path = deskstream_dir.join(".env");
     if !env_path.exists() {
-        let _ = std::fs::write(&env_path, "");
+        let _ = std::fs::write(&env_path, "DESKSTREAM_SIGNING_ENABLED=false\n");
     }
+    let _ = writeln!(boot_log, "{} Environment initialized", now());
 
     // Load persistent identity
     let config = identity::device_id::AgentConfig::load_or_create("", &relay_addr);
@@ -2575,17 +2644,19 @@ fn main() {
     tray::start_tray(quit_signal.clone());
 
     // Start embedded local HTTP server for the UI and API Proxy
+    let _ = writeln!(boot_log, "{} Backend starting", now());
     let local_port = local_server::start_local_server(config.system_id.clone(), quit_signal.clone());
     let local_url = format!("http://127.0.0.1:{}/dashboard.html", local_port);
     agent_log!("[BOOT] Started local embedded UI server on {}", local_url);
 
-    // Run the WebView2 window — blocks until window closed
     // Health Poll Loop
     let mut healthy = false;
-    for _ in 0..60 { // 30 seconds max
+    for attempt in 1..=60 { // 30 seconds max
+        let _ = writeln!(boot_log, "{} Health check attempt {}", now(), attempt);
         if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", local_port)) {
             if resp.status().is_success() {
                 healthy = true;
+                let _ = writeln!(boot_log, "{} Backend healthy", now());
                 break;
             }
         }
@@ -2593,10 +2664,30 @@ fn main() {
     }
 
     if healthy {
+        let _ = writeln!(boot_log, "{} Main window created", now());
         webview_app::run_webview(quit_signal, local_url);
     } else {
+        let _ = writeln!(boot_log, "{} Fatal startup error: Backend unhealthy after 30 seconds", now());
         let error_html = format!(
-            "data:text/html;charset=utf-8,<html><head><title>Startup Error</title><style>body{{font-family:sans-serif;padding:40px;}}</style></head><body><h2>DeskStream could not start</h2><p>The local DeskStream service did not become ready.</p><p>Check logs at: {}</p></body></html>",
+            "data:text/html;charset=utf-8,<html><head><title>Startup Error</title><style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 40px; background: #0f172a; color: #f8fafc; }}
+            h2 {{ font-weight: 600; color: #f1f5f9; }}
+            .container {{ max-width: 600px; margin: 40px auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); border: 1px solid #334155; }}
+            pre {{ background: #0f172a; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 13px; color: #cbd5e1; border: 1px solid #334155; }}
+            .btn {{ display: inline-block; background: #3b82f6; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-weight: 500; margin-right: 12px; font-size: 14px; }}
+            .btn-outline {{ background: transparent; border: 1px solid #475569; color: #e2e8f0; }}
+            </style></head><body>
+            <div class='container'>
+            <h2>DeskStream</h2>
+            <p>Unable to start the local service.</p>
+            <p><strong>Error:</strong> Local backend health check timed out.</p>
+            <p><strong>Diagnostic log:</strong></p>
+            <pre>{}</pre>
+            <div style='margin-top: 24px;'>
+                <a href='#' onclick='window.location.reload()' class='btn'>Retry</a>
+                <a href='#' class='btn btn-outline'>Exit</a>
+            </div>
+            </div></body></html>",
             boot_log_path.to_string_lossy().replace("\\", "/")
         );
         webview_app::run_webview(quit_signal, error_html);

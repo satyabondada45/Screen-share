@@ -6,6 +6,10 @@ $InstallerDir = Join-Path $ProjectRoot "installer"
 $DistDir = Join-Path $ProjectRoot "dist-installer"
 
 Write-Host "Verifying source tree..."
+if (-not $env:DESKSTREAM_CERT_THUMBPRINT) {
+    throw "NO PRODUCTION SIGNING CERTIFICATE CONFIGURED"
+}
+
 Set-Location $DesktopAgentDir
 
 Write-Host "Building Cargo release..."
@@ -14,6 +18,11 @@ cargo build --release
 $ExePath = Join-Path $DesktopAgentDir "target\release\DeskStream.exe"
 if (-Not (Test-Path $ExePath)) {
     throw "Release executable not found at $ExePath"
+}
+
+& (Join-Path $ProjectRoot 'scripts\sign-release.ps1') -ExePath $ExePath
+if ($LASTEXITCODE -ne 0) {
+    throw "Release signing failed."
 }
 
 $ExeHash = (Get-FileHash $ExePath -Algorithm SHA256).Hash

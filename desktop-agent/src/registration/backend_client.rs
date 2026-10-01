@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::status;
 use crate::status::AgentStatus;
 
+#[derive(Clone)]
 pub struct BackendClient {
     base_url: String,
     machine_identifier: String,

@@ -154,6 +154,16 @@
             color: var(--text-muted);
         }
 
+        .auth-window-controls {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            z-index: 30;
+        }
+
         .win-btn {
             background: transparent;
             border: none;
@@ -1560,80 +1570,12 @@
             font-weight: 600;
             font-size: 0.8rem;
         }
-        body.b-session-active > .topbar,
-        body.b-session-active > .workspace { display:none !important; }
+        /* Removed body.b-session-active > .topbar, .workspace { display: none } to keep normal dashboard */
     </style>
 </head>
 
 <body>
-    <!-- ============================================================
-         B-SIDE CONNECTED SESSION OVERLAY
-         Shown on B (controlled device) after real accept succeeds.
-    ============================================================ -->
-    <div id="bSessionOverlay">
-        <div id="bSessionNavbar" class="viewer-header">
-            <div class="header-left">
-                <a href="#" class="logo" onclick="return false;">
-                    <img src="deskstream-logo.png" style="height: 24px; width: auto;" alt="DeskStream" />
-                </a>
-                <div class="device-info">
-                    <div class="device-name">
-                        <span class="b-session-username"></span>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2">
-                            <path d="M5 12h14M12 5l7 7-7 7"/>
-                        </svg>
-                        <span style="color:#ef4444;font-size:0.85em;letter-spacing:1px;">CONTROLLED</span>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2">
-                            <path d="M5 12h14M12 5l7 7-7 7"/>
-                        </svg>
-                        <span id="bSessionDeviceId"></span>
-                    </div>
-                    <div class="device-meta">
-                        Session <span style="color:#d1d5db;">|</span>
-                        <span class="dot"></span>
-                        <span class="dot-text">Connected</span>
-                    </div>
-                </div>
-            </div>
-            <div class="header-right">
-                <div class="action-group">
-                    <button class="btn" id="bChatBtn" type="button" onclick="toggleBSessionChat()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                        </svg>
-                        Chat
-                    </button>
-                    <button class="btn" id="bFileBtn" type="button" onclick="showBSessionTransferChoice()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                            <polyline points="13 2 13 9 20 9"></polyline>
-                        </svg>
-                        File Transfer
-                    </button>
-                    <button class="btn" id="bMicBtn" type="button" onclick="toggleBSessionMic()">Mic Off</button>
-                    <button class="btn" id="bReverseBtn" type="button" onclick="requestBSessionReverse()">Reverse</button>
-                    <button class="btn" id="bSettingsBtn" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="3"></circle>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a2 2 0 0 0-1.51 1z"></path>
-                        </svg>
-                        Settings
-                    </button>
-                </div>
-                <button class="btn btn-end" id="bDisconnectBtn" type="button" onclick="disconnectBSession()">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                    </svg>
-                    End Session
-                </button>
-            </div>
-        </div>
-        <div id="bSessionContent">
-            <div class="bsc-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
-            <div class="bsc-title">Session Active — Sharing Your Screen</div>
-            <div class="bsc-sub">Your screen is being shared. The remote controller can see your display and send input.</div>
-            <div class="bsc-timer" id="bSessionTimer">00:00:00</div>
-        </div>
+    <!-- B-Side Chat Panel (moved out of the huge overlay) -->
         <section id="bSessionChatPanel" class="chat-panel" aria-label="Session chat">
             <div class="chat-header">
                 <span>Session Chat</span>
@@ -1646,7 +1588,6 @@
                 <button type="submit">Send</button>
             </form>
         </section>
-    </div>
     <div id="bReversePermissionDialog" role="alertdialog" aria-modal="false"
         style="display:none;position:fixed;left:20px;bottom:20px;z-index:11000;width:min(360px,calc(100vw - 40px));">
         <div style="padding:16px;background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 12px 32px rgba(15,23,42,.22);color:#111827;">
@@ -1697,7 +1638,25 @@
     <!-- ============================================================
      LOGIN OVERLAY — shown until user authenticates
      ============================================================ -->
-    <div class="login-overlay" id="loginOverlay">
+    <div class="login-overlay" id="loginOverlay" style="position: relative;">
+        <div class="auth-window-controls">
+            <button class="win-btn" onclick="minimizeWindow()" title="Minimize" aria-label="Minimize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="4" y1="12" x2="20" y2="12"></line>
+                </svg>
+            </button>
+            <button id="loginMaximizeBtn" class="win-btn maximize-window-btn" onclick="maximizeWindow()" title="Maximize" aria-label="Maximize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                </svg>
+            </button>
+            <button class="win-btn close-btn" onclick="closeWindow()" title="Close" aria-label="Close window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        </div>
         <div class="login-card">
             <div class="login-logo">
                 <div class="brand-logo">
@@ -1723,7 +1682,25 @@
         </div>
     </div>
 
-    <div class="login-overlay" id="registerOverlay" style="display: none;">
+    <div class="login-overlay" id="registerOverlay" style="display:none; position: relative;">
+        <div class="auth-window-controls">
+            <button class="win-btn" onclick="minimizeWindow()" title="Minimize" aria-label="Minimize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="4" y1="12" x2="20" y2="12"></line>
+                </svg>
+            </button>
+            <button id="registerMaximizeBtn" class="win-btn maximize-window-btn" onclick="maximizeWindow()" title="Maximize" aria-label="Maximize window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                </svg>
+            </button>
+            <button class="win-btn close-btn" onclick="closeWindow()" title="Close" aria-label="Close window">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        </div>
         <div class="login-card">
             <div class="login-logo">
                 <div class="brand-logo">
@@ -1791,7 +1768,7 @@
                         <line x1="4" y1="12" x2="20" y2="12"></line>
                     </svg>
                 </button>
-                <button class="win-btn" onclick="maximizeWindow()" title="Maximize">
+                <button class="win-btn maximize-window-btn" onclick="maximizeWindow()" title="Maximize">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                     </svg>
@@ -1870,7 +1847,7 @@
                     </button>
                 </div>
                 <div class="sidebar-alias-val">
-                    Alias: <strong id="sidebarAliasDisplay">Loading...</strong>
+                    Alias: <strong id="sidebarAliasDisplay">DeskStream User</strong>
                     <button class="mini-edit-btn" onclick="triggerAliasEdit()" title="Edit Alias">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">
@@ -1910,7 +1887,7 @@
 
                             <div class="field-label">Alias</div>
                             <div class="alias-display-row">
-                                <span id="mainHostAlias">Loading...</span>
+                                <span id="mainHostAlias">DeskStream User</span>
                                 <input type="text" id="hostAliasInput" class="alias-input-inline" value=""
                                     onblur="saveAliasInline()" onkeydown="handleAliasKey(event)">
                                 <button class="edit-alias-btn" onclick="triggerAliasEdit()" title="Edit Alias">
@@ -2241,10 +2218,49 @@
 
         // ── Boot ─────────────────────────────────────────────────────
         window.addEventListener('DOMContentLoaded', () => {
+            applyDisplayIdentity();
+            requestWindowState();
             tryRestoreSession();
             pollAgentHealth();
             setInterval(pollAgentHealth, 5000);
         });
+
+        function normalizeDisplayName(value) {
+            if (typeof value !== 'string') return '';
+            return value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+
+        function getBestAvailableDisplayName() {
+            const candidates = [
+                normalizeDisplayName(localStorage.getItem('ds_username')),
+                normalizeDisplayName(localStorage.getItem('ds_display_name')),
+                normalizeDisplayName(localStorage.getItem('ds_device_alias')),
+                normalizeDisplayName(localStorage.getItem('ds_device_name')),
+                normalizeDisplayName(currentHostAlias)
+            ];
+
+            const filtered = candidates.filter(name =>
+                name &&
+                name !== 'Loading...' &&
+                name !== 'Connecting...' &&
+                name !== 'ID unavailable' &&
+                name !== 'DeskStream User'
+            );
+
+            return filtered[0] || 'DeskStream User';
+        }
+
+        function applyDisplayIdentity(name) {
+            const resolvedName = normalizeDisplayName(name) || getBestAvailableDisplayName();
+            const safeName = resolvedName || 'DeskStream User';
+            const aliasNodes = document.querySelectorAll('#mainHostAlias, #sidebarAliasDisplay');
+            aliasNodes.forEach(node => {
+                if (node) node.textContent = safeName;
+            });
+            const aliasInput = document.getElementById('hostAliasInput');
+            if (aliasInput) aliasInput.value = safeName;
+            currentHostAlias = safeName;
+        }
 
         // ── Auth helpers ─────────────────────────────────────────────
         function tryRestoreSession() {
@@ -2279,10 +2295,12 @@
         function showLoginOverlay() {
             document.getElementById('registerOverlay').style.display = 'none';
             document.getElementById('loginOverlay').style.display = 'flex';
+            requestWindowState();
         }
         function showRegisterOverlay() {
             document.getElementById('loginOverlay').style.display = 'none';
             document.getElementById('registerOverlay').style.display = 'flex';
+            requestWindowState();
         }
 
         async function doLogin() {
@@ -2363,10 +2381,12 @@
 
         function onAuthenticated(username) {
             isAuthenticated = true;
+            const safeUsername = normalizeDisplayName(username) || getBestAvailableDisplayName();
             document.getElementById('loginOverlay').style.display = 'none';
             const badge = document.getElementById('topbarUserBadge');
             badge.style.display = 'flex';
-            document.getElementById('topbarUsername').textContent = '👤 ' + username;
+            document.getElementById('topbarUsername').textContent = '👤 ' + safeUsername;
+            applyDisplayIdentity(safeUsername);
             showDashboardPage('home');
             fetchAllDevices(false);
             setInterval(() => fetchAllDevices(false), 5000);
@@ -2380,6 +2400,50 @@
             document.getElementById('topbarUserBadge').style.display = 'none';
             showLoginOverlay();
         }
+
+        function windowIconMarkup(maximized) {
+            if (maximized) {
+                return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="8" width="12" height="12" rx="2" ry="2"></rect><rect x="4" y="4" width="12" height="12" rx="2" ry="2"></rect></svg>';
+            }
+            return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>';
+        }
+
+        function updateMaximizeIcon(maximized) {
+            const maximizeButtons = document.querySelectorAll('.maximize-window-btn');
+            maximizeButtons.forEach(button => {
+                button.innerHTML = windowIconMarkup(maximized);
+                button.setAttribute('title', maximized ? 'Restore' : 'Maximize');
+                button.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
+            });
+        }
+
+        function requestWindowState() {
+            if (window.ipc) {
+                window.ipc.postMessage('get_maximize_state');
+            } else {
+                updateMaximizeIcon(false);
+            }
+        }
+
+        function minimizeWindow() {
+            if (window.ipc) window.ipc.postMessage('minimize');
+        }
+
+        function maximizeWindow() {
+            if (window.ipc) {
+                window.ipc.postMessage('toggle_maximize');
+                setTimeout(requestWindowState, 150);
+            }
+        }
+
+        function closeWindow() {
+            if (window.ipc) window.ipc.postMessage('close');
+        }
+
+        window.updateMaximizeIcon = updateMaximizeIcon;
+        window.minimizeWindow = minimizeWindow;
+        window.maximizeWindow = maximizeWindow;
+        window.closeWindow = closeWindow;
 
         // ── Agent health poll ────────────────────────────────────────
         async function pollAgentHealth() {
@@ -2433,10 +2497,15 @@
                         d.system_id === currentHostUid || d.device_uid === currentHostUid
                     );
                     if (mine && mine.name) {
-                        currentHostAlias = mine.name;
-                        document.getElementById('mainHostAlias').textContent = mine.name;
-                        document.getElementById('sidebarAliasDisplay').textContent = mine.name;
-                        document.getElementById('hostAliasInput').value = mine.name;
+                        const deviceName = normalizeDisplayName(mine.name);
+                        if (deviceName && !normalizeDisplayName(localStorage.getItem('ds_username'))) {
+                            currentHostAlias = deviceName;
+                            applyDisplayIdentity(deviceName);
+                        } else {
+                            applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || deviceName || 'DeskStream User');
+                        }
+                    } else {
+                        applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || 'DeskStream User');
                     }
                     if (isManual) showToast('Workstation inventory synchronized');
                 }
@@ -2975,9 +3044,30 @@
             }
             // Fallback UI reset
             setTimeout(() => {
+                integratedSessionEntered = false;
                 if (iframe) {
                     iframe.src = 'about:blank';
                     iframe.style.display = 'none';
+                    iframe.style.position = '';
+                    iframe.style.top = '';
+                    iframe.style.left = '';
+                    iframe.style.width = '100%';
+                    iframe.style.height = 'calc(100vh - 200px)';
+                    iframe.style.zIndex = '50';
+                    iframe.style.margin = '20px 0 0 0';
+                }
+                // Restore navigation
+                const sidebar = document.querySelector('.sidebar');
+                const topbar = document.querySelector('.topbar');
+                if (sidebar) sidebar.style.display = '';
+                if (topbar) topbar.style.display = '';
+                const mainContent = document.getElementById('mainContentArea');
+                if (mainContent) {
+                    mainContent.style.margin = '';
+                    mainContent.style.padding = '';
+                    mainContent.style.width = '';
+                    mainContent.style.height = '';
+                    mainContent.style.maxWidth = '';
                 }
                 fetchAllDevices();
             }, 500);
@@ -3001,6 +3091,17 @@
                     iframe.style.height = 'calc(100vh - 200px)';
                     iframe.style.zIndex = '50';
                     iframe.style.margin = '20px 0 0 0';
+                    iframe.style.border = 'none';
+                    
+                    const mainContent = document.getElementById('mainContentArea');
+                    if (mainContent) {
+                        mainContent.style.margin = '';
+                        mainContent.style.padding = '';
+                        mainContent.style.width = '';
+                        mainContent.style.height = '';
+                        mainContent.style.maxWidth = '';
+                    }
+                    
                     const sidebar = document.querySelector('.sidebar');
                     const topbar = document.querySelector('.topbar');
                     if (sidebar) sidebar.style.display = '';
@@ -3022,29 +3123,39 @@
         });
     </script>
 <script>
-function minimizeWindow() { if(window.ipc) { window.ipc.postMessage('minimize'); } }
-function maximizeWindow() { if(window.ipc) { window.ipc.postMessage('toggle_maximize'); } }
-function closeWindow() { if(window.ipc) { window.ipc.postMessage('close'); } }
 function enterConnectedSession() {
     if (integratedSessionEntered) return;
     integratedSessionEntered = true;
     console.log('[DESKSTREAM] session_state_changed: CONNECTED. Navbar visible.');
     const inner = document.getElementById('dashboardInnerContent');
     const iframe = document.getElementById('remoteSessionIframe');
+    
+    // Hide navigation to use full available area as requested
     const sidebar = document.querySelector('.sidebar');
     const topbar = document.querySelector('.topbar');
+    if (sidebar) sidebar.style.display = 'none';
+    if (topbar) topbar.style.display = 'none';
+    
+    const mainContent = document.getElementById('mainContentArea');
+    if (mainContent) {
+        mainContent.style.margin = '0';
+        mainContent.style.padding = '0';
+        mainContent.style.width = '100vw';
+        mainContent.style.height = '100vh';
+        mainContent.style.maxWidth = 'none';
+    }
+
     if (inner && iframe) {
         inner.style.display = 'none';
-        if (sidebar) sidebar.style.display = 'none';
-        if (topbar) topbar.style.display = 'none';
         iframe.style.display = 'block';
         iframe.style.position = 'fixed';
         iframe.style.top = '0';
         iframe.style.left = '0';
         iframe.style.width = '100vw';
         iframe.style.height = '100vh';
-        iframe.style.zIndex = '9999';
+        iframe.style.zIndex = '999999';
         iframe.style.margin = '0';
+        iframe.style.border = 'none';
     }
 }
 document.addEventListener('DOMContentLoaded', () => {
@@ -3109,9 +3220,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
             }
             document.body.classList.add('b-session-active');
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) {
-                overlay.classList.add('active');
+            if (window.ipc) {
+                window.ipc.postMessage('open_overlay');
             }
             // Start session timer
             _bSessionStartTime = Date.now();
@@ -3173,8 +3283,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
             }
             document.body.classList.remove('b-session-active');
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.classList.remove('active');
+            if (window.ipc) {
+                window.ipc.postMessage('close_overlay');
+            }
             document.getElementById('bSessionChatPanel')?.classList.remove('open');
             document.getElementById('bSessionChatMessages')?.replaceChildren();
             if (_bSessionTimerInterval) { clearInterval(_bSessionTimerInterval); _bSessionTimerInterval = null; }
@@ -3573,6 +3684,34 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     </script>
+    
+    <!-- B-Side Overlay Container -->
+    <div id="bSessionOverlay" style="display: none; flex-direction: column; width: 56px; background: rgba(30, 41, 59, 0.95); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); overflow: hidden; position: fixed; top: 0; left: 0; margin: 0; padding: 0;">
+        <div id="bSessionDragHandle" style="height: 24px; cursor: move; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05);" onmousedown="if(window.ipc){window.ipc.postMessage('drag_overlay');}">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><line x1="8" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>
+        </div>
+        <div style="display: flex; flex-direction: column; padding: 4px; gap: 4px;">
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: white;" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');}" title="Chat">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            </button>
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: white;" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');}" title="Mic">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M17 17A7 7 0 0 1 5 12H3a9 9 0 0 0 8 8.94V23h2v-2.06a9 9 0 0 0 8-8.94h-2a7 7 0 0 1-2 5z"></path></svg>
+            </button>
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: white;" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');}" title="Reverse">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>
+            </button>
+            <button class="win-btn" style="width: 46px; height: 46px; border-radius: 8px; color: #ef4444; margin-top: 4px;" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');}" title="Disconnect">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+            </button>
+        </div>
+    </div>
+    <script>
+        if (window.location.search.includes('overlay=1')) {
+            document.body.innerHTML = '';
+            document.body.appendChild(document.getElementById('bSessionOverlay'));
+            document.getElementById('bSessionOverlay').style.display = 'flex';
+            document.body.style.background = 'transparent';
+        }
+    </script>
 </body>
-
 </html>
