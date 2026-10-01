@@ -1421,7 +1421,7 @@ window.addEventListener('DOMContentLoaded', () => {
         function dismissSessionEnded() {
             const params = new URLSearchParams(window.location.search);
             if (params.get("integrated") === "1") {
-                window.parent.postMessage("end_integrated_session", "*");
+                window.parent.postMessage({ type: "end_integrated_session", targetId: params.get("id") }, "*");
                 return;
             }
             window.location.href = "../dashboard.php";
@@ -3431,7 +3431,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 }
                 stopWebStream();
                 if (reverseTransitionPending) {
-                    window.parent.postMessage("end_integrated_session", "*");
+                    const params = new URLSearchParams(window.location.search);
+                    window.parent.postMessage({ type: "end_integrated_session", targetId: params.get("id") }, "*");
                 } else if (sessionWasEstablished) {
                     showSessionEnded();
                 }

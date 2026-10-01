@@ -32,6 +32,34 @@ function Ensure-Nsis {
 
 Write-Host "Verifying source tree..."
 
+$IconPath = Join-Path $DesktopAgentDir "assets\icon.ico"
+$IconPng = Join-Path $DesktopAgentDir "assets\icon.png"
+if (Test-Path $IconPng) {
+    $iconValidate = @'
+from PIL import Image
+import sys
+for path in [r"$IconPath", r"$IconPng"]:
+    if path.lower().endswith(".ico"):
+        try:
+            with Image.open(path) as img:
+                sizes = set(getattr(img, "info", {}).get("sizes", []))
+                if not sizes:
+                    sizes = {(img.size[0], img.size[1])}
+                print(f"{path}: {sorted(sizes)}")
+                if len(sizes) < 2:
+                    raise SystemExit(2)
+        except Exception:
+            raise SystemExit(2)
+'@
+    $iconValidate = $iconValidate.Replace('$IconPath', $IconPath).Replace('$IconPng', $IconPng)
+    $iconValid = python -c $iconValidate
+    if ($LASTEXITCODE -ne 0 -or $iconValid -match 'ERROR') {
+        Write-Host "DeskStream icon is invalid or single-size; regenerating a proper multi-resolution ICO from assets/icon.png..."
+        python -c "from PIL import Image; src=Image.open(r'$IconPng').convert('RGBA'); sizes=[16,24,32,48,64,128,256]; frames=[src.resize((s,s), Image.LANCZOS) for s in sizes]; frames[0].save(r'$IconPath', format='ICO', sizes=[(s,s) for s in sizes], append_images=frames[1:])"
+        if ($LASTEXITCODE -ne 0) { throw "Failed to regenerate the DeskStream ICO icon." }
+    }
+}
+
 Set-Location $DesktopAgentDir
 
 Write-Host "Building Cargo release..."
