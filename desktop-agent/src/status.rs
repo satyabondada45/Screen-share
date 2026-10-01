@@ -121,6 +121,14 @@ pub fn session_peer_system_id() -> Result<Option<String>, String> {
         .map_err(|_| "session peer ID lock poisoned".to_string())
 }
 
+pub fn clear_session_peer_system_id() -> Result<(), String> {
+    *SESSION_PEER_SYSTEM_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "session peer ID lock poisoned".to_string())? = None;
+    Ok(())
+}
+
 impl AgentStatus {
     pub fn new(system_id: &str, device_name: &str) -> Self {
         let environment = env::var("SCREENSHARE_ENV")

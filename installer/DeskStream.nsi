@@ -7,6 +7,12 @@ InstallDir "$LOCALAPPDATA\DeskStream"
 RequestExecutionLevel user
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "..\desktop-agent\assets\icon.ico"
+!define MUI_UNICON "..\desktop-agent\assets\icon.ico"
+!define MUI_HEADERIMAGE_RIGHT
+
+Icon "..\desktop-agent\assets\icon.ico"
+UninstallIcon "..\desktop-agent\assets\icon.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY

@@ -1346,162 +1346,84 @@
         /* ============================================================
            B-SIDE CONNECTED SESSION OVERLAY
         ============================================================ */
-        #bSessionOverlay {
-            display: none;
+        .floating-controls {
             position: fixed;
-            inset: 20px 20px auto auto;
+            top: 20px;
+            right: 20px;
             z-index: 10000;
-            flex-direction: column;
-            pointer-events: auto;
-            width: min(520px, calc(100vw - 32px));
-            background: rgba(255, 255, 255, 0);
-            --header-bg: #fff;
-            --border: #e5e5e5;
-            --accent: #ef4444;
-            --text-dark: #111827;
-            --text-muted: #6b7280;
-            --online: #22c55e;
-            --btn-bg: #fff;
-            --btn-border: #d1d5db;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15);
+            backdrop-filter: blur(8px);
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
         }
-        #bSessionOverlay.active { display: flex; }
-        #bSessionOverlay .viewer-header,
-        #bSessionOverlay .viewer-header * {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+        .floating-controls.dragging {
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
         }
-        #bSessionOverlay .viewer-header {
-            min-height: 76px;
-            width: 100%;
-            background: rgba(255, 255, 255, 0.96);
-            border: 1px solid rgba(148, 163, 184, 0.65);
-            border-radius: 18px;
-            box-shadow: 0 16px 32px rgba(15, 23, 42, 0.18);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px 16px;
-            flex-shrink: 0;
-            z-index: 100;
-            pointer-events: auto;
-            backdrop-filter: blur(2px);
-        }
-        #bSessionOverlay .header-left {
-            display: flex;
-            align-items: center;
-            gap: 24px;
-        }
-        #bSessionOverlay .logo {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            text-decoration: none;
-            color: var(--text-dark);
-            font-weight: 800;
-            font-size: 1.1rem;
-            letter-spacing: -0.02em;
-        }
-        #bSessionOverlay .device-info {
-            display: flex;
-            flex-direction: column;
-            border-left: 1px solid var(--border);
-            padding-left: 20px;
-        }
-        #bSessionOverlay .device-name {
-            font-weight: 600;
-            font-size: 0.9rem;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        #bSessionOverlay .device-meta {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            margin-top: 2px;
-        }
-        #bSessionOverlay .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--online);
-        }
-        #bSessionOverlay .dot-text {
-            color: var(--online);
-            font-weight: 500;
-        }
-        #bSessionOverlay .header-right {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        #bSessionOverlay .action-group {
-            display: flex;
-            gap: 8px;
-            margin-right: 16px;
-            border-right: 1px solid var(--border);
-            padding-right: 16px;
-        }
-        #bSessionOverlay .btn {
+
+        .floating-drag-handle {
             display: inline-flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
-            background: var(--btn-bg);
-            border: 1px solid var(--btn-border);
-            border-radius: 6px;
-            padding: 4px 12px;
-            font-size: 0.7rem;
-            font-weight: 500;
-            color: var(--text-dark);
-            cursor: pointer;
-            transition: 0.15s;
-            text-decoration: none;
-            min-width: 60px;
-        }
-        #bSessionOverlay .btn:hover {
-            background: #f9fafb;
-            border-color: #9ca3af;
-        }
-        #bSessionOverlay .btn svg { margin-bottom: 2px; }
-        #bSessionOverlay .btn-end {
-            border-color: var(--accent);
-            color: var(--accent);
-            flex-direction: row;
-            gap: 6px;
-            padding: 6px 16px;
-            font-size: 0.85rem;
-            font-weight: 600;
-        }
-        #bSessionOverlay .btn-end:hover {
-            background: #fef2f2;
-            border-color: #dc2626;
-            color: #dc2626;
-        }
-        #bSessionOverlay .btn-end svg { margin-bottom: 0; }
-        #bSessionNavbar {
             width: 100%;
+            min-height: 24px;
+            padding: 0;
+            cursor: grab;
+            background: rgba(248, 250, 252, 0.8);
+            touch-action: none;
+            border-radius: 8px;
+        }
+
+        .floating-drag-handle:active {
+            cursor: grabbing;
+        }
+
+        .floating-drag-handle svg {
+            width: 14px;
+            height: 14px;
             margin: 0;
         }
-        #bSessionContent {
-            flex: 1;
-            display:flex;
-            flex-direction:column;
-            align-items:center;
-            justify-content:center;
-            gap:14px;
-            padding:24px;
-            pointer-events:none;
+
+        .floating-btn {
+            display: inline-flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            background: transparent;
+            border: 1px solid transparent;
+            padding: 6px;
+            min-height: 32px;
+            color: var(--text-dark);
+            cursor: pointer;
+            border-radius: 8px;
+            line-height: 1;
+            white-space: nowrap;
+            transition: background 0.15s ease, border-color 0.15s ease;
         }
-        #bSessionContent .bsc-icon {
-            width:64px; height:64px; border-radius:50%;
-            background:#1e293b; border:2px solid #334155;
-            display:flex; align-items:center; justify-content:center;
+
+        .floating-btn:hover {
+            background: #f8fafc;
+            border-color: #e2e8f0;
         }
-        #bSessionContent .bsc-title { font-size:1.05rem; font-weight:700; color:#e2e8f0; }
-        #bSessionContent .bsc-sub { font-size:0.82rem; color:#64748b; text-align:center; max-width:320px; line-height:1.5; }
-        #bSessionContent .bsc-timer { font-size:0.78rem; font-family:'JetBrains Mono',monospace; color:#22c55e; letter-spacing:0.08em; }
+
+        .floating-btn.danger {
+            color: #ef4444;
+        }
+
+        .floating-btn.danger:hover {
+            background: #fef2f2;
+            border-color: #fca5a5;
+        }
+
+        #bSessionOverlay {
+            display: none;
+        }
+
+        #bSessionOverlay.active {
+            display: flex;
+        }
         #bSessionChatPanel {
             position: fixed;
             top: 78px;
@@ -2398,8 +2320,9 @@
             }
         }
 
-        function onAuthenticated(username) {
+        async function onAuthenticated(username) {
             isAuthenticated = true;
+            await pollAgentHealth();
             const safeUsername = normalizeDisplayName(username) || getBestAvailableDisplayName();
             // Hide auth overlays
             document.getElementById('loginOverlay').style.display = 'none';
@@ -2487,6 +2410,12 @@
                     document.getElementById('agentStatusFooter').textContent = 'Agent: Online (' + formatId(currentHostUid) + ')';
                     updateHostBadge('online');
                 }
+                const hasLiveBSession = Boolean(data && data.in_session === true);
+                if (hasLiveBSession && !_bSessionActive) {
+                    enterBConnectedSession();
+                } else if (!hasLiveBSession && _bSessionActive) {
+                    _dismissBSessionOverlay();
+                }
             } catch (e) {
                 document.getElementById('agentStatusFooter').textContent = 'Agent: Not running';
                 updateHostBadge('offline');
@@ -2520,10 +2449,32 @@
                     const others = data.devices.filter(d =>
                         d.system_id !== currentHostUid && d.device_uid !== currentHostUid
                     );
-                    const recent = getRecentSessionEntries();
-                    const displayDevices = others.length > 0 ? others : recent;
+                    lastFetchedDevices = others;
+                    const onlineById = new Map(others.map(device => [
+                        String(device.system_id || device.device_uid || '').replace(/\D/g, ''),
+                        device
+                    ]));
+                    const recent = getRecentSessionEntries().map(entry => {
+                        const id = String(entry.system_id || entry.device_uid || '').replace(/\D/g, '');
+                        const online = onlineById.get(id);
+                        return {
+                            ...(online || {}),
+                            ...entry,
+                            system_id: id,
+                            device_uid: id,
+                            is_online: online ? online.is_online : 0,
+                            name: online?.name || entry.name || 'Workstation',
+                            ip_address: online?.ip_address || entry.ip_address || '—'
+                        };
+                    });
+                    const recentIds = new Set(recent.map(device => device.system_id));
+                    const displayDevices = isManual
+                        ? others
+                        : [...recent, ...others.filter(device =>
+                            !recentIds.has(String(device.system_id || device.device_uid || '').replace(/\D/g, ''))
+                        )];
                     renderDevicesGrid(displayDevices);
-                    populateRecentDropdown(displayDevices);
+                    populateRecentDropdown(recent.length ? recent : others);
                     const mine = data.devices.find(d =>
                         d.system_id === currentHostUid || d.device_uid === currentHostUid
                     );
@@ -2598,11 +2549,15 @@
             showToast('System ID copied: ' + formatId(currentHostUid));
         }
 
+        let lastFetchedDevices = [];
+
         function getRecentSessionEntries() {
             try {
                 const raw = localStorage.getItem('ds_recent_sessions');
                 const parsed = raw ? JSON.parse(raw) : [];
-                return Array.isArray(parsed) ? parsed : [];
+                return Array.isArray(parsed) ? parsed.filter(entry =>
+                    entry && /^\d{9}$/.test(String(entry.system_id || entry.device_uid || '').replace(/\D/g, ''))
+                ) : [];
             } catch (error) {
                 return [];
             }
@@ -2613,23 +2568,30 @@
         }
 
         function recordRecentSession(device) {
+            const systemId = String(device.system_id || device.device_uid || '');
+            if (!systemId) return;
             const entry = {
-                system_id: device.system_id || device.device_uid || '',
-                device_uid: device.device_uid || device.system_id || '',
+                system_id: systemId,
+                device_uid: systemId,
                 name: device.name || 'Workstation',
                 ip_address: device.ip_address || 'Local network',
                 last_seen_at: new Date().toISOString(),
                 is_online: 1,
                 os_type: device.os_type || 'windows'
             };
-            if (!entry.system_id && !entry.device_uid) return;
             const existing = getRecentSessionEntries().filter(item => {
-                const itemId = item.system_id || item.device_uid || '';
-                const matchId = entry.system_id || entry.device_uid || '';
-                return itemId && matchId && itemId !== matchId;
+                const itemId = String(item.system_id || item.device_uid || '');
+                return itemId !== systemId;
             });
             const next = [entry, ...existing].slice(0, 6);
             saveRecentSessionEntries(next);
+        }
+
+        function findKnownDevice(systemId) {
+            const cleanSystemId = String(systemId || '').replace(/\D/g, '');
+            return [...lastFetchedDevices, ...getRecentSessionEntries()].find(device =>
+                String(device.system_id || device.device_uid || '').replace(/\D/g, '') === cleanSystemId
+            ) || null;
         }
 
         function showDashboardPage(page) {
@@ -2746,15 +2708,15 @@
                 const data = await res.json();
                 if (data.status === 'success' && data.request) {
                     const token = data.request.request_token;
-                    const targetDevice = getRecentSessionEntries().find(d => (d.device_uid === targetId || d.system_id === targetId));
+                    const targetDevice = findKnownDevice(targetId);
                     const targetName = targetDevice ? (targetDevice.name || 'Remote Device') : 'Remote Device';
                     const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&target_name=${encodeURIComponent(targetName)}`;
                     
                     if (data.request.status === 'accepted') {
                         recordRecentSession({
                             system_id: targetId,
-                            name: currentHostAlias || 'Remote Device',
-                            ip_address: 'Connected',
+                            name: targetName,
+                            ip_address: targetDevice?.ip_address || 'Connected',
                             os_type: 'windows'
                         });
                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
@@ -2779,13 +2741,13 @@
                                     if (statusData.request_status === 'accepted') {
                                         recordRecentSession({
                                             system_id: targetId,
-                                            name: currentHostAlias || 'Remote Device',
-                                            ip_address: 'Connected',
+                                            name: findKnownDevice(targetId)?.name || 'Remote Device',
+                                            ip_address: findKnownDevice(targetId)?.ip_address || 'Connected',
                                             os_type: 'windows'
                                         });
                                         clearInterval(connectionPollInterval);
                                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
-                                        const targetDevice = getRecentSessionEntries().find(d => (d.device_uid === targetId || d.system_id === targetId));
+                                        const targetDevice = findKnownDevice(targetId);
                                         const targetName = targetDevice ? (targetDevice.name || 'Remote Device') : 'Remote Device';
                                         const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&target_name=${encodeURIComponent(targetName)}`;
                                         openIntegratedSession(sessionUrl);
@@ -2869,7 +2831,7 @@
                 const safeName = (dev.name || 'Workstation').replace(/'/g, "\\'");
                 const safeUid = (dev.device_uid || dev.system_id || '').replace(/'/g, "\\'");
                 return `
-                <div class="workstation-card" onclick="selectDropdownId('${safeUid}')">
+                <div class="workstation-card" onclick="startConnection('${safeUid}'); window.scrollTo({ top: 0, behavior: 'smooth' });">
                     <div class="device-avatar-circle" style="background:${color};">${getOsSvg(dev.os_type)}</div>
                     <div class="card-main-info">
                         <div class="card-top-row">
@@ -3218,6 +3180,7 @@ document.addEventListener('DOMContentLoaded', () => {
         let _bSessionStartTime = null;
         let _bSessionWatchdog = null;
         let _bSessionActive = false;
+        let _bSessionSidebar = null;
         let _bSessionDisconnecting = false;
         let _bSessionEndedDialogShown = false;
         let _bReverseHandoffPending = false;
@@ -3230,6 +3193,26 @@ document.addEventListener('DOMContentLoaded', () => {
         let _bChatTypingIdleTimer = null;
         const _bSessionChatRenderedIds = new Set();
         const _bSessionHandledOffers = new Set();
+
+        function setBSessionNavigationVisible(visible) {
+            const workspace = document.getElementById('mainWorkspace');
+            const content = document.getElementById('mainContentArea');
+            if (!workspace || !content) return;
+
+            if (visible) {
+                if (_bSessionSidebar) {
+                    workspace.insertBefore(_bSessionSidebar, content);
+                    _bSessionSidebar = null;
+                }
+                return;
+            }
+
+            const sidebar = workspace.querySelector('.sidebar');
+            if (sidebar) {
+                _bSessionSidebar = sidebar;
+                sidebar.remove();
+            }
+        }
 
         async function syncBSessionStateFromHealth() {
             try {
@@ -3251,6 +3234,7 @@ document.addEventListener('DOMContentLoaded', () => {
         function enterBConnectedSession() {
             if (_bSessionActive) return;
             _bSessionActive = true;
+            setBSessionNavigationVisible(false);
             _bSessionDisconnecting = false;
             _bSessionEndedDialogShown = false;
             _bReverseHandoffPending = false;
@@ -3266,7 +3250,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const disconnectButton = document.getElementById('bDisconnectBtn');
             if (disconnectButton) {
                 disconnectButton.disabled = false;
-                disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
+                disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.add('b-session-active');
             if (window.ipc) {
@@ -3315,6 +3299,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!_bSessionActive) return;
             stopBSessionChatTyping();
             _bSessionActive = false;
+            setBSessionNavigationVisible(true);
             _bSessionDisconnecting = false;
             currentFolderBatch = null;
             currentFolderAllowAll = false;
@@ -3333,7 +3318,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const disconnectButton = document.getElementById('bDisconnectBtn');
             if (disconnectButton) {
                 disconnectButton.disabled = false;
-                disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
+                disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.remove('b-session-active');
             if (window.ipc) {
@@ -3414,7 +3399,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     _bReverseHandoffPending = false;
                     if (button) {
                         button.disabled = false;
-                        button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session';
+                        button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
                     }
                     showToast('Could not disconnect session');
                 });
@@ -3701,7 +3686,22 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             document.getElementById('bReversePermissionDialog').style.display = 'none';
             if (accepted) {
-                showToast('Reverse request approved.');
+                try {
+                    const healthResponse = await fetch(AGENT_HEALTH);
+                    if (!healthResponse.ok) {
+                        throw new Error(`Session status request failed: ${healthResponse.status}`);
+                    }
+                    const health = await healthResponse.json();
+                    const peerSystemId = String(health.remote_device || '');
+                    if (!/^\d{9}$/.test(peerSystemId)) {
+                        showToast('Reverse request approved, but the peer ID is unavailable.');
+                        return;
+                    }
+                    disconnectBSession(peerSystemId);
+                } catch (error) {
+                    console.error('[REVERSE] Could not start the approved reverse session:', error);
+                    showToast('Could not start the approved reverse session.');
+                }
             }
         }
 
@@ -3739,45 +3739,49 @@ document.addEventListener('DOMContentLoaded', () => {
     </script>
     
     <!-- B-Side Overlay Container -->
-    <div id="bSessionOverlay" style="display: none;">
-        <div class="viewer-header" onmousedown="if(window.ipc){window.ipc.postMessage('drag_overlay');}">
-            <div class="header-left">
-                <div class="logo" style="display:flex;align-items:center;">
-                    <img src="deskstream-logo.png" style="width:140px;height:auto;" />
-                </div>
-                <div class="device-info">
-                    <div class="device-name">
-                        <span class="b-session-username">Controller</span>
-                        <span class="dot"></span>
-                    </div>
-                    <div class="device-meta">
-                        <span class="dot-text">CONNECTED</span> • <span id="bSessionDeviceId">ID</span>
-                    </div>
-                </div>
-            </div>
-            <div class="header-right">
-                <div class="action-group">
-                    <button class="btn" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_options');}" title="Options">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                        Options
-                    </button>
-                    <button class="btn" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');}" title="Chat">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-                        Chat
-                    </button>
-                    <button class="btn" id="bMicBtn" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');}" title="Mic">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M17 17A7 7 0 0 1 5 12H3a9 9 0 0 0 8 8.94V23h2v-2.06a9 9 0 0 0 8-8.94h-2a7 7 0 0 1-2 5z"></path></svg>
-                        Mic Off
-                    </button>
-                    <button class="btn" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');}" title="Reverse">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 14 20 9 15 4"></polyline><path d="M4 20v-7a4 4 0 0 1 4-4h12"></path></svg>
-                        Reverse
-                    </button>
-                </div>
-                <button class="btn-end" id="bDisconnectBtn" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');}" title="Disconnect">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> End Session
-                </button>
-            </div>
+    <div id="bSessionOverlay" class="floating-controls" style="display: none; padding: 4px; flex-direction: column; gap: 4px; width: 48px; border-radius: 12px; pointer-events: auto;">
+        <div class="floating-btn floating-drag-handle" id="toolbarHandle" title="Drag session controls" onmousedown="if(window.ipc){window.ipc.postMessage('drag_overlay');}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <circle cx="8" cy="7" r="1.2"></circle>
+                <circle cx="16" cy="7" r="1.2"></circle>
+                <circle cx="8" cy="12" r="1.2"></circle>
+                <circle cx="16" cy="12" r="1.2"></circle>
+                <circle cx="8" cy="17" r="1.2"></circle>
+                <circle cx="16" cy="17" r="1.2"></circle>
+            </svg>
+        </div>
+
+        <button class="floating-btn" id="optionsToggleBtn" type="button" title="Options" style="color: #1e293b;" onclick="toggleBOptions()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+                <circle cx="12" cy="12" r="2"></circle>
+                <circle cx="12" cy="5" r="2"></circle>
+                <circle cx="12" cy="19" r="2"></circle>
+            </svg>
+        </button>
+
+        <div id="optionsMenu" style="display: none; flex-direction: column; gap: 4px; width: 100%;">
+            <button class="floating-btn" id="bOverlayChatBtn" type="button" title="Chat" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+            </button>
+            <button class="floating-btn" id="bMicBtn" type="button" title="Microphone" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="22"></line>
+                </svg>
+            </button>
+            <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <path d="M5 12h14M12 5l7 7-7 7"></path>
+                </svg>
+            </button>
+            <button class="floating-btn danger" id="bDisconnectBtn" type="button" title="End session" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16">
+                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                </svg>
+            </button>
         </div>
     </div>
     <script>
@@ -3799,6 +3803,42 @@ document.addEventListener('DOMContentLoaded', () => {
             document.documentElement.style.background = 'transparent';
             document.documentElement.style.overflow = 'hidden';
             document.body.classList.add('overlay-mode');
+
+            let lastBRoleDiagnostic = '';
+            const logBRoleDiagnostic = async () => {
+                try {
+                    const response = await fetch(AGENT_HEALTH);
+                    if (!response.ok) throw new Error(`Health check failed: ${response.status}`);
+                    const health = await response.json();
+                    const inSession = health.in_session === true;
+                    const fullNav = Boolean(document.querySelector('.sidebar'));
+                    const floatingControls = inSession
+                        && Boolean(document.getElementById('bSessionOverlay'))
+                        && document.getElementById('bSessionOverlay').style.display === 'flex';
+                    const state = health.state || (inSession ? 'CONNECTED' : 'IDLE');
+                    const diagnosticKey = `${state}:${inSession}:${fullNav}:${floatingControls}`;
+                    if (diagnosticKey === lastBRoleDiagnostic) return;
+                    lastBRoleDiagnostic = diagnosticKey;
+                    console.info(
+                        `[SESSION-ROLE] system_id=${health.system_id || 'unavailable'} ` +
+                        `session_id=${health.session_id || 'not-provided-by-protocol'} ` +
+                        `local_device=${health.local_device || health.system_id || 'unavailable'} ` +
+                        `remote_device=${health.remote_device || 'unavailable'} role=${health.role || 'REMOTE'} ` +
+                        `state=${state} isController=false isRemote=true in_session=${inSession} ` +
+                        `fullNav=${fullNav} floatingControls=${floatingControls}`
+                    );
+                } catch (error) {
+                    console.error('[SESSION-ROLE] Remote session diagnostics failed:', error);
+                }
+            };
+            void logBRoleDiagnostic();
+            setInterval(logBRoleDiagnostic, 1000);
+
+            window.toggleBOptions = function() {
+                const menu = document.getElementById('optionsMenu');
+                if (!menu) return;
+                menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+            };
         }
     </script>
 </body>

@@ -103,15 +103,37 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             // Keep both endpoints available on the existing local server so the dashboard can
             // come up without introducing a second backend or changing the startup flow.
             if matches!(path.as_str(), "/health" | "/health/" | "/local-health" | "/local-health/") {
-                let in_session = crate::status::LIVE.get()
-                    .and_then(|s| s.lock().ok())
-                    .map(|g| g.in_session)
-                    .unwrap_or(false);
-                let json = format!(
-                    "{{\"running\": true, \"system_id\":\"{}\", \"status\": \"online\", \"in_session\": {}}}",
-                    system_id, in_session
-                );
-                let response = Response::from_string(json)
+                let in_session = match crate::status::LIVE.get() {
+                    Some(status) => match status.lock() {
+                        Ok(status) => status.in_session,
+                        Err(_) => {
+                            let _ = request.respond(
+                                Response::from_string("agent status lock poisoned").with_status_code(500),
+                            );
+                            continue;
+                        }
+                    },
+                    None => false,
+                };
+                let peer_system_id = match crate::status::session_peer_system_id() {
+                    Ok(Some(peer_system_id)) if in_session => peer_system_id,
+                    Ok(_) => String::new(),
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
+                let response = Response::from_string(json!({
+                    "running": true,
+                    "system_id": system_id,
+                    "status": "online",
+                    "role": "REMOTE",
+                    "state": if in_session { "CONNECTED" } else { "IDLE" },
+                    "session_id": null,
+                    "local_device": system_id,
+                    "remote_device": peer_system_id,
+                    "in_session": in_session
+                }).to_string())
                     .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
                 continue;

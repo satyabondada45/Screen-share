@@ -35,28 +35,84 @@ Write-Host "Verifying source tree..."
 $IconPath = Join-Path $DesktopAgentDir "assets\icon.ico"
 $IconPng = Join-Path $DesktopAgentDir "assets\icon.png"
 if (Test-Path $IconPng) {
-    $iconValidate = @'
+    $iconScript = @"
 from PIL import Image
-import sys
-for path in [r"$IconPath", r"$IconPng"]:
-    if path.lower().endswith(".ico"):
-        try:
-            with Image.open(path) as img:
-                sizes = set(getattr(img, "info", {}).get("sizes", []))
-                if not sizes:
-                    sizes = {(img.size[0], img.size[1])}
-                print(f"{path}: {sorted(sizes)}")
-                if len(sizes) < 2:
-                    raise SystemExit(2)
-        except Exception:
-            raise SystemExit(2)
-'@
-    $iconValidate = $iconValidate.Replace('$IconPath', $IconPath).Replace('$IconPng', $IconPng)
-    $iconValid = python -c $iconValidate
-    if ($LASTEXITCODE -ne 0 -or $iconValid -match 'ERROR') {
-        Write-Host "DeskStream icon is invalid or single-size; regenerating a proper multi-resolution ICO from assets/icon.png..."
-        python -c "from PIL import Image; src=Image.open(r'$IconPng').convert('RGBA'); sizes=[16,24,32,48,64,128,256]; frames=[src.resize((s,s), Image.LANCZOS) for s in sizes]; frames[0].save(r'$IconPath', format='ICO', sizes=[(s,s) for s in sizes], append_images=frames[1:])"
-        if ($LASTEXITCODE -ne 0) { throw "Failed to regenerate the DeskStream ICO icon." }
+from pathlib import Path
+import struct
+icon_path = Path(r'$IconPath')
+png_path = Path(r'$IconPng')
+
+def parse_ico_sizes(path: Path):
+    try:
+        with Image.open(path) as img:
+            sizes = set(img.info.get('sizes', set()))
+            if not sizes:
+                sizes = {(img.size[0], img.size[1])}
+            return sizes
+    except Exception:
+        return set()
+
+sizes = parse_ico_sizes(icon_path)
+if len(sizes) < 2:
+    src = Image.open(png_path).convert('RGBA')
+    sizes_list = [16, 24, 32, 48, 64, 128, 256]
+    image_data = []
+    entries = []
+    for size in sizes_list:
+        image = src.resize((size, size), Image.Resampling.LANCZOS).convert('RGBA')
+        tmp_path = Path(r'C:\Temp\deskstream_ico_tmp.bmp')
+        image.save(tmp_path, format='BMP')
+        raw = tmp_path.read_bytes()
+        dib = raw[14:]
+        image_data.append(dib)
+        entries.append((0 if size == 256 else size, 0 if size == 256 else size, 0, 0, 1, 32, len(dib), 0))
+        tmp_path.unlink(missing_ok=True)
+
+    header = struct.pack('<HHH', 0, 1, len(entries))
+    payload = bytearray(header)
+    offset = 6 + len(entries) * 16
+    for w, h, color_count, reserved, planes, bit_count, image_size, _ in entries:
+        payload += struct.pack('<BBBBHHII', w, h, color_count, reserved, planes, bit_count, image_size, offset)
+        offset += image_size
+    for dib in image_data:
+        payload += dib
+    icon_path.write_bytes(payload)
+    print('regenerated')
+else:
+    print('valid')
+    print(sorted(sizes))
+"@
+
+    $iconStatus = python -c $iconScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to validate or regenerate the DeskStream ICO icon."
+    }
+
+    $icoSizes = python -c @"
+from PIL import Image
+from pathlib import Path
+import struct
+p = Path(r'$IconPath')
+try:
+    with p.open('rb') as fh:
+        data = fh.read()
+    reserved, image_type, count = struct.unpack_from('<HHH', data, 0)
+    sizes = []
+    offset = 6
+    for _ in range(count):
+        width, height, color_count, reserved_value, planes, bitcount, image_size, image_offset = struct.unpack_from('<BBBBHHII', data, offset)
+        if width == 0:
+            width = 256
+        if height == 0:
+            height = 256
+        sizes.append((width, height))
+        offset += 16
+    print(sorted(set(sizes)))
+except Exception as exc:
+    print(f'ERROR:{exc}')
+"@
+    if ($LASTEXITCODE -ne 0 -or $icoSizes -match 'ERROR' -or ($icoSizes -split ' ' | Where-Object { $_ -match '\d' }).Count -lt 2) {
+        throw "DeskStream icon is not a valid multi-resolution Windows ICO."
     }
 }
 

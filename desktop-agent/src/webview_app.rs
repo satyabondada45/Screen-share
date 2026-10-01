@@ -244,11 +244,11 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             let url = format!("{}?overlay=1", local_url);
                             let overlay_win = WindowBuilder::new()
                                 .with_title("DeskStream Overlay")
-                                .with_inner_size(LogicalSize::new(860_u32, 72_u32))
+                                .with_inner_size(LogicalSize::new(60_u32, 240_u32))
                                 .with_resizable(false)
                                 .with_decorations(false)
+                                .with_transparent(true)
                                 .with_always_on_top(true)
-                                .with_transparent(false)
                                 .build(target)
                                 .expect("Failed to build overlay window");
                             overlay_win.set_outer_position(tao::dpi::Position::Logical(tao::dpi::LogicalPosition::new(20_f64, 20_f64)));
@@ -256,11 +256,11 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             #[cfg(target_os = "windows")]
                             let builder = WebViewBuilder::new()
                                 .with_url(&url)
-                                .with_transparent(false)
+                                .with_transparent(true)
                                 .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required");
                                 
                             #[cfg(not(target_os = "windows"))]
-                            let builder = WebViewBuilder::new().with_url(&url).with_transparent(false);
+                            let builder = WebViewBuilder::new().with_url(&url).with_transparent(true);
                             
                             let proxy_clone = proxy.clone();
                             let overlay_wv = builder
@@ -287,7 +287,19 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         let _ = _webview.evaluate_script("if(typeof toggleBSessionChat === 'function') toggleBSessionChat();");
                     },
                     "toggle_b_mic" => {
-                        let _ = _webview.evaluate_script("if(typeof toggleBSessionMic === 'function') toggleBSessionMic();");
+                        if let Some(overlay) = overlay_webview.as_ref() {
+                            if let Err(error) = overlay.evaluate_script(
+                                "if(typeof toggleBSessionMic === 'function') toggleBSessionMic();",
+                            ) {
+                                eprintln!("[SESSION UI] Failed to toggle overlay microphone: {error}");
+                            }
+                        } else {
+                            if let Err(error) = _webview.evaluate_script(
+                                "if(typeof toggleBSessionMic === 'function') toggleBSessionMic();",
+                            ) {
+                                eprintln!("[SESSION UI] Failed to toggle microphone: {error}");
+                            }
+                        }
                     },
                     "request_b_reverse" => {
                         let _ = _webview.evaluate_script("if(typeof requestBSessionReverse === 'function') requestBSessionReverse();");

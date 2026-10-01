@@ -1068,9 +1068,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             println!("[Host] Approval response sent successfully (APPROVED)");
                             backend.log_session_start(&system_id);
                             println!("[Agent] Session APPROVED! Starting live video...");
-                            // Signal to the local health endpoint that B is now in an active session.
-                            crate::status::set_session_active(true);
-
                             // ====================================================
                             // CONNECTION STATE & STREAMING PIPELINE
                             // ====================================================
@@ -1317,8 +1314,21 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let last_clipboard_text = Arc::new(Mutex::new(String::new()));
                             let last_clip_recv = Arc::clone(&last_clipboard_text);
                             let last_clip_send = Arc::clone(&last_clipboard_text);
-                            if let Err(error) = crate::status::set_session_writer(Some(write_stream.clone())) {
-                                eprintln!("[SESSION UI] Failed to initialize session bridge: {}", error);
+                            if let Err(error) = crate::status::clear_session_peer_system_id() {
+                                eprintln!("[SESSION UI] Failed to clear stale peer identity: {}", error);
+                            }
+                            let session_ui_ready =
+                                match crate::status::set_session_writer(Some(write_stream.clone())) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        eprintln!("[SESSION UI] Failed to initialize session bridge: {}", error);
+                                        false
+                                    }
+                                };
+                            // Publish CONNECTED only after the real session writer is ready for
+                            // chat, microphone, reverse-control, and disconnect commands.
+                            if session_ui_ready {
+                                crate::status::set_session_active(true);
                             }
                             let write_stream_input = write_stream.clone();
 
@@ -2308,6 +2318,9 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             crate::status::set_session_active(false);
                             if let Err(error) = crate::status::set_session_writer(None) {
                                 eprintln!("[SESSION UI] Failed to clear session bridge: {}", error);
+                            }
+                            if let Err(error) = crate::status::clear_session_peer_system_id() {
+                                eprintln!("[SESSION UI] Failed to clear session peer identity: {}", error);
                             }
                             thread::sleep(Duration::from_millis(500));
                             }); // END OF THREAD

@@ -1,4 +1,4 @@
-
+﻿
 <!-- DIAGNOSTIC LOGS -->
 <script>
     console.log("[SESSION DEBUG]");
@@ -22,80 +22,6 @@
     </title>
 
     <style>
-        #reversePermissionDialog {
-            position: fixed;
-            inset: auto;
-            left: 20px;
-            bottom: 20px;
-            z-index: 11000;
-            width: min(360px, calc(100vw - 40px));
-        }
-
-        #fileTransferChoiceDialog {
-            position: fixed;
-            inset: 0;
-            z-index: 10001;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-            background: rgba(15, 23, 42, 0.35);
-        }
-
-        .file-transfer-choice-card {
-            width: min(360px, 100%);
-            padding: 20px;
-            border-radius: 14px;
-            background: #fff;
-            box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22);
-        }
-
-        .file-transfer-choice-actions {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: flex-end;
-            gap: 8px;
-            margin-top: 16px;
-        }
-
-        #folderDestinationDialog {
-            position: fixed;
-            inset: 0;
-            z-index: 10002;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-            background: rgba(15, 23, 42, 0.35);
-        }
-
-        .reverse-permission-card {
-            padding: 16px;
-            border: 1px solid #e2e8f0;
-            border-radius: 14px;
-            background: #fff;
-            color: #111827;
-            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
-        }
-
-        .reverse-permission-card h2 {
-            margin: 0 0 8px;
-            font-size: 1rem;
-        }
-
-        .reverse-permission-card p {
-            margin: 0 0 14px;
-            color: #4b5563;
-            font-size: 0.9rem;
-            line-height: 1.45;
-        }
-
-        .reverse-permission-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-        }
-
         :root {
             --bg-dark: #000;
             --header-bg: #fff;
@@ -126,7 +52,130 @@
 
         /* HEADER */
         .viewer-header {
-            display: none;
+            height: 54px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 16px;
+            flex-shrink: 0;
+            z-index: 100;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            color: var(--text-dark);
+            font-weight: 800;
+            font-size: 1.1rem;
+            letter-spacing: -0.02em;
+        }
+
+        .device-info {
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border);
+            padding-left: 20px;
+        }
+
+        .device-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .device-meta {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 2px;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--online);
+        }
+
+        .dot-text {
+            color: var(--online);
+            font-weight: 500;
+        }
+
+        /* HEADER ACTIONS */
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .action-group {
+            display: flex;
+            gap: 8px;
+            margin-right: 16px;
+            border-right: 1px solid var(--border);
+            padding-right: 16px;
+        }
+
+        .btn {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            padding: 4px 12px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            color: var(--text-dark);
+            cursor: pointer;
+            transition: 0.15s;
+            text-decoration: none;
+            min-width: 60px;
+        }
+
+        .btn:hover {
+            background: #f9fafb;
+            border-color: #9ca3af;
+        }
+
+        .btn svg {
+            margin-bottom: 2px;
+        }
+
+        .btn-end {
+            border-color: var(--accent);
+            color: var(--accent);
+            flex-direction: row;
+            gap: 6px;
+            padding: 6px 16px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .btn-end:hover {
+            background: #fef2f2;
+            border-color: #dc2626;
+            color: #dc2626;
+        }
+
+        .btn-end svg {
+            margin-bottom: 0;
         }
 
         .window-controls {
@@ -167,96 +216,38 @@
         /* FLOATING CONTROLS */
         .floating-controls {
             position: absolute;
-            left: 50%;
-            top: 18px;
-            transform: translateX(-50%);
+            bottom: 24px;
+            right: 24px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 10px;
-            background: rgba(255, 255, 255, 0.96);
-            border: 1px solid rgba(148, 163, 184, 0.65);
-            border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
-            z-index: 90;
-            pointer-events: auto;
-            user-select: none;
-            transition: box-shadow 0.15s ease;
-        }
-
-        .floating-controls.dragging {
-            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
-        }
-
-        .floating-drag-handle {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 26px;
-            min-width: 26px;
-            height: 30px;
-            padding: 0;
-            border-right: 1px solid #e5e7eb;
-            border-radius: 10px 0 0 10px;
-            cursor: grab;
-            background: rgba(248, 250, 252, 0.8);
-            touch-action: none;
-        }
-
-        .floating-drag-handle:active {
-            cursor: grabbing;
-        }
-
-        .floating-drag-handle svg {
-            width: 14px;
-            height: 14px;
-            margin: 0;
+            gap: 4px;
+            padding: 6px;
+            z-index: 50;
         }
 
         .floating-btn {
-            display: inline-flex;
-            flex-direction: row;
+            display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 6px;
             background: transparent;
-            border: 1px solid transparent;
-            padding: 7px 10px;
-            min-height: 32px;
-            font-size: 0.72rem;
-            font-weight: 600;
+            border: none;
+            padding: 4px 10px;
+            font-size: 0.7rem;
+            font-weight: 500;
             color: var(--text-dark);
             cursor: pointer;
-            border-radius: 10px;
-            line-height: 1;
-            white-space: nowrap;
-            transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+            border-radius: 6px;
         }
 
         .floating-btn:hover {
-            background: #f8fafc;
-            border-color: #e2e8f0;
-        }
-
-        .floating-btn:active {
-            transform: translateY(1px);
+            background: #f3f4f6;
         }
 
         .floating-btn svg {
-            width: 14px;
-            height: 14px;
-            margin: 0;
-        }
-
-        .floating-btn.danger {
-            border-color: rgba(239, 68, 68, 0.3);
-            color: var(--accent);
-            background: rgba(254, 242, 242, 0.9);
-        }
-
-        .floating-btn.danger:hover {
-            background: rgba(254, 226, 226, 0.95);
-            border-color: rgba(239, 68, 68, 0.45);
+            margin-bottom: 2px;
         }
 
         /* SESSION PANEL */
@@ -377,18 +368,6 @@
             background: white;
         }
 
-        .chat-typing {
-            display: none;
-            padding: 0 12px 8px;
-            color: var(--text-muted);
-            font-size: 0.75rem;
-            font-style: italic;
-        }
-
-        .chat-typing.visible {
-            display: block;
-        }
-
         .msg {
             padding: 8px 12px;
             border-radius: 8px;
@@ -474,12 +453,9 @@
 window.addEventListener('DOMContentLoaded', () => {
     const params = new URLSearchParams(window.location.search);
     const id = params.get('id');
-    const localUsername = localStorage.getItem('ds_username');
-    // For A-side (Controller), the remote target's name is passed in target_name
-    const targetName = params.get('target_name');
-    const displayAlias = targetName || localUsername || 'Remote Device';
+    const username = localStorage.getItem('ds_username') || 'Local User';
     
-    document.querySelectorAll('.username-span').forEach(el => el.textContent = displayAlias);
+    document.querySelectorAll('.username-span').forEach(el => el.textContent = username);
     
     // Hide window controls if integrated
     if (params.get('integrated') === '1') {
@@ -495,20 +471,32 @@ window.addEventListener('DOMContentLoaded', () => {
 
     <div class="viewer-header">
         <div class="header-left">
-            <a href="dashboard.html" class="logo">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-accent">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-                    <line x1="8" y1="21" x2="16" y2="21"></line>
-                    <line x1="12" y1="17" x2="12" y2="21"></line>
+            <a href="../dashboard.php" class="logo">
+                <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
+                    <path d="M6 16L16 6L20 10L12 18L6 16Z" fill="#ef4444" />
+                    <path d="M12 22L22 12L26 16L18 24L12 22Z" fill="#dc2626" />
+                    <path d="M16 28L26 18L30 22L20 32L16 28Z" fill="#b91c1c" />
                 </svg>
                 DeskStream
             </a>
             <div class="device-info">
-                <div class="device-name" id="headerDeviceName">Remote Device</div>
+                <div class="device-name" style="display: flex; align-items: center; gap: 8px;">
+                    <span style="color: #94a3b8; font-weight: normal;"><span class="username-span">Local User</span></span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2">
+                        <path d="M5 12h14M12 5l7 7-7 7"/>
+                    </svg>
+                    <span style="color: #ef4444; font-size: 0.85em; letter-spacing: 1px;">CONTROLLING</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2">
+                        <path d="M5 12h14M12 5l7 7-7 7"/>
+                    </svg>
+                    <span><span class="device-name-span">Remote Device</span></span>
+                </div>
                 <div class="device-meta">
-                    <div class="dot"></div>
-                    <span class="dot-text">Connected</span>
-                    <span id="headerDeviceId"></span>
+                    Full Control <span style="color:#d1d5db;">|</span>
+                    <span id="headerDeviceIP"><span class="ip-span">0.0.0.0</span></span> <span
+                        style="color:#d1d5db;">|</span>
+                    <span class="dot" id="headerConnDot"></span> <span class="dot-text"
+                        id="headerConnText">Connecting...</span>
                 </div>
             </div>
         </div>
@@ -521,30 +509,40 @@ window.addEventListener('DOMContentLoaded', () => {
                     </svg>
                     Chat
                 </button>
-                <button class="btn" id="micBtn" onclick="toggleMic()">
+                <button class="btn" id="fileBtn" onclick="document.getElementById('fileUploadInput').click()">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
-                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                        <polyline points="13 2 13 9 20 9"></polyline>
                     </svg>
-                    Mic
+                    File Transfer
                 </button>
-                <button class="btn" id="reverseBtn" onclick="requestReverseControl()">
+                <button class="btn" id="settingsBtn"
+                    onclick="document.getElementById('sessionPanel').classList.toggle('open')">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path
+                            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
+                        </path>
                     </svg>
-                    Reverse
+                    Settings
                 </button>
             </div>
-
-            <button class="btn btn-end" id="endSessionBtn" onclick="endSessionAndRedirect(event)">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+            <a href="#" class="btn-end" id="endSessionBtn" onclick="endSessionAndRedirect(event)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                 </svg>
                 End Session
-            </button>
+            </a>
+            
+            <div class="window-controls">
+                <span>—</span>
+                <span>□</span>
+                <span>×</span>
+            </div>
+            
         </div>
     </div>
+
     <div class="stream-container" id="stream-box">
         <div id="hud" class="hud-badge">CONNECTING...</div>
 
@@ -554,6 +552,25 @@ window.addEventListener('DOMContentLoaded', () => {
         </div>
 
         <canvas id="remoteCanvas" tabindex="0"></canvas>
+
+        <div class="floating-controls">
+            <button class="floating-btn" id="fullscreenBtn" onclick="toggleFullscreen()">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path
+                        d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3">
+                    </path>
+                </svg>
+                Fullscreen
+            </button>
+            <button class="floating-btn" onclick="document.getElementById('sessionPanel').classList.toggle('open')">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="1"></circle>
+                    <circle cx="12" cy="5" r="1"></circle>
+                    <circle cx="12" cy="19" r="1"></circle>
+                </svg>
+                More
+            </button>
+        </div>
 
         <!-- Session / Settings Panel -->
         <div class="session-panel" id="sessionPanel">
@@ -619,7 +636,7 @@ window.addEventListener('DOMContentLoaded', () => {
             <div class="panel-content" id="panelContentTransfers"
                 style="display:none; height: 350px; overflow-y: auto;">
                 <div style="margin-bottom: 15px;">
-                    <button onclick="showFileTransferChoice()"
+                    <button onclick="document.getElementById('fileUploadInput').click()"
                         style="width: 100%; padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
                         Send File to Host
                     </button>
@@ -630,30 +647,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
             <!-- Hidden File Input -->
             <input type="file" id="fileUploadInput" multiple style="display: none;" onchange="handleFileInput(event)">
-            <input type="file" id="folderUploadInput" webkitdirectory directory multiple style="display: none;" onchange="handleFileInput(event)">
 
-        </div>
-
-        <div id="fileTransferChoiceDialog" role="dialog" aria-modal="true" aria-labelledby="fileTransferChoiceTitle">
-            <div class="file-transfer-choice-card">
-                <h2 id="fileTransferChoiceTitle">Choose what to send</h2>
-                <div class="file-transfer-choice-actions">
-                    <button type="button" class="btn" onclick="chooseTransferSource('file')">Select File</button>
-                    <button type="button" class="btn btn-primary" onclick="chooseTransferSource('folder')">Select Folder</button>
-                    <button type="button" class="btn" onclick="closeFileTransferChoice()">Cancel</button>
-                </div>
-            </div>
-        </div>
-
-        <div id="folderDestinationDialog" role="dialog" aria-modal="true" aria-labelledby="folderDestinationTitle">
-            <div class="file-transfer-choice-card">
-                <h2 id="folderDestinationTitle">Choose a folder for the received files</h2>
-                <p>Folder paths will be created only inside the destination you choose.</p>
-                <div class="file-transfer-choice-actions">
-                    <button type="button" class="btn btn-primary" onclick="selectFolderDestination()">Choose Destination</button>
-                    <button type="button" class="btn" onclick="cancelFolderDestination()">Cancel</button>
-                </div>
-            </div>
         </div>
 
         <!-- Chat Panel -->
@@ -663,32 +657,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 <span class="chat-close" id="chatClose">&times;</span>
             </div>
             <div class="chat-messages" id="chatMessages"></div>
-            <div class="chat-typing" id="chatTypingIndicator" aria-live="polite">Remote user is typing…</div>
             <div class="chat-input">
                 <input type="text" id="chatInput" placeholder="Type a message..." autocomplete="off">
                 <button type="button" id="sendChatBtn">Send</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="reversePermissionDialog" role="alertdialog" aria-modal="false" aria-labelledby="reversePermissionTitle"
-        style="display:none;">
-        <div class="reverse-permission-card">
-            <h2 id="reversePermissionTitle">Reverse control requested</h2>
-            <p>Allow the remote device to take control of this computer?</p>
-            <div class="reverse-permission-actions">
-                <button type="button" id="reverseRejectBtn" class="btn">Decline</button>
-                <button type="button" id="reverseAcceptBtn" class="btn btn-primary">Accept</button>
-            </div>
-        </div>
-    </div>
-    <div id="sessionEndedDialog" role="dialog" aria-modal="true" aria-labelledby="sessionEndedTitle"
-        style="display:none;position:fixed;inset:0;z-index:1100;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
-        <div style="width:min(380px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
-            <h2 id="sessionEndedTitle" style="margin:0 0 10px;font-size:1.1rem;">Session Ended</h2>
-            <p style="margin:0 0 20px;color:#4b5563;">This session has ended.</p>
-            <div style="display:flex;justify-content:flex-end;">
-                <button type="button" class="btn btn-primary" onclick="dismissSessionEnded()">OK</button>
             </div>
         </div>
     </div>
@@ -705,31 +676,9 @@ window.addEventListener('DOMContentLoaded', () => {
         console.log("[SECURITY] secure:", window.isSecureContext);
         console.log("[SECURITY] VideoDecoder:", ("VideoDecoder" in window));
 
-        const SESSION_PARAMS = new URLSearchParams(window.location.search);
-        const DEVICE_ID = SESSION_PARAMS.get('id');
-        const REQUESTER_SYSTEM_ID = SESSION_PARAMS.get('requester_system_id') || '';
-        const DIAGNOSTIC_SYSTEM_ID = REQUESTER_SYSTEM_ID;
+        const DEVICE_ID = new URLSearchParams(window.location.search).get('id');
 
         const WS_URL = "wss://admin.friendssoftwaresolutions.in";
-
-        // TEMPORARY SESSION DIAGNOSTICS: sent through the existing WebView IPC only.
-        function sessionDebug(event, fields = {}) {
-            if (!window.ipc || typeof window.ipc.postMessage !== 'function') return;
-            window.ipc.postMessage(JSON.stringify({
-                type: 'session_debug',
-                event,
-                system_id: DIAGNOSTIC_SYSTEM_ID,
-                target_system_id: DEVICE_ID || '',
-                role: 'CONTROLLER',
-                video_direction: 'B->A',
-                ...fields
-            }));
-        }
-
-        sessionDebug('A_START');
-        sessionDebug('ROLE');
-        sessionDebug('A_WS_CONFIG', { endpoint: WS_URL });
-        sessionDebug('A_TARGET_ID');
 
 
         /* ============================================================
@@ -761,12 +710,11 @@ window.addEventListener('DOMContentLoaded', () => {
         let renderHeight = 0;
 
         let videoFrameCount = 0;
-        let diagnosticType13Count = 0;
 
         let videoDecodeBusy = false;
 
         let videoDecoder = null;
-        const MAX_DECODER_QUEUE = 12;
+        const MAX_DECODER_QUEUE = 30;
         const MAX_RX_BUFFER_BYTES = 12 * 1024 * 1024;
         const videoTimingByTimestamp = new Map();
         let lastLatencyLogAt = 0;
@@ -779,11 +727,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
         let nextAudioTime = 0;
 
-
-        let microphoneStream = null;
-        let microphoneContext = null;
-        let microphoneSource = null;
-        let microphoneProcessor = null;
+        let isAudioEnabled = false;
 
 
         /* RECORDING */
@@ -806,9 +750,8 @@ window.addEventListener('DOMContentLoaded', () => {
         const hud =
             document.getElementById("hud");
 
-
-        const micBtn =
-            document.getElementById("micBtn");
+        const audioBtn =
+            document.getElementById("audioBtn");
 
         const chatBtn =
             document.getElementById("chatBtn");
@@ -833,93 +776,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
         const chatMessages =
             document.getElementById("chatMessages");
-        const chatHistory = [];
-        let nextChatMessageId = 0;
-        let chatPacketDiagnosticLogged = false;
-        let localChatTyping = false;
-        let remoteChatTyping = false;
-        let chatTypingIdleTimer = null;
-        let reverseRequestPending = false;
-        let reverseTransitionPending = false;
-        let reverseRequestOutstanding = false;
-        let sessionEndedDialogShown = false;
-        let sessionWasEstablished = false;
 
         const dropOverlay =
             document.getElementById("dropOverlay");
 
-        const floatingControls =
-            document.getElementById("floatingControls");
-
-        const toolbarHandle =
-            document.getElementById("toolbarHandle");
-
-        let toolbarDragState = null;
-
-        function clamp(value, min, max) {
-            return Math.min(Math.max(value, min), max);
-        }
-
-        function positionFloatingToolbar() {
-            if (!floatingControls || !streamBox) return;
-            const streamRect = streamBox.getBoundingClientRect();
-            if (!streamRect.width || !streamRect.height) return;
-            const maxLeft = Math.max(12, streamRect.width - floatingControls.offsetWidth - 12);
-            const maxTop = Math.max(12, streamRect.height - floatingControls.offsetHeight - 12);
-            floatingControls.style.left = `${clamp((streamRect.width - floatingControls.offsetWidth) / 2, 12, maxLeft)}px`;
-            floatingControls.style.top = `${clamp(14, 12, maxTop)}px`;
-            floatingControls.style.transform = 'none';
-        }
-
-        function startToolbarDrag(event) {
-            if (!floatingControls || !streamBox || !toolbarHandle) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const streamRect = streamBox.getBoundingClientRect();
-            const controlRect = floatingControls.getBoundingClientRect();
-            toolbarDragState = {
-                startX: event.clientX,
-                startY: event.clientY,
-                originLeft: controlRect.left - streamRect.left,
-                originTop: controlRect.top - streamRect.top
-            };
-            floatingControls.classList.add("dragging");
-        }
-
-        function moveToolbarDrag(event) {
-            if (!toolbarDragState || !floatingControls || !streamBox) return;
-            const streamRect = streamBox.getBoundingClientRect();
-            const maxLeft = Math.max(12, streamRect.width - floatingControls.offsetWidth - 12);
-            const maxTop = Math.max(12, streamRect.height - floatingControls.offsetHeight - 12);
-            const dx = event.clientX - toolbarDragState.startX;
-            const dy = event.clientY - toolbarDragState.startY;
-            const left = clamp(toolbarDragState.originLeft + dx, 12, maxLeft);
-            const top = clamp(toolbarDragState.originTop + dy, 12, maxTop);
-            floatingControls.style.left = `${left}px`;
-            floatingControls.style.top = `${top}px`;
-            floatingControls.style.transform = 'none';
-        }
-
-        function endToolbarDrag() {
-            toolbarDragState = null;
-            floatingControls?.classList.remove("dragging");
-        }
-
-        if (toolbarHandle) {
-            toolbarHandle.addEventListener("pointerdown", startToolbarDrag);
-        }
-
-        window.addEventListener("pointermove", moveToolbarDrag);
-        window.addEventListener("pointerup", endToolbarDrag);
-        window.addEventListener("pointercancel", endToolbarDrag);
-        window.addEventListener("resize", positionFloatingToolbar);
-
-        if (streamBox) {
-            const observer = new ResizeObserver(() => positionFloatingToolbar());
-            observer.observe(streamBox);
-        }
-
-        positionFloatingToolbar();
 
         /* ============================================================
            HUD
@@ -995,149 +855,31 @@ window.addEventListener('DOMContentLoaded', () => {
                 chatPanel.classList.contains("open")
             ) {
 
-                renderChatHistory();
-                renderRemoteChatTyping();
                 setTimeout(
                     () => chatInput.focus(),
                     100
                 );
-            } else {
-                stopLocalChatTyping();
+
             }
 
         }
 
-        function renderChatMessage(message) {
-            const div = document.createElement("div");
-            div.className = "msg " + message.type;
-            div.dataset.messageId = String(message.id);
-            div.textContent = message.text;
-            chatMessages.appendChild(div);
-            if (message.type === "sent") {
-                logAChatDiagnostic("A_CHAT_RENDER_MESSAGE", {
-                    message_id: String(message.id),
-                    sender: "local",
-                    dom_count: String(chatMessages.children.length),
-                    rendered: String(div.isConnected)
-                });
-            }
-        }
-
-        function logAChatDiagnostic(event, details = {}) {
-            console.info(`[A CHAT DIAG] ${event}`, details);
-            if (typeof sessionDebug === "function") {
-                sessionDebug(event, details);
-            }
-        }
-
-        function renderChatHistory() {
-            chatMessages.replaceChildren();
-            for (const message of chatHistory) {
-                renderChatMessage(message);
-            }
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        }
 
         function appendMessage(type, text) {
-            const message = {
-                id: ++nextChatMessageId,
-                type,
-                text
-            };
-            const isLocalSend = type === "sent";
-            if (isLocalSend) {
-                logAChatDiagnostic("A_CHAT_LOCAL_APPEND_START", {
-                    message_id: String(message.id),
-                    sender: "local",
-                    state_count_before: String(chatHistory.length),
-                    dom_count_before: String(chatMessages.children.length),
-                    panel_open: String(chatPanel.classList.contains("open"))
-                });
-            }
-            try {
-                chatHistory.push(message);
-                if (chatHistory.length > 500) {
-                    chatHistory.shift();
-                    chatMessages.firstElementChild?.remove();
-                }
-                if (chatPanel.classList.contains("open")) {
-                    renderChatMessage(message);
-                    chatMessages.scrollTop = chatMessages.scrollHeight;
-                }
-                if (isLocalSend) {
-                    const renderedMessage = chatMessages.querySelector(
-                        `[data-message-id="${message.id}"]`
-                    );
-                    logAChatDiagnostic("A_CHAT_LOCAL_APPEND_SUCCESS", {
-                        message_id: String(message.id),
-                        sender: "local",
-                        state_count_after: String(chatHistory.length),
-                        dom_count_after: String(chatMessages.children.length),
-                        rendered: String(Boolean(renderedMessage)),
-                        panel_open: String(chatPanel.classList.contains("open"))
-                    });
-                }
-            } catch (error) {
-                if (isLocalSend) {
-                    logAChatDiagnostic("A_CHAT_LOCAL_APPEND_FAILED", {
-                        message_id: String(message.id),
-                        sender: "local",
-                        state_count_after: String(chatHistory.length),
-                        dom_count_after: String(chatMessages.children.length),
-                        error: error.name || "Error"
-                    });
-                }
-                throw error;
-            }
-        }
 
-        window.addEventListener("chat_message_received", event => {
-            console.info(`[CHAT UI] direction=B->A event_received=true panel_open=${chatPanel.classList.contains("open")} characters=${event.detail.text.length}`);
-            chatPanel.classList.add("open");
-            appendMessage("recv", event.detail.text);
-        });
+            const div =
+                document.createElement("div");
 
-        function renderRemoteChatTyping() {
-            document.getElementById("chatTypingIndicator")
-                ?.classList.toggle("visible", remoteChatTyping && chatPanel.classList.contains("open"));
-        }
+            div.className =
+                "msg " + type;
 
-        function sendChatTyping(typing) {
-            if (localChatTyping === typing) return;
-            if (!isSocketOpen()) {
-                localChatTyping = false;
-                return;
-            }
-            try {
-                ws.send(new Uint8Array([18, typing ? 1 : 0]));
-                localChatTyping = typing;
-            } catch (error) {
-                localChatTyping = false;
-                console.error("[CHAT TYPING] Send failed:", error);
-            }
-        }
+            div.textContent = text;
 
-        function stopLocalChatTyping() {
-            if (chatTypingIdleTimer) {
-                clearTimeout(chatTypingIdleTimer);
-                chatTypingIdleTimer = null;
-            }
-            sendChatTyping(false);
-        }
+            chatMessages.appendChild(div);
 
-        function updateLocalChatTyping() {
-            if (!chatInput.value.trim()) {
-                stopLocalChatTyping();
-                return;
-            }
-            sendChatTyping(true);
-            if (chatTypingIdleTimer) clearTimeout(chatTypingIdleTimer);
-            chatTypingIdleTimer = setTimeout(stopLocalChatTyping, 900);
-        }
+            chatMessages.scrollTop =
+                chatMessages.scrollHeight;
 
-        function setRemoteChatTyping(typing) {
-            remoteChatTyping = typing;
-            renderRemoteChatTyping();
         }
 
 
@@ -1146,18 +888,11 @@ window.addEventListener('DOMContentLoaded', () => {
             const msg =
                 chatInput.value.trim();
 
-            logAChatDiagnostic("A_CHAT_SEND_START", {
-                message_length: String(msg.length),
-                panel_open: String(chatPanel.classList.contains("open"))
-            });
-
             if (!msg) {
 
                 return;
 
             }
-
-            stopLocalChatTyping();
 
             if (!isSocketOpen()) {
 
@@ -1172,9 +907,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
             const msgBytes =
                 new TextEncoder().encode(msg);
-            logAChatDiagnostic("A_CHAT_SEND_TEXT_CREATED", {
-                message_length: String(msgBytes.length)
-            });
 
             if (msgBytes.length > 65535) {
 
@@ -1186,53 +918,26 @@ window.addEventListener('DOMContentLoaded', () => {
 
             const pkt =
                 new Uint8Array(
-                    4 + msgBytes.length
+                    3 + msgBytes.length
                 );
 
             pkt[0] = 16;
-            pkt[1] = 0;
-            pkt[2] =
+
+            pkt[1] =
                 (msgBytes.length >> 8) & 0xff;
 
-            pkt[3] =
+            pkt[2] =
                 msgBytes.length & 0xff;
 
             pkt.set(
                 msgBytes,
-                4
+                3
             );
 
             try {
-                console.info(
-                    `[CHAT SEND START] time=${Date.now()} bytes=${msgBytes.length} ` +
-                    `videoPackets=${streamStats.received_packets} decodedFrames=${browserPerf.decodedFrames} ` +
-                    `renderedFrames=${browserPerf.renderedFrames} lastVideoAt=${videoDiagnostics.lastPacketAt || "none"} ` +
-                    `lastDecodedAt=${videoDiagnostics.lastDecodedAt || "none"} ` +
-                    `lastRenderedAt=${videoDiagnostics.lastRenderedAt || "none"} ` +
-                    `receiveLoopAlive=${ws.readyState === WebSocket.OPEN} ` +
-                    `parserBufferBytes=${wsRxBuffer.length}`
-                );
-                try {
-                    ws.send(pkt);
-                    logAChatDiagnostic("A_CHAT_WS_SEND_SUCCESS", {
-                        packet_type: "16",
-                        message_length: String(msgBytes.length)
-                    });
-                } catch (error) {
-                    logAChatDiagnostic("A_CHAT_WS_SEND_FAILED", {
-                        packet_type: "16",
-                        message_length: String(msgBytes.length),
-                        error: error.name || "Error"
-                    });
-                    throw error;
-                }
-                chatVideoSnapshot = {
-                    sentAt: Date.now(),
-                    packetCountBefore: streamStats.received_packets
-                };
-                console.info(`[CHAT TYPE 16 SENT] bytes=${pkt.length} payloadBytes=${msgBytes.length}`);
 
-                chatPanel.classList.add("open");
+                ws.send(pkt);
+
                 appendMessage(
                     "sent",
                     msg
@@ -1241,9 +946,6 @@ window.addEventListener('DOMContentLoaded', () => {
                 chatInput.value = "";
 
             } catch (error) {
-                logAChatDiagnostic("A_CHAT_SEND_FAILED", {
-                    error: error.name || "Error"
-                });
 
                 console.error(
                     "[CHAT] Send failed:",
@@ -1324,128 +1026,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
             }
 
-        }
-
-        async function toggleMicrophone() {
-            if (microphoneStream) {
-                stopMicrophone();
-                return;
-            }
-            if (!isSocketOpen()) {
-                console.error("[MIC] Cannot enable microphone without an active session.");
-                return;
-            }
-            try {
-                microphoneStream = await navigator.mediaDevices.getUserMedia({
-                    audio: { channelCount: 1 },
-                    video: false
-                });
-                microphoneContext = new (window.AudioContext || window.webkitAudioContext)();
-                await microphoneContext.resume();
-                microphoneSource = microphoneContext.createMediaStreamSource(microphoneStream);
-                microphoneProcessor = microphoneContext.createScriptProcessor(2048, 1, 1);
-                const silentOutput = microphoneContext.createGain();
-                silentOutput.gain.value = 0;
-                microphoneProcessor.onaudioprocess = event => {
-                    if (!microphoneStream || !isSocketOpen()) return;
-                    const input = event.inputBuffer.getChannelData(0);
-                    const bytes = input.length * 4;
-                    const packet = new Uint8Array(11 + bytes);
-                    const view = new DataView(packet.buffer);
-                    packet[0] = 17;
-                    view.setUint32(1, bytes, false);
-                    view.setUint32(5, microphoneContext.sampleRate, false);
-                    view.setUint16(9, 1, false);
-                    for (let index = 0; index < input.length; index++) {
-                        view.setFloat32(11 + index * 4, input[index], true);
-                    }
-                    ws.send(packet);
-                };
-                microphoneSource.connect(microphoneProcessor);
-                microphoneProcessor.connect(silentOutput);
-                silentOutput.connect(microphoneContext.destination);
-                micBtn.textContent = "Mic On";
-                console.log("[MIC] TYPE 17 microphone transmission enabled.");
-            } catch (error) {
-                stopMicrophone();
-                console.error("[MIC] Failed to enable microphone:", error);
-            }
-        }
-
-        function stopMicrophone() {
-            if (microphoneProcessor) {
-                microphoneProcessor.onaudioprocess = null;
-                microphoneProcessor.disconnect();
-                microphoneProcessor = null;
-            }
-            if (microphoneSource) {
-                microphoneSource.disconnect();
-                microphoneSource = null;
-            }
-            if (microphoneStream) {
-                microphoneStream.getTracks().forEach(track => track.stop());
-                microphoneStream = null;
-            }
-            if (microphoneContext) {
-                void microphoneContext.close();
-                microphoneContext = null;
-            }
-            if (micBtn) micBtn.textContent = "Mic Off";
-        }
-
-        function receiveReverseRequest() {
-            if (reverseRequestPending || !isSocketOpen() || !websocketAuthenticated) return;
-            reverseRequestPending = true;
-            document.getElementById("reversePermissionDialog").style.display = "flex";
-        }
-
-        function requestReverseControl() {
-            if (reverseRequestOutstanding || !isSocketOpen() || !websocketAuthenticated) {
-                return;
-            }
-            try {
-                ws.send(new Uint8Array([30]));
-                reverseRequestOutstanding = true;
-                console.info("[REVERSE] Request sent. Waiting for the remote user to approve.");
-                addActivityLog("Reverse-control request sent.");
-            } catch (error) {
-                console.error("[REVERSE] Failed to send request:", error);
-                addActivityLog("Could not send the reverse-control request.");
-            }
-        }
-
-        function answerReverseRequest(accepted) {
-            if (!reverseRequestPending || !isSocketOpen()) return;
-            try {
-                ws.send(new Uint8Array([31, accepted ? 1 : 0]));
-            } catch (error) {
-                console.error("[REVERSE] Failed to send permission decision:", error);
-                return;
-            }
-            reverseRequestPending = false;
-            document.getElementById("reversePermissionDialog").style.display = "none";
-            if (accepted) {
-                reverseTransitionPending = true;
-                window.parent.postMessage({
-                    type: "reverse_remote_approved",
-                    requester_system_id: DEVICE_ID
-                }, "*");
-            }
-        }
-
-        function showSessionEnded() {
-            if (sessionEndedDialogShown) return;
-            sessionEndedDialogShown = true;
-            document.getElementById("sessionEndedDialog").style.display = "flex";
-        }
-
-        function dismissSessionEnded() {
-            const params = new URLSearchParams(window.location.search);
-            if (params.get("integrated") === "1") {
-                window.parent.postMessage({ type: "end_integrated_session", targetId: params.get("id") }, "*");
-                return;
-            }
-            window.location.href = "../dashboard.php";
         }
 
 
@@ -1795,8 +1375,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
         let decoderState = DecoderState.UNCONFIGURED;
         let currentStreamState = "CONNECTING";
-        let connectedMessageSent = false;
-        let lastControllerRoleDiagnostic = "";
         let streamStats = {
             received_packets: 0,
             received_bytes: 0,
@@ -1824,38 +1402,6 @@ window.addEventListener('DOMContentLoaded', () => {
             maxWsRxBuffer: 0,
             lastReport: performance.now()
         };
-        const videoDiagnostics = {
-            lastPacketAt: 0,
-            lastPacketType: null,
-            lastPacketLength: 0,
-            lastIdrAt: 0,
-            lastDecodedAt: 0,
-            lastRenderedAt: 0,
-            lastDecoderError: null
-        };
-        let lastKeyDeltaLogAt = 0;
-
-        function logControllerRoleDiagnostic() {
-            const connected = websocketAuthenticated && sessionWasEstablished
-                && currentStreamState === "STREAM_ACTIVE";
-            let fullNav = false;
-            try {
-                const sidebar = window.parent.document.querySelector(".sidebar");
-                fullNav = Boolean(sidebar && sidebar.getClientRects().length);
-            } catch (error) {
-                console.warn("[SESSION-ROLE] Could not inspect controller navigation:", error);
-            }
-            const state = connected ? "CONNECTED" : currentStreamState;
-            const diagnosticKey = `${state}:${fullNav}`;
-            if (diagnosticKey === lastControllerRoleDiagnostic) return;
-            lastControllerRoleDiagnostic = diagnosticKey;
-            console.info(
-                `[SESSION-ROLE] system_id=${REQUESTER_SYSTEM_ID || "unavailable"} ` +
-                `session_id=not-carried-by-data-plane local_device=${REQUESTER_SYSTEM_ID || "unavailable"} ` +
-                `remote_device=${DEVICE_ID || "unavailable"} role=CONTROLLER state=${state} ` +
-                `isController=true isRemote=false in_session=${connected} fullNav=${fullNav} floatingControls=false`
-            );
-        }
 
         function recordVideoMetrics(now) {
             if (now - browserPerf.lastReport < 1000) {
@@ -1875,12 +1421,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 `renderFPS=${browserPerf.renderWindow} avgDecodeQueue=${browserPerf.queueSamples ? Math.round(browserPerf.queueSum / browserPerf.queueSamples) : 0} ` +
                 `maxDecodeQueue=${browserPerf.maxQueue} wsRxBufferMax=${browserPerf.maxWsRxBuffer} ` +
                 `staleFrames=${browserPerf.staleFramesDiscarded} idrRecovery=${browserPerf.idrRecoveryCount} ` +
-                `currentDecodeQueue=${decoderQueue} ` +
-                `lastPacketAgeMs=${videoDiagnostics.lastPacketAt ? Date.now() - videoDiagnostics.lastPacketAt : "n/a"} ` +
-                `lastIdrAgeMs=${videoDiagnostics.lastIdrAt ? Date.now() - videoDiagnostics.lastIdrAt : "n/a"} ` +
-                `lastDecodedAgeMs=${videoDiagnostics.lastDecodedAt ? Date.now() - videoDiagnostics.lastDecodedAt : "n/a"} ` +
-                `lastRenderedAgeMs=${videoDiagnostics.lastRenderedAt ? Date.now() - videoDiagnostics.lastRenderedAt : "n/a"} ` +
-                `chatPending=${chatVideoSnapshot !== null}`
+                `currentDecodeQueue=${decoderQueue}`
             );
             browserPerf.receiveWindow = 0;
             browserPerf.decodeWindow = 0;
@@ -1906,31 +1447,8 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         function setStreamState(newState) {
-            const oldState = currentStreamState;
             currentStreamState = newState;
-            logControllerRoleDiagnostic();
-            if (oldState !== newState) {
-                sessionDebug('STATE_CHANGE', { old: oldState, new: newState });
-                if (newState === 'STREAM_ACTIVE') {
-                    sessionDebug('A_STREAM_STATE', { state: newState });
-                }
-            }
             console.log("[STREAM STATE]", newState);
-            if (newState === "WAITING_FOR_KEYFRAME") {
-                console.warn(
-                    `[VIDEO WAIT DIAGNOSTIC] reason=decoder_wait ` +
-                    `lastPacketAt=${videoDiagnostics.lastPacketAt || "none"} ` +
-                    `lastPacketType=${videoDiagnostics.lastPacketType ?? "none"} ` +
-                    `lastPacketLength=${videoDiagnostics.lastPacketLength} ` +
-                    `lastIdrAt=${videoDiagnostics.lastIdrAt || "none"} ` +
-                    `lastDecodedAt=${videoDiagnostics.lastDecodedAt || "none"} ` +
-                    `lastRenderedAt=${videoDiagnostics.lastRenderedAt || "none"} ` +
-                    `receiveLoopAlive=${Boolean(ws && ws.readyState === WebSocket.OPEN)} ` +
-                    `videoQueueSize=${videoDecoder ? videoDecoder.decodeQueueSize : 0} ` +
-                    `decoderError=${videoDiagnostics.lastDecoderError || "none"} ` +
-                    `rxPackets=${streamStats.received_packets} idrPackets=${streamStats.received_idr}`
-                );
-            }
             addActivityLog(`State changed: ${newState}`);
 
             const dot = document.getElementById("headerConnDot");
@@ -1981,18 +1499,9 @@ window.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        function notifyParentSessionConnected() {
-            if (connectedMessageSent || !window.parent || window.parent === window) {
-                return;
-            }
-            connectedMessageSent = true;
-            window.parent.postMessage('session_connected', '*');
-        }
-
         let cachedSPS = null;
         let cachedPPS = null;
         let lastVideoNalInfo = null;
-        let chatVideoSnapshot = null;
 
         function logDecodeErrorDetail(error) {
             console.error(
@@ -2295,20 +1804,15 @@ window.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
-                const isFirstDisplayedFrame = !window._display_logged;
-                if (isFirstDisplayedFrame) {
+                if (!window._display_logged) {
                     console.log(`[DISPLAY]\nframeCodedWidth = ${frame.codedWidth}\nframeCodedHeight = ${frame.codedHeight}\nframeDisplayWidth = ${frame.displayWidth}\nframeDisplayHeight = ${frame.displayHeight}\ncanvasWidth = ${canvas.width}\ncanvasHeight = ${canvas.height}`);
                     console.log("[DISPLAY] Frame rendered");
                     window._display_logged = true;
                 }
 
                 ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-                if (isFirstDisplayedFrame) {
-                    sessionDebug('A_FIRST_FRAME_DISPLAYED');
-                }
                 browserPerf.renderedFrames++;
                 browserPerf.renderWindow++;
-                videoDiagnostics.lastRenderedAt = Date.now();
 
                 const renderedAt = performance.now();
                 if (timing) {
@@ -2343,22 +1847,13 @@ window.addEventListener('DOMContentLoaded', () => {
                 videoDecoder = new VideoDecoder({
                     output(frame) {
                         if (decoderState === DecoderState.WAITING_FOR_KEYFRAME) {
-                            const previousDecoderState = decoderState;
                             decoderState = DecoderState.CONFIGURED;
-                            sessionDebug('STATE_CHANGE', {
-                                old: previousDecoderState,
-                                new: decoderState
-                            });
                             console.log("[DECODER STATE] CONFIGURED (Keyframe decoded)");
                             console.log("[WEBCODECS] KEYFRAME DECODED");
                         }
                         browserPerf.decodedFrames++;
                         browserPerf.decodeWindow++;
-                        videoDiagnostics.lastDecodedAt = Date.now();
                         videoFrameCount++;
-                        if (videoFrameCount === 1) {
-                            sessionDebug('A_FIRST_FRAME_DECODED');
-                        }
                         const outputAt = performance.now();
                         const timing = videoTimingByTimestamp.get(frame.timestamp);
                         if (timing) {
@@ -2393,7 +1888,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         // valid SPS/PPS/IDR keyframe. The host keeps streaming; the viewer stays open.
                         console.error("[BROWSER DECODE ERROR]", error);
                         console.log("[DECODER] decode error");
-                        videoDiagnostics.lastDecoderError = error && error.message ? error.message : String(error);
+                        logDecodeErrorDetail(error);
                         logDecodeErrorDetail(error);
                         if (decoderState !== DecoderState.UNCONFIGURED) {
                             console.warn("[WEBCODECS RECOVER] Decoder error recovered. Resetting decoder. Waiting for next keyframe.");
@@ -2468,9 +1963,6 @@ window.addEventListener('DOMContentLoaded', () => {
                 const bytes = new Uint8Array(buffer);
                 const length = bytes.length;
                 window._rx_count = (window._rx_count || 0) + 1;
-                videoDiagnostics.lastPacketAt = Date.now();
-                videoDiagnostics.lastPacketType = bytes[0] ?? null;
-                videoDiagnostics.lastPacketLength = length;
 
                 const nowMs = performance.now();
                 if (!window.__videoHexLogLast || (nowMs - window.__videoHexLogLast) > 3000) {
@@ -2537,16 +2029,6 @@ window.addEventListener('DOMContentLoaded', () => {
                 streamStats.received_packets++;
                 streamStats.received_bytes += actualPayloadSize;
                 browserPerf.rxPackets++;
-                if (chatVideoSnapshot) {
-                    console.info(
-                        `[CHAT VIDEO AFTER SEND] delayMs=${Date.now() - chatVideoSnapshot.sentAt} ` +
-                        `videoPacketsBefore=${chatVideoSnapshot.packetCountBefore} ` +
-                        `videoPacketsAfter=${streamStats.received_packets} ` +
-                        `decodedFrames=${browserPerf.decodedFrames} renderedFrames=${browserPerf.renderedFrames} ` +
-                        `parserBufferBytes=${wsRxBuffer.length}`
-                    );
-                    chatVideoSnapshot = null;
-                }
 
                 const receiveTime = Date.now();
                 const receivedAt = performance.now();
@@ -2608,9 +2090,6 @@ window.addEventListener('DOMContentLoaded', () => {
                 const currentSPS = nals.hasSPS;
                 const currentPPS = nals.hasPPS;
                 const currentIDR = nals.hasIDR;
-                if (currentIDR) {
-                    videoDiagnostics.lastIdrAt = Date.now();
-                }
                 const cachedSPSExists = cachedSPS !== null;
                 const cachedPPSExists = cachedPPS !== null;
 
@@ -2635,10 +2114,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
                 // keyDeltaStr MUST be initialized before any log/reference to it (fixes TDZ ReferenceError).
                 const keyDeltaStr = isKey ? "key" : (classification === "DELTA" ? "delta" : "waiting");
-                if (window._rx_count <= 5 || nowMs - lastKeyDeltaLogAt >= 1000) {
-                    console.log('[VIDEO] key/delta =', keyDeltaStr);
-                    lastKeyDeltaLogAt = nowMs;
-                }
+                console.log('[VIDEO] key/delta =', keyDeltaStr);
 
                 if (window._rx_count <= 5) {
                     console.log(`[VIDEO] NAL types=[${nals.nalTypes.join(',')}]`);
@@ -2874,7 +2350,11 @@ window.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            if (!isAudioEnabled) {
 
+                return;
+
+            }
 
             if (buffer.byteLength < 11) {
 
@@ -2909,12 +2389,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
             if (
                 byteLen <= 0 ||
-                byteLen % 4 !== 0 ||
-                byteLen !== buffer.byteLength - 11 ||
                 sampleRate <= 0 ||
-                sampleRate > 192000 ||
-                channels <= 0 ||
-                channels > 32
+                channels <= 0
             ) {
 
                 return;
@@ -2981,7 +2457,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     channels
                 );
 
-            if (frames <= 0 || floatArray.length % channels !== 0) {
+            if (frames <= 0) {
 
                 return;
 
@@ -3030,7 +2506,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
             if (
                 nextAudioTime <
-                audioCtx.currentTime || nextAudioTime > audioCtx.currentTime + 0.3
+                audioCtx.currentTime
             ) {
 
                 nextAudioTime =
@@ -3053,9 +2529,11 @@ window.addEventListener('DOMContentLoaded', () => {
         ============================================================ */
 
         function handleChatPacket(buffer) {
-            if (buffer.byteLength < 4) {
-                console.error(`[CHAT RX FRAMING ERROR] type=16 packet_bytes=${buffer.byteLength} expected_min=4`);
+
+            if (buffer.byteLength < 3) {
+
                 return;
+
             }
 
             const view =
@@ -3063,48 +2541,45 @@ window.addEventListener('DOMContentLoaded', () => {
 
             const len =
                 (
-                    view.getUint8(2) << 8
+                    view.getUint8(1) << 8
                 ) |
-                view.getUint8(3);
+                view.getUint8(2);
 
-            const payloadEnd = 4 + len;
-            if (payloadEnd !== buffer.byteLength) {
-                console.error(`[CHAT RX FRAMING ERROR] type=16 declared_payload_len=${len} consumed_bytes=${payloadEnd} actual_packet_bytes=${buffer.byteLength} payload_start=4 payload_end=${payloadEnd}`);
+            if (
+                3 + len >
+                buffer.byteLength
+            ) {
+
                 return;
+
             }
 
             const msgBytes =
                 new Uint8Array(
                     buffer,
-                    4,
+                    3,
                     len
                 );
 
-            if (!chatPacketDiagnosticLogged) {
-                const payloadPrefixHex = Array.from(msgBytes.slice(0, 64))
-                    .map(byte => byte.toString(16).padStart(2, "0"))
-                    .join(" ");
-                console.info(`[CHAT RX TRACE] type=16 declared_payload_len=${len} consumed_bytes=${payloadEnd} payload_start=4 payload_end=${payloadEnd} payload_bytes=${msgBytes.length} payload_prefix_hex="${payloadPrefixHex}"`);
-                chatPacketDiagnosticLogged = true;
-            }
-            const packetHex = Array.from(new Uint8Array(buffer))
-                .map(byte => byte.toString(16).padStart(2, "0"))
-                .join(" ");
-            console.info(`[CHAT RX EXACT] type=16 packet_bytes=${buffer.byteLength} payload_bytes=${len} bytes_hex="${packetHex}"`);
-            let text;
-            try {
-                text = new TextDecoder("utf-8", { fatal: true }).decode(msgBytes);
-            } catch (error) {
-                console.error(`[CHAT RX UTF8 ERROR] type=16 payload_len=${len} message=${error.message}`);
-                return;
-            }
+            const text =
+                new TextDecoder().decode(
+                    msgBytes
+                );
 
-            console.info(`[CHAT RX] direction=B->A type=16 payload_bytes=${len} characters=${text.length}`);
-            queueMicrotask(() => {
-                window.dispatchEvent(new CustomEvent("chat_message_received", {
-                    detail: { text }
-                }));
-            });
+            appendMessage(
+                "recv",
+                text
+            );
+
+            if (
+                !chatPanel.classList.contains(
+                    "open"
+                )
+            ) {
+
+                toggleChat();
+
+            }
 
         }
 
@@ -3188,15 +2663,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
-                        if (type === 13) {
-                            diagnosticType13Count++;
-                            if (diagnosticType13Count === 1) {
-                                sessionDebug('A_FIRST_TYPE13_RECEIVED');
-                            }
-                            if (diagnosticType13Count === 1 || diagnosticType13Count % 60 === 0) {
-                                sessionDebug('A_TYPE13_RECEIVED', { count: String(diagnosticType13Count) });
-                            }
-                        }
                         handleVideoPacket(packetBuffer);
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
                         continue;
@@ -3220,12 +2686,13 @@ window.addEventListener('DOMContentLoaded', () => {
                         continue;
                     }
                     else if (type === 16) {
-                        if (bufferLen < 4) {
+                        if (bufferLen < 3) {
                             return;
                         }
                         const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
-                        const payloadSize = (view.getUint8(2) << 8) | view.getUint8(3);
-                        const totalPacketSize = 4 + payloadSize;
+                        const payloadSize = (view.getUint8(1) << 8) | view.getUint8(2);
+                        const totalPacketSize = 3 + payloadSize;
+
                         if (bufferLen < totalPacketSize) {
                             return;
                         }
@@ -3233,79 +2700,22 @@ window.addEventListener('DOMContentLoaded', () => {
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
                         handleChatPacket(packetBuffer);
-                        const nextPacketType = wsRxBuffer[totalPacketSize];
-                        console.info(
-                            `[WS DISPATCH] type=16 declared_bytes=${totalPacketSize} consumed_bytes=${totalPacketSize} ` +
-                            `buffer_before=${bufferLen} buffer_after=${bufferLen - totalPacketSize} ` +
-                            `next_packet_type=${nextPacketType ?? "pending"}`
-                        );
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
-                        continue;
-                    }
-                    else if (type === 18) {
-                        if (bufferLen < 2) return;
-                        const typingState = wsRxBuffer[1];
-                        if (typingState > 1) {
-                            console.error(`[CHAT TYPING RX] Invalid type 18 state=${typingState}`);
-                        } else {
-                            setRemoteChatTyping(typingState === 1);
-                        }
-                        wsRxBuffer = wsRxBuffer.subarray(2);
-                        continue;
-                    }
-                    else if (type === 30) {
-                        receiveReverseRequest();
-                        wsRxBuffer = wsRxBuffer.subarray(1);
-                        continue;
-                    }
-                    else if (type === 31) {
-                        if (bufferLen < 2) return;
-                        const decision = wsRxBuffer[1];
-                        if (decision > 1) {
-                            console.error(`[REVERSE] Invalid TYPE 31 decision=${decision}`);
-                        } else if (reverseRequestOutstanding) {
-                            reverseRequestOutstanding = false;
-                            if (decision === 1) {
-                                reverseTransitionPending = true;
-                                console.info("[REVERSE] Approved. Closing the current controller session for role handoff.");
-                                addActivityLog("Reverse request approved. Closing this session for the role handoff.");
-                                ws.close(1000, "Reverse session approved");
-                            } else {
-                                console.info("[REVERSE] Request was rejected.");
-                                addActivityLog("Reverse-control request was rejected.");
-                            }
-                        } else {
-                            console.log(`[REVERSE] Permission response received: ${decision === 1 ? "accepted" : "rejected"}`);
-                        }
-                        wsRxBuffer = wsRxBuffer.subarray(2);
-                        continue;
-                    }
-                    else if (type === 99) {
-                        console.info("[SESSION] Relay reported that the remote endpoint disconnected.");
-                        wsRxBuffer = wsRxBuffer.subarray(1);
-                        if (ws && ws.readyState === WebSocket.OPEN) {
-                            ws.close(1000, "Remote session ended");
-                        }
                         continue;
                     }
                     else if (type === 1) {
                         websocketAuthenticated = true;
-                        sessionWasEstablished = true;
-                        sessionDebug('A_SESSION_APPROVED', { result: 'TYPE1' });
                         console.log("[WS] Session approved by host.");
-                        setStreamState("STREAM_ACTIVE");
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
                     else if (type === 2) {
                         websocketAuthenticated = true;
-                        sessionWasEstablished = true;
-                        notifyParentSessionConnected();
                         setStreamState("STREAM_ACTIVE");
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
-                    else if (type >= 20 && type <= 27) {
+                    else if (type >= 20 && type <= 24) {
                         let totalPacketSize = 0;
                         let headerLen = 0;
                         if (type === 20) {
@@ -3330,8 +2740,6 @@ window.addEventListener('DOMContentLoaded', () => {
                             const view = new DataView(wsRxBuffer.buffer, wsRxBuffer.byteOffset, wsRxBuffer.byteLength);
                             const msgLen = view.getUint16(11, false);
                             totalPacketSize = headerLen + msgLen;
-                        } else if (type === 25 || type === 26 || type === 27) {
-                            totalPacketSize = 9;
                         }
 
                         if (bufferLen < totalPacketSize) return;
@@ -3339,11 +2747,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         const packetBytes = wsRxBuffer.subarray(0, totalPacketSize);
                         const packetBuffer = packetBytes.slice().buffer;
                         if (typeof handleFilePacket === 'function') {
-                            try {
-                                await handleFilePacket(packetBuffer);
-                            } catch (error) {
-                                console.error(`[FILE RX] Packet handler failed for type ${type}:`, error);
-                            }
+                            handleFilePacket(packetBuffer);
                         }
                         wsRxBuffer = wsRxBuffer.subarray(totalPacketSize);
                         continue;
@@ -3390,14 +2794,6 @@ window.addEventListener('DOMContentLoaded', () => {
             // [1 + idBytes.length .. end] is 32 bytes of zeros for default pin/auth
 
             ws.send(pkt);
-            if (/^\d{9}$/.test(REQUESTER_SYSTEM_ID)) {
-                const identityPacket = new Uint8Array(10);
-                identityPacket[0] = 32;
-                identityPacket.set(new TextEncoder().encode(REQUESTER_SYSTEM_ID), 1);
-                ws.send(identityPacket);
-            } else {
-                console.warn("[SESSION] Reverse-control identity unavailable; this session cannot be reversed.");
-            }
 
             console.log(
                 "[WS] Viewer handshake sent for host:",
@@ -3442,12 +2838,10 @@ window.addEventListener('DOMContentLoaded', () => {
         function connectWebSocket(targetUrl, isDirect) {
             directConnection = isDirect;
             resetWebSocketState();
-            sessionDebug('A_WS_CONNECT_START', { endpoint: targetUrl });
 
             try {
                 ws = new WebSocket(targetUrl);
             } catch (error) {
-                sessionDebug('A_WS_CONNECT_FAILED', { result: error.name || 'creation_error' });
                 console.error("[WS] Creation failed:", error);
                 if (!fallbackToRelay()) {
                     stopWebStream();
@@ -3458,8 +2852,6 @@ window.addEventListener('DOMContentLoaded', () => {
             ws.binaryType = "arraybuffer";
 
             ws.onopen = function () {
-                sessionDebug('A_WS_CONNECT_SUCCESS', { result: 'OPEN' });
-                sessionDebug('STATE_CHANGE', { old: 'CONNECTING', new: 'CONNECTED' });
                 console.log("[AUTH DEBUG] WebSocket OPEN");
                 console.log("[WS] OPEN");
                 setHud("AUTHENTICATING...");
@@ -3472,7 +2864,6 @@ window.addEventListener('DOMContentLoaded', () => {
             ws.onmessage = handleMessage;
 
             ws.onerror = function (error) {
-                sessionDebug('A_WS_CONNECT_FAILED', { result: 'error_event' });
                 console.error("[WS] Error event fired (point: ws.onerror handler)", error);
                 console.error(`[WS] state: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount}`);
                 if (fallbackToRelay()) {
@@ -3482,10 +2873,6 @@ window.addEventListener('DOMContentLoaded', () => {
             };
 
             ws.onclose = function (event) {
-                sessionDebug('A_DISCONNECT', { code: String(event.code) });
-                stopMicrophone();
-                stopLocalChatTyping();
-                setRemoteChatTyping(false);
                 const closer = event.wasClean ? "BROWSER (local close)" : "REMOTE (relay/agent)";
                 console.log(`[AUTH DEBUG] WebSocket CLOSED\ncode: ${event.code}\nreason: ${event.reason || 'none'}\nwasClean: ${event.wasClean}\ninitiatedBy: ${closer}\npoint: ws.onclose handler`);
                 console.log("[WS] Closed:", event.code, event.reason);
@@ -3493,12 +2880,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 if (fallbackToRelay()) {
                     return;
                 }
-                stopWebStream();
-                if (reverseTransitionPending) {
-                    const params = new URLSearchParams(window.location.search);
-                    window.parent.postMessage({ type: "end_integrated_session", targetId: params.get("id") }, "*");
-                } else if (sessionWasEstablished) {
-                    showSessionEnded();
+                if (isStreaming) {
+                    setHud("DISCONNECTED");
                 }
             };
         }
@@ -3553,7 +2936,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
             videoFrameCount = 0;
-            diagnosticType13Count = 0;
             renderWidth = 0;
             renderHeight = 0;
             videoDecodeBusy = false;
@@ -3612,7 +2994,32 @@ window.addEventListener('DOMContentLoaded', () => {
             startRenderLoop();
 
 
-            connectWebSocket(WS_URL, false);
+            let targetUrl = WS_URL;
+            try {
+                const cleanId = String(DEVICE_ID).replace(/[^0-9a-zA-Z_\-]/g, '');
+                const discRes = await fetch(`http://127.0.0.1:49182/discover?target=${cleanId}`, { method: 'GET' });
+                if (discRes.ok) {
+                    const discJson = await discRes.json();
+                    if (discJson.status === "found" && discJson.ip && discJson.port) {
+                        targetUrl = `ws://${discJson.ip}:${discJson.port}`;
+                        console.log("[DIRECT] Discovered local agent at " + targetUrl);
+                    }
+                }
+            } catch (e) {
+                console.log("[DIRECT] Local agent not running or discovery failed.", e);
+            }
+
+            if (targetUrl !== WS_URL) {
+                setHud("DIRECT P2P CONNECTING...");
+                // Add a small HUD indicator for Direct connection
+                const resEl = document.getElementById("resDisplay");
+                if (resEl) {
+                    resEl.innerHTML += " <span style='color: var(--online); font-weight: bold;'>[DIRECT]</span>";
+                }
+            }
+
+            directConnection = targetUrl !== WS_URL;
+            connectWebSocket(targetUrl, directConnection);
             return;
 
 
@@ -3684,8 +3091,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
         function stopWebStream() {
             isStreaming = false;
-            stopLocalChatTyping();
-            setRemoteChatTyping(false);
             stopRenderLoop();
             videoDecodeBusy = false;
             safeCloseImage();
@@ -3773,16 +3178,12 @@ window.addEventListener('DOMContentLoaded', () => {
 
         async function sendFiles(files) {
 
-            const socketState = ws ? ws.readyState : -1;
-            const stateNames = {0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED', '-1': 'NULL'};
-            console.log(`[FILE_TRANSFER_SOCKET_CHECK] ws=${ws ? 'exists' : 'null'} readyState=${socketState}(${stateNames[socketState]||socketState}) isStreaming=${isStreaming}`);
-
             if (!isSocketOpen()) {
-                console.error(`[FILE_TRANSFER_SOCKET_CHECK] FAILED: ws=${ws ? 'exists' : 'null'} state=${stateNames[socketState]||socketState}`);
-                const msg = isStreaming
-                    ? `File transfer failed: session disconnected (WebSocket state: ${stateNames[socketState]||socketState}).`
-                    : 'Connect to a device first before sending files.';
-                alert(msg);
+
+                alert(
+                    "WebSocket not connected."
+                );
+
                 return;
 
             }
@@ -3822,108 +3223,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
         let incomingFiles = {};
-        let folderDestinationHandle = null;
-        let folderDestinationResolve = null;
-
-        function requestFolderDestination() {
-            if (folderDestinationHandle) return Promise.resolve(folderDestinationHandle);
-            document.getElementById("folderDestinationDialog").style.display = "flex";
-            return new Promise(resolve => {
-                folderDestinationResolve = resolve;
-            });
-        }
-
-        function finishFolderDestination(handle) {
-            document.getElementById("folderDestinationDialog").style.display = "none";
-            const resolve = folderDestinationResolve;
-            folderDestinationResolve = null;
-            if (resolve) resolve(handle);
-        }
-
-        async function selectFolderDestination() {
-            if (!folderDestinationResolve) return;
-            try {
-                if (!window.isSecureContext || typeof window.showDirectoryPicker !== "function") {
-                    throw new Error("This browser does not support safe folder destinations. Use a current browser on HTTPS or localhost.");
-                }
-                folderDestinationHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-                finishFolderDestination(folderDestinationHandle);
-            } catch (error) {
-                if (error.name !== "AbortError") {
-                    console.error("[FILE RX] Could not choose folder destination:", error);
-                    window.alert(error.message);
-                }
-                finishFolderDestination(null);
-            }
-        }
-
-        function cancelFolderDestination() {
-            finishFolderDestination(null);
-        }
-
-        async function writeReceivedFolderFile(directoryHandle, relativePath, blob) {
-            const parts = validateRelativeTransferPath(relativePath).split("/");
-            let parent = directoryHandle;
-            for (const part of parts.slice(0, -1)) {
-                parent = await parent.getDirectoryHandle(part, { create: true });
-            }
-            const fileName = parts[parts.length - 1];
-            try {
-                await parent.getFileHandle(fileName);
-                throw new Error(`The destination already contains "${relativePath}".`);
-            } catch (error) {
-                if (error.name !== "NotFoundError") throw error;
-            }
-            const fileHandle = await parent.getFileHandle(fileName, { create: true });
-            const writable = await fileHandle.createWritable();
-            try {
-                await writable.write(blob);
-                await writable.close();
-            } catch (error) {
-                await writable.abort();
-                throw error;
-            }
-        }
-
-        const outgoingFileResponses = new Map();
-        const outgoingFileErrors = new Map();
-        const outgoingFileIds = new Set();
-
-        function waitForFileResponse(transferId, expectedType) {
-            return new Promise((resolve, reject) => {
-                const timer = setTimeout(() => {
-                    outgoingFileResponses.delete(transferId);
-                    reject(new Error("Timed out waiting for file transfer response."));
-                }, 60000);
-                outgoingFileResponses.set(transferId, type => {
-                    clearTimeout(timer);
-                    if (type === expectedType) {
-                        resolve(type);
-                    } else if (type === 25) {
-                        reject(new Error("The receiver rejected the file."));
-                    } else {
-                        reject(new Error(outgoingFileErrors.get(transferId) || `Unexpected file response: ${type}`));
-                    }
-                });
-            });
-        }
-
-        function sendFileControl(type, transferId) {
-            const packet = new Uint8Array(9);
-            packet[0] = type;
-            new DataView(packet.buffer).setBigUint64(1, BigInt(transferId), false);
-            ws.send(packet);
-        }
-
-        function sendFileError(transferId, message) {
-            const messageBytes = new TextEncoder().encode(message);
-            const packet = new Uint8Array(13 + messageBytes.length);
-            packet[0] = 24;
-            new DataView(packet.buffer).setBigUint64(1, BigInt(transferId), false);
-            new DataView(packet.buffer).setUint16(11, messageBytes.length, false);
-            packet.set(messageBytes, 13);
-            ws.send(packet);
-        }
 
         function addTransferUI(transferId, filename, isUpload) {
             const feed = document.getElementById("transferFeed");
@@ -3932,7 +3231,7 @@ window.addEventListener('DOMContentLoaded', () => {
             el.style = "padding: 8px; background: #2a2d35; border-radius: 4px; border-left: 3px solid #007bff;";
             el.innerHTML = `
                 <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                    <span id="transfer-name-${transferId}" style="font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;"></span>
+                    <span style="font-weight:600; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${isUpload ? '↗' : '↙'} ${filename}</span>
                     <span id="transfer-pct-${transferId}">0%</span>
                 </div>
                 <div style="background:#1a1d24; height:4px; border-radius:2px; overflow:hidden;">
@@ -3940,7 +3239,6 @@ window.addEventListener('DOMContentLoaded', () => {
                 </div>
                 <div id="transfer-status-${transferId}" style="margin-top:4px; color:#aaa;">Starting...</div>
             `;
-            el.querySelector(`#transfer-name-${transferId}`).textContent = `${isUpload ? "↗" : "↙"} ${filename}`;
             feed.prepend(el);
         }
 
@@ -3953,312 +3251,71 @@ window.addEventListener('DOMContentLoaded', () => {
             if (statEl) statEl.innerText = status;
         }
 
-        async function handleFilePacket(buffer) {
+        function handleFilePacket(buffer) {
             const bytes = new Uint8Array(buffer);
-            if (bytes.length < 9) {
-                console.error(`[FILE RX FRAMING ERROR] packet_bytes=${bytes.length} expected_min=9`);
-                return;
-            }
             const type = bytes[0];
             const view = new DataView(buffer);
             const transferId = view.getBigUint64(1, false).toString();
 
-            if (type === 25 || type === 26 || type === 27) {
-                const resolve = outgoingFileResponses.get(transferId);
-                if (resolve) {
-                    outgoingFileResponses.delete(transferId);
-                    resolve(type);
-                }
-                if (type === 27) {
-                    updateTransferUI(transferId, 100, "Complete");
-                    const bar = document.getElementById(`transfer-bar-${transferId}`);
-                    if (bar) bar.style.background = "#28a745";
-                }
-                return;
-            }
-
             if (type === 20) {
-                if (bytes.length < 19) {
-                    console.error(`[FILE RX FRAMING ERROR] type=20 packet_bytes=${bytes.length} expected_min=19`);
-                    sendFileControl(25, transferId);
-                    return;
-                }
                 const fileSize = view.getBigUint64(9, false);
                 const nameLen = view.getUint16(17, false);
-                if (bytes.length !== 19 + nameLen || fileSize > BigInt(Number.MAX_SAFE_INTEGER)) {
-                    console.error(`[FILE RX FRAMING ERROR] type=20 packet_bytes=${bytes.length} filename_len=${nameLen} size=${fileSize}`);
-                    sendFileControl(25, transferId);
-                    return;
-                }
                 const nameBytes = bytes.subarray(19, 19 + nameLen);
-                let filename;
-                try {
-                    filename = validateRelativeTransferPath(new TextDecoder("utf-8", { fatal: true }).decode(nameBytes));
-                } catch (error) {
-                    console.error("[FILE RX] Rejected unsafe offered path:", error);
-                    sendFileControl(25, transferId);
-                    return;
-                }
-
-                const directoryOffer = filename.includes("/");
-                let autoAllow = false;
-                
-                if (directoryOffer) {
-                    const parts = filename.split("/");
-                    const folderName = parts[0];
-                    if (window.currentFolderTransferApproval && window.currentFolderTransferApproval.folderName === folderName) {
-                        if (window.currentFolderTransferApproval.allowAll) {
-                            autoAllow = true;
-                            clearTimeout(window.currentFolderTransferApproval.timeoutId);
-                            window.currentFolderTransferApproval.timeoutId = setTimeout(() => {
-                                window.currentFolderTransferApproval = null;
-                            }, 5000);
-                        }
-                    }
-                }
-                
-                let destinationHandle = null;
-                if (!autoAllow && directoryOffer) {
-                    destinationHandle = await requestFolderDestination();
-                    if (!destinationHandle) {
-                        sendFileControl(25, transferId);
-                        addTransferUI(transferId, filename, false);
-                        updateTransferUI(transferId, 0, "Folder destination cancelled");
-                        return;
-                    }
-                } else if (autoAllow && directoryOffer) {
-                    destinationHandle = window.currentFolderTransferApproval.destinationHandle;
-                }
-
-                let resolveResult = { accept: false, allowAll: false };
-                
-                if (autoAllow) {
-                    resolveResult = { accept: true, allowAll: true };
-                } else {
-                    const decision = await new Promise(resolve => {
-                        const modal = document.createElement("div");
-                        modal.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,0.45);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:sans-serif;";
-                        
-                        const card = document.createElement("div");
-                        card.style.cssText = "background:#1e293b;border-radius:8px;padding:20px;box-shadow:0 10px 15px -3px rgba(0,0,0,0.5);color:#f8fafc;width:400px;max-width:90%;";
-                        
-                        const title = document.createElement("h2");
-                        title.style.cssText = "margin-top:0;margin-bottom:8px;font-size:18px;";
-                        title.innerText = directoryOffer ? "Incoming Folder Transfer" : "Incoming File Transfer";
-                        
-                        const message = document.createElement("p");
-                        message.style.cssText = "margin-bottom:8px;font-size:14px;color:#cbd5e1;";
-                        message.innerText = directoryOffer ? "Allow files from this folder to be transferred?" : `Accept file (${Number(fileSize)} bytes)?`;
-                        
-                        const filenameDiv = document.createElement("div");
-                        filenameDiv.style.cssText = "font-weight:bold;word-break:break-all;margin-bottom:16px;color:#e2e8f0;background:#0f172a;padding:8px;border-radius:4px;";
-                        filenameDiv.innerText = filename;
-                        
-                        const actions = document.createElement("div");
-                        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
-                        
-                        const btnReject = document.createElement("button");
-                        btnReject.innerText = "Reject";
-                        btnReject.style.cssText = "padding:8px 16px;border:1px solid #64748b;background:transparent;color:#f8fafc;border-radius:4px;cursor:pointer;";
-                        btnReject.onmouseover = () => btnReject.style.background = "#334155";
-                        btnReject.onmouseout = () => btnReject.style.background = "transparent";
-                        
-                        const btnAllow = document.createElement("button");
-                        btnAllow.innerText = "Allow";
-                        btnAllow.style.cssText = "padding:8px 16px;border:none;background:#2563eb;color:#fff;border-radius:4px;cursor:pointer;";
-                        btnAllow.onmouseover = () => btnAllow.style.background = "#1d4ed8";
-                        btnAllow.onmouseout = () => btnAllow.style.background = "#2563eb";
-                        
-                        const btnAllowAll = document.createElement("button");
-                        btnAllowAll.innerText = "Allow All";
-                        btnAllowAll.style.cssText = "padding:8px 16px;border:none;background:#10b981;color:#fff;border-radius:4px;cursor:pointer;";
-                        btnAllowAll.onmouseover = () => btnAllowAll.style.background = "#059669";
-                        btnAllowAll.onmouseout = () => btnAllowAll.style.background = "#10b981";
-                        if (!directoryOffer) btnAllowAll.style.display = "none";
-                        
-                        actions.appendChild(btnReject);
-                        actions.appendChild(btnAllow);
-                        actions.appendChild(btnAllowAll);
-                        
-                        card.appendChild(title);
-                        card.appendChild(message);
-                        card.appendChild(filenameDiv);
-                        card.appendChild(actions);
-                        modal.appendChild(card);
-                        document.body.appendChild(modal);
-                        
-                        const cleanup = () => document.body.removeChild(modal);
-                        
-                        btnReject.onclick = () => { cleanup(); resolve({ accept: false, allowAll: false }); };
-                        btnAllow.onclick = () => { cleanup(); resolve({ accept: true, allowAll: false }); };
-                        btnAllowAll.onclick = () => { cleanup(); resolve({ accept: true, allowAll: true }); };
-                    });
-
-                    resolveResult = decision;
-                }
-                
-                if (!resolveResult.accept) {
-                    sendFileControl(25, transferId);
-                    addTransferUI(transferId, filename, false);
-                    updateTransferUI(transferId, 0, "Rejected");
-                    return;
-                }
-
-                if (resolveResult.allowAll && directoryOffer && !autoAllow) {
-                    const parts = filename.split("/");
-                    window.currentFolderTransferApproval = {
-                        folderName: parts[0],
-                        allowAll: true,
-                        destinationHandle: destinationHandle,
-                        timeoutId: setTimeout(() => {
-                            window.currentFolderTransferApproval = null;
-                        }, 5000)
-                    };
-                }
+                const filename = new TextDecoder().decode(nameBytes);
 
                 incomingFiles[transferId] = {
                     filename: filename,
                     size: Number(fileSize),
                     chunks: [],
-                    receivedBytes: 0,
-                    directoryHandle: destinationHandle
+                    receivedBytes: 0
                 };
                 console.log(`[FILE] Incoming file start: ${filename}`);
                 addTransferUI(transferId, filename, false);
                 updateTransferUI(transferId, 0, "Receiving...");
-                sendFileControl(26, transferId);
             } else if (type === 21) {
-                if (bytes.length < 17) {
-                    console.error(`[FILE RX FRAMING ERROR] type=21 packet_bytes=${bytes.length} expected_min=17`);
-                    return;
-                }
+                if (!incomingFiles[transferId]) return;
                 const chunkLen = view.getUint32(13, false);
-                if (chunkLen > 10 * 1024 * 1024 || bytes.length !== 17 + chunkLen) {
-                    console.error(`[FILE RX FRAMING ERROR] type=21 packet_bytes=${bytes.length} declared_chunk_len=${chunkLen}`);
-                    sendFileError(transferId, "Invalid file chunk framing");
-                    delete incomingFiles[transferId];
-                    return;
-                }
-                if (!incomingFiles[transferId]) return;
-                const incoming = incomingFiles[transferId];
-                if (incoming.receivedBytes + chunkLen > incoming.size) {
-                    sendFileError(transferId, "Received more data than the offered file size");
-                    updateTransferUI(transferId, 0, "Verification failed");
-                    delete incomingFiles[transferId];
-                    return;
-                }
-                const payload = bytes.slice(17);
-                incoming.chunks.push(payload);
-                incoming.receivedBytes += chunkLen;
+                const payload = bytes.slice(17, 17 + chunkLen);
+                incomingFiles[transferId].chunks.push(payload);
+                incomingFiles[transferId].receivedBytes += chunkLen;
 
-                const pct = incoming.size === 0
-                    ? 0
-                    : Math.floor((incoming.receivedBytes / incoming.size) * 100);
+                const pct = Math.floor((incomingFiles[transferId].receivedBytes / incomingFiles[transferId].size) * 100);
                 updateTransferUI(transferId, pct, "Receiving...");
-
-                if (window.currentFolderTransferApproval && incoming.filename.startsWith(window.currentFolderTransferApproval.folderName + "/")) {
-                    clearTimeout(window.currentFolderTransferApproval.timeoutId);
-                    window.currentFolderTransferApproval.timeoutId = setTimeout(() => {
-                        window.currentFolderTransferApproval = null;
-                    }, 5000);
-                }
             } else if (type === 22) {
-                if (bytes.length !== 49) {
-                    console.error(`[FILE RX FRAMING ERROR] type=22 packet_bytes=${bytes.length} expected=49`);
-                    sendFileError(transferId, "Invalid file completion framing");
-                    delete incomingFiles[transferId];
-                    return;
-                }
                 if (!incomingFiles[transferId]) return;
-                const incoming = incomingFiles[transferId];
-                const finalSize = Number(view.getBigUint64(9, false));
-                const expectedHash = bytes.slice(17, 49);
-                const blob = new Blob(incoming.chunks);
-                const actualHash = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
-                const valid = incoming.receivedBytes === incoming.size
-                    && finalSize === incoming.size
-                    && actualHash.every((byte, index) => byte === expectedHash[index]);
-                if (!valid) {
-                    sendFileError(transferId, "File size or SHA-256 verification failed");
-                    updateTransferUI(transferId, 0, "Verification failed");
-                    const bar = document.getElementById(`transfer-bar-${transferId}`);
-                    if (bar) bar.style.background = "#dc3545";
-                    delete incomingFiles[transferId];
-                    return;
-                }
-                console.log(`[FILE] Transfer verified: ${incoming.filename}`);
+                console.log(`[FILE] Transfer complete: ${incomingFiles[transferId].filename}`);
+                updateTransferUI(transferId, 100, "Complete");
 
-                if (window.currentFolderTransferApproval && incoming.filename.startsWith(window.currentFolderTransferApproval.folderName + "/")) {
-                    clearTimeout(window.currentFolderTransferApproval.timeoutId);
-                    window.currentFolderTransferApproval.timeoutId = setTimeout(() => {
-                        window.currentFolderTransferApproval = null;
-                    }, 5000);
-                }
-                
-                try {
-                    if (incoming.directoryHandle) {
-                        await writeReceivedFolderFile(incoming.directoryHandle, incoming.filename, blob);
-                    } else {
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement("a");
-                        a.href = url;
-                        a.download = incoming.filename;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        setTimeout(() => URL.revokeObjectURL(url), 1000);
-                    }
-                    updateTransferUI(transferId, 100, "Complete");
-                    sendFileControl(27, transferId);
-                } catch (error) {
-                    console.error("[FILE RX] Could not save verified file:", error);
-                    sendFileError(transferId, `Could not save file: ${error.message}`);
-                    updateTransferUI(transferId, 0, "Save failed");
-                    const bar = document.getElementById(`transfer-bar-${transferId}`);
-                    if (bar) bar.style.background = "#dc3545";
-                }
+                const blob = new Blob(incomingFiles[transferId].chunks);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = incomingFiles[transferId].filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
                 delete incomingFiles[transferId];
             } else if (type === 23 || type === 24) {
-                const message = type === 24
-                    ? new TextDecoder().decode(bytes.subarray(13))
-                    : "The receiver cancelled the transfer.";
                 if (incomingFiles[transferId]) {
                     console.log(`[FILE] Transfer cancelled/error: ${incomingFiles[transferId].filename}`);
-                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : `Error: ${message}`);
-                    const bar = document.getElementById(`transfer-bar-${transferId}`);
-                    if (bar) bar.style.background = "#dc3545";
+                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : "Error");
+                    document.getElementById(`transfer-bar-${transferId}`).style.background = "#dc3545";
                     delete incomingFiles[transferId];
-                }
-                if (outgoingFileIds.has(transferId)) {
-                    outgoingFileErrors.set(transferId, message);
-                    updateTransferUI(transferId, 0, type === 23 ? "Cancelled" : `Error: ${message}`);
-                    const bar = document.getElementById(`transfer-bar-${transferId}`);
-                    if (bar) bar.style.background = "#dc3545";
-                }
-                const resolve = outgoingFileResponses.get(transferId);
-                if (resolve) {
-                    outgoingFileResponses.delete(transferId);
-                    resolve(type);
                 }
             }
         }
 
         async function sendSingleFile(file) {
-            const filename = validateRelativeTransferPath(file.customPath || file.webkitRelativePath || file.name);
-            const nameBytes = new TextEncoder().encode(filename);
+            const nameBytes = new TextEncoder().encode(file.name);
             if (nameBytes.length > 4096) throw new Error("Filename too long.");
 
             const transferIdBytes = new Uint8Array(8);
             crypto.getRandomValues(transferIdBytes);
             const transferIdStr = new DataView(transferIdBytes.buffer).getBigUint64(0, false).toString();
-            outgoingFileErrors.delete(transferIdStr);
-            outgoingFileIds.add(transferIdStr);
-            let offerSent = false;
-            let acceptedByReceiver = false;
 
-            try {
-            addTransferUI(transferIdStr, filename, true);
-            updateTransferUI(transferIdStr, 0, "Waiting for receiver...");
+            addTransferUI(transferIdStr, file.name, true);
+            updateTransferUI(transferIdStr, 0, "Sending...");
 
             // TYPE 20: 1 + 8 + 8 + 2 + nameBytes.length = 19 + nameBytes.length
             const metaPkt = new Uint8Array(19 + nameBytes.length);
@@ -4268,14 +3325,7 @@ window.addEventListener('DOMContentLoaded', () => {
             metaView.setBigUint64(9, BigInt(file.size), false);
             metaView.setUint16(17, nameBytes.length, false);
             metaPkt.set(nameBytes, 19);
-            const accepted = waitForFileResponse(transferIdStr, 26);
             ws.send(metaPkt);
-            offerSent = true;
-            console.info(`[FILE TX OFFER] direction=A->B transfer_id=${transferIdStr} filename=${JSON.stringify(filename)} total_bytes=${file.size}`);
-            await accepted;
-            acceptedByReceiver = true;
-            console.info(`[FILE TX ACCEPT] direction=A->B transfer_id=${transferIdStr}`);
-            updateTransferUI(transferIdStr, 0, "Sending...");
 
             // Calculate Hash
             const hashBuffer = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
@@ -4285,14 +3335,8 @@ window.addEventListener('DOMContentLoaded', () => {
             const chunkSize = 256 * 1024; // 256 KB
             let offset = 0;
             let chunkIndex = 0;
-            console.info(`[FILE TX START] direction=A->B transfer_id=${transferIdStr} chunk_size=${chunkSize}`);
 
             while (offset < file.size) {
-                if (outgoingFileErrors.has(transferIdStr)) {
-                    const message = outgoingFileErrors.get(transferIdStr);
-                    outgoingFileErrors.delete(transferIdStr);
-                    throw new Error(message);
-                }
                 if (!isSocketOpen()) {
                     updateTransferUI(transferIdStr, 0, "Failed: Disconnected");
                     document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#dc3545";
@@ -4328,39 +3372,10 @@ window.addEventListener('DOMContentLoaded', () => {
             const endView = new DataView(endPkt.buffer);
             endView.setBigUint64(9, BigInt(file.size), false);
             endPkt.set(hashBytes, 17);
-            if (outgoingFileErrors.has(transferIdStr)) {
-                const message = outgoingFileErrors.get(transferIdStr);
-                outgoingFileErrors.delete(transferIdStr);
-                throw new Error(message);
-            }
-            const completed = waitForFileResponse(transferIdStr, 27);
             ws.send(endPkt);
-            console.info(`[FILE TX END] direction=A->B transfer_id=${transferIdStr} chunks=${chunkIndex} total_bytes=${offset} sha256=${Array.from(hashBytes, byte => byte.toString(16).padStart(2, "0")).join("")}`);
-            await completed;
-            console.info(`[FILE TX COMPLETE_ACK] direction=A->B transfer_id=${transferIdStr}`);
+
             updateTransferUI(transferIdStr, 100, "Complete");
             document.getElementById(`transfer-bar-${transferIdStr}`).style.background = "#28a745";
-            } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                if (isSocketOpen() && offerSent) {
-                    try {
-                        if (acceptedByReceiver) {
-                            sendFileError(transferIdStr, message);
-                        } else {
-                            sendFileControl(23, transferIdStr);
-                        }
-                    } catch (signalError) {
-                        console.error(`[FILE] Failed to signal transfer failure for ${transferIdStr}:`, signalError);
-                    }
-                }
-                updateTransferUI(transferIdStr, 0, `Failed: ${message}`);
-                const bar = document.getElementById(`transfer-bar-${transferIdStr}`);
-                if (bar) bar.style.background = "#dc3545";
-                throw error;
-            } finally {
-                outgoingFileIds.delete(transferIdStr);
-                outgoingFileErrors.delete(transferIdStr);
-            }
         }
 
 
@@ -4701,45 +3716,11 @@ window.addEventListener('DOMContentLoaded', () => {
                     dropOverlay.classList.remove("active");
 
                     if (!isSocketOpen()) {
-                        const s = ws ? ws.readyState : -1;
-                        const sn = {0:'CONNECTING',1:'OPEN',2:'CLOSING',3:'CLOSED','-1':'NULL'};
-                        console.error(`[FILE_TRANSFER] Drag-drop: ws=${ws?'exists':'null'} state=${sn[s]||s}`);
-                        alert(isStreaming ? `Session disconnected (state: ${sn[s]||s}).` : 'Connect to a device first.');
+                        alert("WebSocket not connected.");
                         return;
                     }
 
-                    const items = event.dataTransfer.items;
-                    if (items) {
-                        const files = [];
-                        async function traverse(entry, path) {
-                            if (entry.isFile) {
-                                const file = await new Promise(resolve => entry.file(resolve));
-                                file.customPath = path + file.name;
-                                files.push(file);
-                            } else if (entry.isDirectory) {
-                                const dirReader = entry.createReader();
-                                let entries = [];
-                                let readEntries = await new Promise(resolve => dirReader.readEntries(resolve));
-                                while (readEntries.length > 0) {
-                                    entries.push(...readEntries);
-                                    readEntries = await new Promise(resolve => dirReader.readEntries(resolve));
-                                }
-                                for (const e of entries) {
-                                    await traverse(e, path + entry.name + "/");
-                                }
-                            }
-                        }
-                        for (let i = 0; i < items.length; i++) {
-                            const item = items[i];
-                            if (item.webkitGetAsEntry) {
-                                const entry = item.webkitGetAsEntry();
-                                if (entry) await traverse(entry, "");
-                            }
-                        }
-                        await sendFiles(files);
-                    } else {
-                        await sendFiles(event.dataTransfer.files);
-                    }
+                    await sendFiles(event.dataTransfer.files);
                 }
             );
         }
@@ -4748,13 +3729,9 @@ window.addEventListener('DOMContentLoaded', () => {
            BUTTON EVENTS
         ============================================================ */
 
-
-        if (micBtn) {
-            micBtn.addEventListener("click", toggleMicrophone);
+        if (audioBtn) {
+            audioBtn.addEventListener("click", toggleAudio);
         }
-        document.getElementById("reverseAcceptBtn").addEventListener("click", () => answerReverseRequest(true));
-        document.getElementById("reverseRejectBtn").addEventListener("click", () => answerReverseRequest(false));
-        window.addEventListener("pagehide", stopMicrophone);
 
         if (chatBtn) {
             chatBtn.addEventListener("click", toggleChat);
@@ -4769,7 +3746,6 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         if (chatInput) {
-            chatInput.addEventListener("input", updateLocalChatTyping);
             chatInput.addEventListener("keydown", event => {
                 if (event.key === "Enter") {
                     sendChat();
@@ -4821,73 +3797,31 @@ window.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        function showFileTransferChoice() {
-            document.getElementById("fileTransferChoiceDialog").style.display = "flex";
-        }
-
-        function closeFileTransferChoice() {
-            document.getElementById("fileTransferChoiceDialog").style.display = "none";
-        }
-
-        function chooseTransferSource(kind) {
-            closeFileTransferChoice();
-            const input = document.getElementById(kind === "folder" ? "folderUploadInput" : "fileUploadInput");
-            if (kind === "folder" && !("webkitdirectory" in input)) {
-                window.alert("Folder selection is not supported by this browser. Select files individually or use a supported browser.");
-                return;
-            }
-            input.value = "";
-            input.click();
-        }
-
-        function validateRelativeTransferPath(path) {
-            const normalized = String(path).replace(/\\/g, "/");
-            if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized) || normalized.includes("\0")) {
-                throw new Error("The transfer path is not a safe relative path.");
-            }
-            const parts = normalized.split("/");
-            if (parts.some(part => !part || part === "." || part === ".."
-                || part.length > 240
-                || /[<>:"|?*\x00-\x1f]/.test(part)
-                || /[. ]$/.test(part)
-                || /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part))) {
-                throw new Error("The transfer path contains an unsafe component.");
-            }
-            return parts.join("/");
-        }
-
         function handleFileInput(event) {
             if (event.target.files && event.target.files.length > 0) {
                 if (!isSocketOpen()) {
-                    const socketState = ws ? ws.readyState : -1;
-                    const stateNames = {0:'CONNECTING',1:'OPEN',2:'CLOSING',3:'CLOSED','-1':'NULL'};
-                    console.error(`[FILE_TRANSFER] Cannot send: ws=${ws?'exists':'null'} state=${stateNames[socketState]||socketState} isStreaming=${isStreaming}`);
-                    alert(isStreaming ? `Session disconnected (state: ${stateNames[socketState]||socketState}). Reconnect and retry.` : 'Connect to a device first before sending files.');
+                    alert("WebSocket not connected.");
                     return;
                 }
-                const filesArray = Array.from(event.target.files);
-                console.log(`[FILE_TRANSFER_REQUEST] sending ${filesArray.length} file(s) over active session`);
-                sendFiles(filesArray);
-                addActivityLog(`Started sending ${filesArray.length} file(s)`);
+                sendFiles(event.target.files);
+                addActivityLog(`Started sending ${event.target.files.length} file(s)`);
             }
             event.target.value = "";
         }
 
         function endSessionAndRedirect(event) {
-            if (event && event.preventDefault) event.preventDefault();
-            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-                ws.close(1000, "Session ended by user");
-            } else {
-                showSessionEnded();
-            }
+            event.preventDefault();
+            stopWebStream();
             addActivityLog("Session manually ended by user.");
+            setTimeout(() => {
+                const urlParams = new URLSearchParams(window.location.search);
+                if (urlParams.get('integrated') === '1') {
+                    window.parent.postMessage('end_integrated_session', '*');
+                } else {
+                    window.location.href = "../dashboard.php";
+                }
+            }, 500);
         }
-
-        window.addEventListener('message', function (e) {
-            if (e.data === 'end_session_command') {
-                endSessionAndRedirect(new Event('click'));
-            }
-        });
 
         let sessionStartTime = null;
         let sessionTimerInterval = null;
