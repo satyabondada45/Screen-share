@@ -98,8 +98,11 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 continue;
             }
             
-            // Health endpoint for UI
-            if path == "/local-health" || path == "/local-health/" {
+            // Health endpoint for UI and startup bootstrap.
+            // The UI currently checks /local-health, while the startup bootstrap expects /health.
+            // Keep both endpoints available on the existing local server so the dashboard can
+            // come up without introducing a second backend or changing the startup flow.
+            if matches!(path.as_str(), "/health" | "/health/" | "/local-health" | "/local-health/") {
                 let in_session = crate::status::LIVE.get()
                     .and_then(|s| s.lock().ok())
                     .map(|g| g.in_session)

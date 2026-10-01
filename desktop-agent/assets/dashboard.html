@@ -73,11 +73,23 @@
         }
 
         .brand-logo {
-            width: 28px;
-            height: 28px;
+            width: auto;
+            height: auto;
             display: flex;
             align-items: center;
             justify-content: center;
+            max-width: 210px;
+            overflow: visible;
+        }
+
+        .brand-logo img {
+            display: block;
+            width: 190px;
+            max-width: 190px;
+            height: auto;
+            object-fit: contain;
+            object-position: left center;
+            filter: drop-shadow(0 1px 0 rgba(15, 23, 42, 0.04));
         }
 
         .brand-name {
@@ -1802,7 +1814,7 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="nav-menu">
-                <button class="nav-item active" onclick="setSidebarActive(this)">
+                <button class="nav-item active" data-page="home" onclick="setSidebarActive(this); showDashboardPage('home');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <rect x="2" y="3" width="20" height="14" rx="2" />
                         <line x1="8" y1="21" x2="16" y2="21" />
@@ -1810,22 +1822,15 @@
                     </svg>
                     New Session
                 </button>
-                <button class="nav-item" onclick="setSidebarActive(this); scrollToSection('recent-section');">
+                <button class="nav-item" data-page="home" onclick="setSidebarActive(this); showDashboardPage('home'); scrollToSection('recent-section');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <circle cx="12" cy="12" r="10" />
                         <polyline points="12 6 12 12 16 14" />
                     </svg>
                     Recent Sessions
                 </button>
-                <button class="nav-item" onclick="setSidebarActive(this); showToast('Address Book synced');">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                        <circle cx="12" cy="7" r="4" />
-                    </svg>
-                    Address Book
-                </button>
                 <div class="sidebar-divider"></div>
-                <button class="nav-item" onclick="setSidebarActive(this); showToast('Settings opened');">
+                <button class="nav-item" data-page="settings" onclick="setSidebarActive(this); showDashboardPage('settings');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <circle cx="12" cy="12" r="3" />
                         <path
@@ -1833,7 +1838,7 @@
                     </svg>
                     Settings
                 </button>
-                <button class="nav-item" onclick="setSidebarActive(this); showToast('DeskStream Agent v1.1.3');">
+                <button class="nav-item" data-page="about" onclick="setSidebarActive(this); showDashboardPage('about');">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                         <circle cx="12" cy="12" r="10" />
                         <line x1="12" y1="16" x2="12" y2="12" />
@@ -1957,16 +1962,85 @@
 
                 <!-- Recent Sessions Grid -->
                 <div id="recent-section">
-                                <div class="section-header-row">
-                                    <h3 class="section-heading">Recent Sessions</h3>
-                                    <a class="view-all-link" href="#"
-                                        onclick="fetchAllDevices(true); return false;">View All</a>
-                                </div>
-                                <div class="workstations-grid" id="workstationsContainer">
-                                    <div class="empty-grid-box">Loading devices...</div>
-                                </div>
+                    <div class="section-header-row">
+                        <h3 class="section-heading">Recent Sessions</h3>
+                        <a class="view-all-link" href="#" onclick="fetchAllDevices(true); return false;">View All</a>
+                    </div>
+                    <div class="workstations-grid" id="workstationsContainer">
+                        <div class="empty-grid-box">Loading devices...</div>
+                    </div>
+                </div>
+            </div>
+
+            <section id="settingsPage" class="page-panel" style="display:none;">
+                <div class="panel-card" style="max-width: 900px; width: 100%; margin: 0 auto;">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Settings</h2>
+                    </div>
+                    <p class="panel-subtitle">DeskStream local application settings.</p>
+                    <div class="permissions-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin-top:10px;">
+                        <div class="mode-option-card active">
+                            <div class="mode-icon-box">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>General</h5>
+                                <p>Application window, startup behavior, and local settings.</p>
                             </div>
                         </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-icon-box">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>Security</h5>
+                                <p>Device permissions and trusted access policies.</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-icon-box">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            </div>
+                            <div class="mode-text-box">
+                                <h5>Notifications</h5>
+                                <p>Connection prompts and session alerts.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="aboutPage" class="page-panel" style="display:none;">
+                <div class="panel-card" style="max-width: 900px; width: 100%; margin: 0 auto;">
+                    <div class="panel-header" style="align-items:center; gap:16px;">
+                        <div class="brand-logo">
+                            <img src="deskstream-logo.png" alt="DeskStream logo" />
+                        </div>
+                        <h2 class="panel-title">About DeskStream</h2>
+                    </div>
+                    <p class="panel-subtitle">DeskStream Desktop Agent</p>
+                    <div class="permissions-grid" style="display:grid; gap:16px; margin-top:10px;">
+                        <div class="mode-option-card active">
+                            <div class="mode-text-box">
+                                <h5>Version</h5>
+                                <p>1.1.3</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-text-box">
+                                <h5>Build</h5>
+                                <p>Local embedded Windows desktop client</p>
+                            </div>
+                        </div>
+                        <div class="mode-option-card active">
+                            <div class="mode-text-box">
+                                <h5>Copyright</h5>
+                                <p>Copyright (c) Friends Software Solutions</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -2293,6 +2367,7 @@
             const badge = document.getElementById('topbarUserBadge');
             badge.style.display = 'flex';
             document.getElementById('topbarUsername').textContent = '👤 ' + username;
+            showDashboardPage('home');
             fetchAllDevices(false);
             setInterval(() => fetchAllDevices(false), 5000);
             setInterval(checkIncoming, 4000);
@@ -2350,9 +2425,10 @@
                     const others = data.devices.filter(d =>
                         d.system_id !== currentHostUid && d.device_uid !== currentHostUid
                     );
-                    renderDevicesGrid(others);
-                    populateRecentDropdown(others);
-                    // Alias from DB
+                    const recent = getRecentSessionEntries();
+                    const displayDevices = others.length > 0 ? others : recent;
+                    renderDevicesGrid(displayDevices);
+                    populateRecentDropdown(displayDevices);
                     const mine = data.devices.find(d =>
                         d.system_id === currentHostUid || d.device_uid === currentHostUid
                     );
@@ -2421,6 +2497,53 @@
             showToast('System ID copied: ' + formatId(currentHostUid));
         }
 
+        function getRecentSessionEntries() {
+            try {
+                const raw = localStorage.getItem('ds_recent_sessions');
+                const parsed = raw ? JSON.parse(raw) : [];
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function saveRecentSessionEntries(entries) {
+            localStorage.setItem('ds_recent_sessions', JSON.stringify(entries.slice(0, 6)));
+        }
+
+        function recordRecentSession(device) {
+            const entry = {
+                system_id: device.system_id || device.device_uid || '',
+                device_uid: device.device_uid || device.system_id || '',
+                name: device.name || 'Workstation',
+                ip_address: device.ip_address || 'Local network',
+                last_seen_at: new Date().toISOString(),
+                is_online: 1,
+                os_type: device.os_type || 'windows'
+            };
+            if (!entry.system_id && !entry.device_uid) return;
+            const existing = getRecentSessionEntries().filter(item => {
+                const itemId = item.system_id || item.device_uid || '';
+                const matchId = entry.system_id || entry.device_uid || '';
+                return itemId && matchId && itemId !== matchId;
+            });
+            const next = [entry, ...existing].slice(0, 6);
+            saveRecentSessionEntries(next);
+        }
+
+        function showDashboardPage(page) {
+            const home = document.getElementById('dashboardInnerContent');
+            const settings = document.getElementById('settingsPage');
+            const about = document.getElementById('aboutPage');
+            const isHome = page === 'home';
+            if (home) home.style.display = isHome ? 'block' : 'none';
+            if (settings) settings.style.display = page === 'settings' ? 'block' : 'none';
+            if (about) about.style.display = page === 'about' ? 'block' : 'none';
+            if (page === 'home') {
+                document.getElementById('recent-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
         function showToast(msg) {
             const toast = document.getElementById('toastBox');
             document.getElementById('toastMsg').textContent = msg;
@@ -2464,6 +2587,12 @@
         function setSidebarActive(el) {
             document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
             el.classList.add('active');
+            const page = el.dataset.page;
+            if (page === 'settings' || page === 'about') {
+                showDashboardPage(page);
+            } else if (page === 'home') {
+                showDashboardPage('home');
+            }
         }
 
         function scrollToSection(id) {
@@ -2514,6 +2643,12 @@
                     const sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
                     
                     if (data.request.status === 'accepted') {
+                        recordRecentSession({
+                            system_id: targetId,
+                            name: currentHostAlias || 'Remote Device',
+                            ip_address: 'Connected',
+                            os_type: 'windows'
+                        });
                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                         openIntegratedSession(sessionUrl);
                     } else {
@@ -2534,6 +2669,12 @@
                                 const statusData = await statusRes.json();
                                 if (statusData.status === 'success') {
                                     if (statusData.request_status === 'accepted') {
+                                        recordRecentSession({
+                                            system_id: targetId,
+                                            name: currentHostAlias || 'Remote Device',
+                                            ip_address: 'Connected',
+                                            os_type: 'windows'
+                                        });
                                         clearInterval(connectionPollInterval);
                                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                                         openIntegratedSession(sessionUrl);

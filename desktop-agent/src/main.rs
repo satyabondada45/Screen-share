@@ -2371,10 +2371,16 @@ mod session_feature_tests {
 
 fn main() {
     // STARTUP TRACE: Log instantly before anything can fail!
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\temp".to_string());
+    let deskstream_dir = std::path::Path::new(&local_app_data).join("DeskStream");
+    let logs_dir = deskstream_dir.join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let boot_log_path = logs_dir.join("boot.log");
+
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("C:\\Users\\Public\\deskstream_agent_boot_trace.log")
+        .open(&boot_log_path)
     {
         use std::io::Write;
         let _ = writeln!(file, "[BOOT TRACE] desktop-agent.exe launched at {:?}", std::time::SystemTime::now());
@@ -2384,7 +2390,7 @@ fn main() {
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             let _ = std::env::set_current_dir(parent);
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Users\\Public\\deskstream_agent_boot_trace.log") {
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&boot_log_path) {
                 use std::io::Write;
                 let _ = writeln!(file, "[BOOT TRACE] Working directory set to: {:?}", parent);
             }
@@ -2425,6 +2431,20 @@ fn main() {
     } else {
         "34.229.20.54:9001".to_string()
     };
+
+    // FIRST-LAUNCH CONFIG PROVISIONING
+    let config_path = deskstream_dir.join("config.json");
+    if !config_path.exists() {
+        let _ = std::fs::write(&config_path, "{}");
+    }
+    let keys_path = deskstream_dir.join("keys.json");
+    if !keys_path.exists() {
+        let _ = std::fs::write(&keys_path, "{}");
+    }
+    let env_path = deskstream_dir.join(".env");
+    if !env_path.exists() {
+        let _ = std::fs::write(&env_path, "");
+    }
 
     // Load persistent identity
     let config = identity::device_id::AgentConfig::load_or_create("", &relay_addr);
@@ -2560,5 +2580,25 @@ fn main() {
     agent_log!("[BOOT] Started local embedded UI server on {}", local_url);
 
     // Run the WebView2 window — blocks until window closed
-    webview_app::run_webview(quit_signal, local_url);
+    // Health Poll Loop
+    let mut healthy = false;
+    for _ in 0..60 { // 30 seconds max
+        if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", local_port)) {
+            if resp.status().is_success() {
+                healthy = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    if healthy {
+        webview_app::run_webview(quit_signal, local_url);
+    } else {
+        let error_html = format!(
+            "data:text/html;charset=utf-8,<html><head><title>Startup Error</title><style>body{{font-family:sans-serif;padding:40px;}}</style></head><body><h2>DeskStream could not start</h2><p>The local DeskStream service did not become ready.</p><p>Check logs at: {}</p></body></html>",
+            boot_log_path.to_string_lossy().replace("\\", "/")
+        );
+        webview_app::run_webview(quit_signal, error_html);
+    }
 }
