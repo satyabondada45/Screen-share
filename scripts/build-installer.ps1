@@ -151,15 +151,12 @@ if ($CargoExeHash -ne $ExeHash) {
     throw "SHA256 mismatch: Copied EXE does not match the Cargo target EXE!"
 }
 
-# FUTURE SIGNING PREPARATION
-# DO NOT ENABLE YET - Postponed until we obtain a proper code-signing certificate for Friends Software Solutions.
-$EnableCodeSigning = $false
+# DEVELOPMENT SIGNING
+$EnableCodeSigning = $true
 
 if ($EnableCodeSigning) {
-    Write-Host "Future signing placeholder for EXE. (No signing occurs now)"
-    # NOTE: Future Authenticode signing logic goes here.
-    # IMPORTANT: Credentials MUST come from a secure mechanism.
-    # Never commit .pfx, .p12, private keys, or passwords to the repository.
+    Write-Host "Signing DeskStream.exe..."
+    & (Join-Path $ProjectRoot 'scripts\sign-windows.ps1') -ExePath $ExePath
 } else {
     Write-Host "Skipping code signing because EnableCodeSigning is false."
 }
@@ -191,8 +188,8 @@ if ((Get-Item $InstallerPath).Length -lt 1024) {
 }
 
 if ($EnableCodeSigning) {
-    Write-Host "Future signing placeholder for Installer. (No signing occurs now)"
-    # NOTE: Future Authenticode signing logic for the NSIS installer goes here.
+    Write-Host "Signing NSIS Installer..."
+    & (Join-Path $ProjectRoot 'scripts\sign-windows.ps1') -ExePath $InstallerPath
 } else {
     Write-Host "Skipping code signing for installer because EnableCodeSigning is false."
 }

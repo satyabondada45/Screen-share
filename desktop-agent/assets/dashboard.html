@@ -3739,8 +3739,8 @@ document.addEventListener('DOMContentLoaded', () => {
     </script>
     
     <!-- B-Side Overlay Container -->
-    <div id="bSessionOverlay" class="floating-controls" style="display: none; padding: 4px; flex-direction: column; gap: 4px; width: 48px; border-radius: 12px; pointer-events: auto;">
-        <div class="floating-btn floating-drag-handle" id="toolbarHandle" title="Drag session controls" onmousedown="if(window.ipc){window.ipc.postMessage('drag_overlay');}">
+    <div id="bSessionOverlay" class="floating-controls" style="display: none; flex-direction: column;">
+        <div class="floating-btn floating-drag-handle" id="bToolbarHandle" title="Drag session controls">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <circle cx="8" cy="7" r="1.2"></circle>
                 <circle cx="16" cy="7" r="1.2"></circle>
@@ -3751,37 +3751,39 @@ document.addEventListener('DOMContentLoaded', () => {
             </svg>
         </div>
 
-        <button class="floating-btn" id="optionsToggleBtn" type="button" title="Options" style="color: #1e293b;" onclick="toggleBOptions()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
-                <circle cx="12" cy="12" r="2"></circle>
-                <circle cx="12" cy="5" r="2"></circle>
-                <circle cx="12" cy="19" r="2"></circle>
-            </svg>
-        </button>
+        <div style="position: relative; display: flex; flex-direction: column; align-items: center;">
+            <button class="floating-btn" id="optionsToggleBtn" type="button" title="Options" style="color: #1e293b;" onclick="toggleBOptions(event)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20">
+                    <circle cx="12" cy="12" r="2"></circle>
+                    <circle cx="12" cy="5" r="2"></circle>
+                    <circle cx="12" cy="19" r="2"></circle>
+                </svg>
+            </button>
 
-        <div id="optionsMenu" style="display: none; flex-direction: column; gap: 4px; width: 100%;">
-            <button class="floating-btn" id="bOverlayChatBtn" type="button" title="Chat" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                </svg>
-            </button>
-            <button class="floating-btn" id="bMicBtn" type="button" title="Microphone" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
-                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                    <line x1="12" y1="19" x2="12" y2="22"></line>
-                </svg>
-            </button>
-            <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                    <path d="M5 12h14M12 5l7 7-7 7"></path>
-                </svg>
-            </button>
-            <button class="floating-btn danger" id="bDisconnectBtn" type="button" title="End session" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16">
-                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
-                </svg>
-            </button>
+            <div id="optionsMenu" style="display: none; position: absolute; right: 100%; top: 0; margin-right: 8px; flex-direction: column; gap: 4px; background: rgba(255,255,255,0.95); border: 1px solid rgba(148, 163, 184, 0.65); border-radius: 12px; padding: 6px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16); min-width: 140px; pointer-events: auto;">
+                <button class="floating-btn" id="bOverlayChatBtn" type="button" title="Chat" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');} toggleBOptions(event);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    </svg> Chat
+                </button>
+                <button class="floating-btn" id="bMicBtn" type="button" title="Microphone" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');} toggleBOptions(event);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                    </svg> Mic
+                </button>
+                <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');} toggleBOptions(event);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                    </svg> Reverse
+                </button>
+                <button class="floating-btn danger" id="bDisconnectBtn" type="button" title="End session" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');} toggleBOptions(event);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16">
+                        <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                    </svg> End Session
+                </button>
+            </div>
         </div>
     </div>
     <script>
@@ -3789,19 +3791,41 @@ document.addEventListener('DOMContentLoaded', () => {
             const overlay = document.getElementById('bSessionOverlay');
             document.body.innerHTML = '';
             document.body.appendChild(overlay);
-            // Force overlay to fill the native window completely
+            // Allow overlay to be dragged via JS
             overlay.style.display = 'flex';
             overlay.style.position = 'fixed';
-            overlay.style.inset = '0';
-            overlay.style.width = '100vw';
-            overlay.style.maxWidth = '100vw';
-            overlay.style.background = 'transparent';
+            overlay.style.top = '20px';
+            overlay.style.right = '20px';
             document.body.style.background = 'transparent';
             document.body.style.margin = '0';
             document.body.style.padding = '0';
             document.body.style.overflow = 'hidden';
             document.documentElement.style.background = 'transparent';
             document.documentElement.style.overflow = 'hidden';
+            document.body.classList.add('overlay-mode');
+
+            // Drag logic for overlay
+            let dragState = null;
+            const handle = document.getElementById('bToolbarHandle');
+            if (handle) {
+                handle.addEventListener('pointerdown', (e) => {
+                    e.preventDefault();
+                    const rect = overlay.getBoundingClientRect();
+                    dragState = { startX: e.clientX, startY: e.clientY, originLeft: rect.left, originTop: rect.top };
+                });
+                window.addEventListener('pointermove', (e) => {
+                    if (!dragState) return;
+                    const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth);
+                    const maxTop = Math.max(0, window.innerHeight - overlay.offsetHeight);
+                    const left = Math.min(Math.max(0, dragState.originLeft + (e.clientX - dragState.startX)), maxLeft);
+                    const top = Math.min(Math.max(0, dragState.originTop + (e.clientY - dragState.startY)), maxTop);
+                    overlay.style.left = `${left}px`;
+                    overlay.style.top = `${top}px`;
+                    overlay.style.right = 'auto';
+                });
+                window.addEventListener('pointerup', () => { dragState = null; });
+                window.addEventListener('pointercancel', () => { dragState = null; });
+            }
             document.body.classList.add('overlay-mode');
 
             let lastBRoleDiagnostic = '';
@@ -3834,11 +3858,25 @@ document.addEventListener('DOMContentLoaded', () => {
             void logBRoleDiagnostic();
             setInterval(logBRoleDiagnostic, 1000);
 
-            window.toggleBOptions = function() {
+            window.toggleBOptions = function(event) {
+                if (event) event.stopPropagation();
                 const menu = document.getElementById('optionsMenu');
                 if (!menu) return;
                 menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
             };
+            window.addEventListener('click', (e) => {
+                const menu = document.getElementById('optionsMenu');
+                const btn = document.getElementById('optionsToggleBtn');
+                if (menu && menu.style.display === 'flex' && !menu.contains(e.target) && btn && !btn.contains(e.target)) {
+                    menu.style.display = 'none';
+                }
+            });
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    const menu = document.getElementById('optionsMenu');
+                    if (menu) menu.style.display = 'none';
+                }
+            });
         }
     </script>
 </body>

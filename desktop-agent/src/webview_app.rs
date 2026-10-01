@@ -244,14 +244,14 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             let url = format!("{}?overlay=1", local_url);
                             let overlay_win = WindowBuilder::new()
                                 .with_title("DeskStream Overlay")
-                                .with_inner_size(LogicalSize::new(60_u32, 240_u32))
+                                .with_maximized(true)
                                 .with_resizable(false)
                                 .with_decorations(false)
                                 .with_transparent(true)
                                 .with_always_on_top(true)
                                 .build(target)
                                 .expect("Failed to build overlay window");
-                            overlay_win.set_outer_position(tao::dpi::Position::Logical(tao::dpi::LogicalPosition::new(20_f64, 20_f64)));
+                            // Position is managed by JS
                                 
                             #[cfg(target_os = "windows")]
                             let builder = WebViewBuilder::new()
