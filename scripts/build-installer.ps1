@@ -118,25 +118,51 @@ except Exception as exc:
 
 Set-Location $DesktopAgentDir
 
+# Stop any running DeskStream process
+Write-Host "Stopping any running DeskStream instances..."
+Get-Process -Name "DeskStream" -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name "DeskStream-Agent" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+$env:CARGO_TARGET_DIR = "C:\cargo-target\deskstream"
+
 Write-Host "Building Cargo release..."
 cargo build --release
 
-$ExePath = Join-Path $DesktopAgentDir "target\release\DeskStream.exe"
-if (-Not (Test-Path $ExePath)) {
-    throw "Release executable not found at $ExePath"
+$CargoExePath = "C:\cargo-target\deskstream\release\DeskStream.exe"
+if (-Not (Test-Path $CargoExePath)) {
+    throw "Release executable not found at $CargoExePath"
 }
 
-if ($env:DESKSTREAM_CERT_THUMBPRINT) {
-    & (Join-Path $ProjectRoot 'scripts\sign-release.ps1') -ExePath $ExePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Release signing failed."
-    }
-} else {
-    Write-Host "Skipping code signing because DESKSTREAM_CERT_THUMBPRINT is not configured."
+$FinalExeDir = Join-Path $ProjectRoot "DESKSTREAM"
+if (-Not (Test-Path $FinalExeDir)) {
+    New-Item -ItemType Directory -Force -Path $FinalExeDir | Out-Null
 }
 
+$ExePath = Join-Path $FinalExeDir "DeskStream.exe"
+Copy-Item -Path $CargoExePath -Destination $ExePath -Force
+
+$CargoExeHash = (Get-FileHash $CargoExePath -Algorithm SHA256).Hash
 $ExeHash = (Get-FileHash $ExePath -Algorithm SHA256).Hash
-Write-Host "Release Executable SHA256: $ExeHash"
+
+Write-Host "Cargo Target Executable SHA256: $CargoExeHash"
+Write-Host "Copied Final Executable SHA256: $ExeHash"
+
+if ($CargoExeHash -ne $ExeHash) {
+    throw "SHA256 mismatch: Copied EXE does not match the Cargo target EXE!"
+}
+
+# FUTURE SIGNING PREPARATION
+# DO NOT ENABLE YET - Postponed until we obtain a proper code-signing certificate for Friends Software Solutions.
+$EnableCodeSigning = $false
+
+if ($EnableCodeSigning) {
+    Write-Host "Future signing placeholder for EXE. (No signing occurs now)"
+    # NOTE: Future Authenticode signing logic goes here.
+    # IMPORTANT: Credentials MUST come from a secure mechanism.
+    # Never commit .pfx, .p12, private keys, or passwords to the repository.
+} else {
+    Write-Host "Skipping code signing because EnableCodeSigning is false."
+}
 
 if (-Not (Test-Path $DistDir)) {
     New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
@@ -164,7 +190,15 @@ if ((Get-Item $InstallerPath).Length -lt 1024) {
     throw "The generated setup file is too small to be a real installer: $InstallerPath"
 }
 
+if ($EnableCodeSigning) {
+    Write-Host "Future signing placeholder for Installer. (No signing occurs now)"
+    # NOTE: Future Authenticode signing logic for the NSIS installer goes here.
+} else {
+    Write-Host "Skipping code signing for installer because EnableCodeSigning is false."
+}
+
 $InstallerHash = (Get-FileHash $InstallerPath -Algorithm SHA256).Hash
+Write-Host "Final Executable SHA256: $ExeHash"
 Write-Host "Installer SHA256: $InstallerHash"
 
 Write-Host "Build pipeline complete."

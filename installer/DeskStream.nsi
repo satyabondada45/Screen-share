@@ -32,7 +32,7 @@ Section "DeskStream (required)"
   SetOutPath "$INSTDIR"
   
   ; Include the executable built by Cargo
-  File "..\desktop-agent\target\release\DeskStream.exe"
+  File "..\DESKSTREAM\DeskStream.exe"
   
   ; Copy icon to use for shortcuts if it exists
   IfFileExists "..\desktop-agent\assets\icon.ico" 0 +2
