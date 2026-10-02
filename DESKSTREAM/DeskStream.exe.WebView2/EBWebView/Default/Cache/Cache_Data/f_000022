@@ -1523,7 +1523,7 @@
             </form>
         </section>
     <div id="bReversePermissionDialog" role="alertdialog" aria-modal="false"
-        style="display:none;position:fixed;left:20px;bottom:20px;z-index:11000;width:min(360px,calc(100vw - 40px));pointer-events:auto;">
+        style="display:none;position:fixed;left:20px;bottom:20px;z-index:11000;width:min(360px,calc(100vw - 40px));">
         <div style="padding:16px;background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 12px 32px rgba(15,23,42,.22);color:#111827;">
             <h2 style="margin:0 0 8px;font-size:1rem;">Reverse control request</h2>
             <p style="margin:0 0 14px;color:#4b5563;font-size:.9rem;line-height:1.45;">The remote controller is requesting to reverse the session. Accepting will end this connection and start a new session in the opposite direction.</p>
@@ -1534,7 +1534,7 @@
         </div>
     </div>
     <div id="bSessionTransferChoiceDialog" role="dialog" aria-modal="true"
-        style="display:none;position:fixed;inset:0;z-index:11001;background:rgba(15,23,42,.35);align-items:center;justify-content:center;padding:20px;pointer-events:auto;">
+        style="display:none;position:fixed;inset:0;z-index:11001;background:rgba(15,23,42,.35);align-items:center;justify-content:center;padding:20px;">
         <div style="width:min(360px,100%);padding:20px;background:#fff;border-radius:14px;box-shadow:0 16px 40px rgba(15,23,42,.22);color:#111827;">
             <h2 style="margin:0 0 16px;font-size:1rem;">Choose what to send</h2>
             <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;">
@@ -1545,7 +1545,7 @@
         </div>
     </div>
     <div id="bSessionEndedDialog" role="dialog" aria-modal="true" aria-labelledby="bSessionEndedTitle"
-        style="display:none;position:fixed;inset:0;z-index:10003;background:rgba(15,23,42,.45);align-items:center;justify-content:center;pointer-events:auto;">
+        style="display:none;position:fixed;inset:0;z-index:10003;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
         <div style="width:min(380px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
             <h2 id="bSessionEndedTitle" style="margin:0 0 10px;font-size:1.1rem;">Session Ended</h2>
             <p style="margin:0 0 20px;color:#4b5563;">This session has ended.</p>
@@ -1556,7 +1556,7 @@
     </div>
     
     <div id="bSessionFileApprovalDialog" role="dialog" aria-modal="true"
-        style="display:none;position:fixed;inset:0;z-index:12001;background:rgba(15,23,42,.45);align-items:center;justify-content:center;pointer-events:auto;">
+        style="display:none;position:fixed;inset:0;z-index:12001;background:rgba(15,23,42,.45);align-items:center;justify-content:center;">
         <div style="width:min(400px,calc(100vw - 32px));padding:24px;background:#fff;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);color:#111827;">
             <h2 id="fileApprovalTitle" style="margin:0 0 10px;font-size:1.1rem;">Incoming File Transfer</h2>
             <p id="fileApprovalMessage" style="margin:0 0 20px;color:#4b5563;word-wrap:break-word;">Accept file?</p>
@@ -2380,12 +2380,6 @@
         window.closeWindow = closeWindow;
 
         // ── Agent health poll ────────────────────────────────────────
-        // Miss counter for the background 5-second pollAgentHealth poller.
-        // Only dismiss an active B-session after 2 consecutive in_session=false readings,
-        // preventing false teardowns during the relay handshake window.
-        let _pollHealthMissCount = 0;
-        const POLL_HEALTH_MISS_THRESHOLD = 2;
-
         async function pollAgentHealth() {
             try {
                 const res = await fetch(`${AGENT_HEALTH}`);
@@ -2398,18 +2392,9 @@
                 }
                 const hasLiveBSession = Boolean(data && data.in_session === true);
                 if (hasLiveBSession && !_bSessionActive) {
-                    _pollHealthMissCount = 0;
                     enterBConnectedSession();
                 } else if (!hasLiveBSession && _bSessionActive) {
-                    _pollHealthMissCount++;
-                    console.warn(`[SESSION DEBUG] pollAgentHealth: in_session=false while B-session active (miss #${_pollHealthMissCount}/${POLL_HEALTH_MISS_THRESHOLD})`);
-                    if (_pollHealthMissCount >= POLL_HEALTH_MISS_THRESHOLD) {
-                        console.error('[SESSION DEBUG] pollAgentHealth: threshold reached — dismissing B-session overlay');
-                        _pollHealthMissCount = 0;
-                        _dismissBSessionOverlay();
-                    }
-                } else {
-                    _pollHealthMissCount = 0;
+                    _dismissBSessionOverlay();
                 }
             } catch (e) {
                 document.getElementById('agentStatusFooter').textContent = 'Agent: Not running';
@@ -3102,11 +3087,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (deviceId) deviceId.textContent = health.system_id || '';
             if (health.in_session === true) {
                 enterBConnectedSession();
+            } else if (_bSessionActive) {
+                _dismissBSessionOverlay();
             }
-            // Do NOT dismiss the session here on in_session=false —
-            // this single-shot check fires immediately at startup and could
-            // see a transient false during the relay handshake window.
-            // The watchdog (with its 2-miss grace period) handles teardown.
         })
         .catch(error => console.error('[SESSION] Initial health check failed:', error));
 });
@@ -3121,11 +3104,6 @@ document.addEventListener('DOMContentLoaded', () => {
         let _bSessionSidebar = null;
         let _bSessionDisconnecting = false;
         let _bSessionEndedDialogShown = false;
-        // Grace-period counter: require in_session=false for 2+ consecutive watchdog ticks
-        // before dismissing the session. This prevents false-positives during the brief
-        // relay TCP handshake window when in_session briefly reads false immediately after start.
-        let _bSessionWatchdogMissCount = 0;
-        const B_SESSION_WATCHDOG_MISS_THRESHOLD = 2;
         let _bReverseHandoffPending = false;
         let _bSessionChatPoll = null;
         let _bSessionTypingPoll = null;
@@ -3148,13 +3126,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 const health = await res.json();
                 const hasLiveBSession = Boolean(health && health.in_session === true);
                 if (hasLiveBSession && !_bSessionActive) {
-                    _pollHealthMissCount = 0;
-                    _bSessionWatchdogMissCount = 0;
                     enterBConnectedSession();
                     return;
                 }
-                // Do NOT dismiss in syncBSessionStateFromHealth itself; the watchdog with its
-                // grace-period counter is responsible for orderly teardown.
+                if (!hasLiveBSession && _bSessionActive) {
+                    _dismissBSessionOverlay();
+                }
             } catch (error) {
                 // Stay on the last known connected-state until the local agent health endpoint responds again.
             }
@@ -3182,9 +3159,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.add('b-session-active');
-            // Show the floating controls — always, regardless of IPC availability.
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.style.display = 'flex';
+            if (window.ipc) {
+                window.ipc.postMessage('open_overlay');
+            }
             // Start session timer
             _bSessionStartTime = Date.now();
             if (_bSessionTimerInterval) clearInterval(_bSessionTimerInterval);
@@ -3199,31 +3176,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Watchdog: auto-dismiss overlay when Rust signals in_session=false
             // (i.e., when the session ends on the controlled-device side).
-            // Requires 2 consecutive in_session=false readings before dismissing
-            // to avoid false-positives during the relay TCP handshake window.
-            _bSessionWatchdogMissCount = 0;
             if (_bSessionWatchdog) clearInterval(_bSessionWatchdog);
             _bSessionWatchdog = setInterval(async () => {
                 try {
                     const res = await fetch(AGENT_HEALTH);
                     const health = await res.json();
                     if (health.in_session === false) {
-                        _bSessionWatchdogMissCount++;
-                        console.warn(`[SESSION DEBUG] _bSessionWatchdog: in_session=false (miss #${_bSessionWatchdogMissCount}/${B_SESSION_WATCHDOG_MISS_THRESHOLD})`);
-                        if (_bSessionWatchdogMissCount >= B_SESSION_WATCHDOG_MISS_THRESHOLD) {
-                            console.error('[SESSION DEBUG] _bSessionWatchdog: threshold reached — ending session');
-                            if (_bReverseHandoffPending) {
-                                _dismissBSessionOverlay();
-                            } else {
-                                showBSessionEnded();
-                            }
+                        if (_bReverseHandoffPending) {
+                            _dismissBSessionOverlay();
+                        } else {
+                            showBSessionEnded();
                         }
                     } else if (health.in_session === true) {
-                        // Reset miss counter when session is confirmed alive.
-                        _bSessionWatchdogMissCount = 0;
+                        // Keep the B-side overlay tied to the real session lifecycle; do not let stale
+                        // acceptance state resurrect it after the agent has already disconnected.
                         _bSessionEndedDialogShown = false;
                     }
-                } catch (e) { /* ignore transient fetch errors */ }
+                } catch (e) { /* ignore transient errors */ }
             }, 2000);
             pollBSessionChat().catch(error => console.error('[CHAT] Initial history load failed:', error));
             _bSessionChatPoll = setInterval(() => pollBSessionChat().catch(error => console.error('[CHAT] Poll failed:', error)), 300);
@@ -3236,8 +3205,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!_bSessionActive) return;
             stopBSessionChatTyping();
             _bSessionActive = false;
-            _bSessionWatchdogMissCount = 0;
-            _pollHealthMissCount = 0;
             setBSessionNavigationVisible(true);
             _bSessionDisconnecting = false;
             currentFolderBatch = null;
@@ -3260,9 +3227,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.remove('b-session-active');
-            // Hide the floating controls — always, regardless of IPC availability.
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.style.display = 'none';
+            if (window.ipc) {
+                window.ipc.postMessage('close_overlay');
+            }
             document.getElementById('bSessionChatPanel')?.classList.remove('open');
             document.getElementById('bSessionChatMessages')?.replaceChildren();
             if (_bSessionTimerInterval) { clearInterval(_bSessionTimerInterval); _bSessionTimerInterval = null; }
@@ -3695,7 +3662,7 @@ document.addEventListener('DOMContentLoaded', () => {
     </script>
     
     <!-- B-Side Overlay Container -->
-    <div id="bSessionOverlay" class="floating-controls">
+    <div id="bSessionOverlay" class="floating-controls" style="display: none; flex-direction: column;">
 
         <div style="position: relative; display: flex; flex-direction: column; align-items: center;">
             <button class="floating-btn" id="optionsToggleBtn" type="button" title="Options" style="color: #1e293b;" onclick="toggleBOptions(event)">
@@ -3707,7 +3674,7 @@ document.addEventListener('DOMContentLoaded', () => {
             </button>
 
             <div id="optionsMenu" style="display: none; position: absolute; right: 100%; top: 0; margin-right: 8px; flex-direction: column; gap: 4px; background: rgba(255,255,255,0.95); border: 1px solid rgba(148, 163, 184, 0.65); border-radius: 12px; padding: 6px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16); min-width: 140px; pointer-events: auto;">
-                <button class="floating-btn" id="bOverlayChatBtn" type="button" title="Chat" onclick="if(typeof toggleBSessionChat === 'function') { toggleBSessionChat(); } else if(window.ipc){window.ipc.postMessage('toggle_b_chat');} toggleBOptions(event);">
+                <button class="floating-btn" id="bOverlayChatBtn" type="button" title="Chat" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_chat');} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                     </svg> Chat
@@ -3738,9 +3705,31 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
     </div>
     <script>
-        (function() {
+        if (window.location.search.includes('overlay=1')) {
             const overlay = document.getElementById('bSessionOverlay');
-            if (!overlay) return;
+            document.body.innerHTML = '';
+            document.body.appendChild(overlay);
+            // Allow overlay to be dragged via JS
+            overlay.style.display = 'flex';
+            overlay.style.position = 'fixed';
+            overlay.style.top = '20px';
+            overlay.style.right = '20px';
+            document.body.style.background = 'transparent';
+            document.body.style.margin = '0';
+            document.body.style.padding = '0';
+            document.body.style.overflow = 'hidden';
+            document.documentElement.style.background = 'transparent';
+            document.documentElement.style.overflow = 'hidden';
+            
+            // Apply overlay-mode to both body and html so CSS overrides work
+            document.documentElement.classList.add('overlay-mode');
+            document.body.classList.add('overlay-mode');
+
+            // Force clear any other styles
+            document.documentElement.style.setProperty('background', 'transparent', 'important');
+            document.body.style.setProperty('background', 'transparent', 'important');
+            document.documentElement.style.setProperty('background-color', 'transparent', 'important');
+            document.body.style.setProperty('background-color', 'transparent', 'important');
 
             // Drag logic for overlay
             let dragState = null;
@@ -3784,7 +3773,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 window.addEventListener('pointercancel', () => { dragState = null; });
             }
-        })();
+            document.body.classList.add('overlay-mode');
 
             let lastBRoleDiagnostic = '';
             const logBRoleDiagnostic = async () => {
@@ -3844,6 +3833,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (menu) menu.style.display = 'none';
                 }
             });
+        }
     </script>
 </body>
 </html>

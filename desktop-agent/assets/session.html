@@ -526,6 +526,14 @@ window.addEventListener('DOMContentLoaded', () => {
                     </svg>
                     File Transfer
                 </button>
+                <button class="btn" id="micBtn" onclick="toggleMicrophone()" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                    </svg>
+                    <span id="micBtnText">Mic</span>
+                </button>
                 <button class="btn" id="settingsBtn" onclick="toggleSettings()" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="12" cy="12" r="3"></circle>
@@ -588,13 +596,6 @@ window.addEventListener('DOMContentLoaded', () => {
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                         </svg> Chat
-                    </button>
-                    <button class="floating-btn" type="button" title="Microphone" onclick="toggleMicrophone(); toggleOptions(event);">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                            <line x1="12" y1="19" x2="12" y2="22"></line>
-                        </svg> Mic
                     </button>
                     <button class="floating-btn" type="button" title="Screen Fit" onclick="toggleFullscreen(); toggleOptions(event);">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -1512,7 +1513,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 microphoneSource.connect(microphoneProcessor);
                 microphoneProcessor.connect(silentOutput);
                 silentOutput.connect(microphoneContext.destination);
-                micBtn.textContent = "Mic On";
+                const micText = document.getElementById("micBtnText");
+                if (micText) micText.textContent = "Mic On";
                 console.log("[MIC] TYPE 17 microphone transmission enabled.");
             } catch (error) {
                 stopMicrophone();
@@ -1538,7 +1540,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 void microphoneContext.close();
                 microphoneContext = null;
             }
-            if (micBtn) micBtn.textContent = "Mic Off";
+            const micText = document.getElementById("micBtnText");
+            if (micText) micText.textContent = "Mic Off";
         }
 
         function receiveReverseRequest() {
@@ -3634,6 +3637,8 @@ window.addEventListener('DOMContentLoaded', () => {
             };
 
             ws.onclose = function (event) {
+                console.error('[SESSION DEBUG] ws.onclose FIRED in session.html', event.code, event.reason,
+                    `| sessionWasEstablished=${sessionWasEstablished} websocketAuthenticated=${websocketAuthenticated} isStreaming=${isStreaming}`);
                 sessionDebug('A_DISCONNECT', { code: String(event.code) });
                 stopMicrophone();
                 stopLocalChatTyping();
@@ -3643,6 +3648,15 @@ window.addEventListener('DOMContentLoaded', () => {
                 console.log("[WS] Closed:", event.code, event.reason);
                 console.log(`[WS] state at close: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount} rxPackets=${browserPerf.rxPackets}`);
                 if (fallbackToRelay()) {
+                    return;
+                }
+                // Only fully tear down if the session was legitimately established.
+                // If the socket closes BEFORE authentication (e.g. a transient pre-auth relay
+                // disconnect during connection setup), do not call stopWebStream / showSessionEnded —
+                // this prevents the DISCONNECTED state from showing immediately on startup.
+                if (!sessionWasEstablished && !websocketAuthenticated) {
+                    console.warn('[SESSION DEBUG] ws.onclose: session never established — skipping stopWebStream to avoid false disconnect UI');
+                    setHud("RECONNECTING...");
                     return;
                 }
                 stopWebStream();
@@ -3808,7 +3822,6 @@ window.addEventListener('DOMContentLoaded', () => {
 
             ws.onclose =
                 function (event) {
-
                     // event.wasClean === false + a 1xxx code means the REMOTE (relay/agent) closed
                     // the socket, NOT this browser. A browser-initiated close sets ws.close() itself
                     // (see stopWebStream) and would be wasClean=true with code 1000/1001.

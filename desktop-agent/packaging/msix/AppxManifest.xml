@@ -6,16 +6,15 @@
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   IgnorableNamespaces="uap rescap desktop">
 
-  <!-- PLACEHOLDERS: MUST BE REPLACED WITH ACTUAL STORE IDENTITY -->
   <Identity
-    Name="DeskStreamPlaceholder"
-    Publisher="CN=PublisherPlaceholder"
+    Name="SatyaBondada.DeskStream"
+    Publisher="CN=SatyaBondada"
     Version="1.1.3.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>DeskStream</DisplayName>
-    <PublisherDisplayName>PublisherPlaceholder</PublisherDisplayName>
+    <PublisherDisplayName>Satya Bondada</PublisherDisplayName>
     <Description>Screen Share Remote Desktop Agent</Description>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
