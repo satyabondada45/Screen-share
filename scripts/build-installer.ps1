@@ -19,7 +19,26 @@ function Ensure-Nsis {
         return $existing.Source
     }
 
-    function Get-CodeSigningCertificate([string]$Thumbprint) {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "NSIS not found; installing via winget..."
+        & $winget install --id NSIS.NSIS -e --accept-source-agreements --accept-package-agreements | Out-Host
+        $candidate = @(
+            'C:\Program Files\NSIS\makensis.exe',
+            'C:\Program Files (x86)\NSIS\makensis.exe'
+        )
+        foreach ($path in $candidate) {
+            if (Test-Path $path) {
+                $env:Path += ";$(Split-Path -Parent $path)"
+                return $path
+            }
+        }
+    }
+
+    throw "makensis is required to build the real Windows installer. Install NSIS and try again."
+}
+
+function Get-CodeSigningCertificate([string]$Thumbprint) {
         foreach ($store in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\My')) {
             $certificate = Get-ChildItem $store -ErrorAction SilentlyContinue |
                 Where-Object { $_.Thumbprint -eq $Thumbprint -and $_.HasPrivateKey } |
@@ -65,18 +84,21 @@ function Ensure-Nsis {
         $env:DESKSTREAM_SIGNTOOL = $signTool
         $signingScript = $ProductionSigner
     } else {
-        if (-not (Test-Path $DevelopmentSigner)) {
-            throw "Development signing script is missing."
-        }
-        $signingScript = $DevelopmentSigner
-        Write-Warning "Development signatures are self-signed and will NOT provide public Smart App Control trust."
+        $signingScript = $null
+        Write-Warning "UNSIGNED DEVELOPMENT BUILD"
+        Write-Warning "Smart App Control/SmartScreen warnings are expected for this unsigned artifact."
     }
 
     function Sign-Binary([string]$Path) {
+        if (-not $signingScript) {
+            Write-Host "Skipping signing for $Path (Development mode)"
+            return
+        }
         Write-Host "Signing $Path..."
         & $signingScript -ExePath $Path
-        if ($LASTEXITCODE -ne 0) {
-            throw "Signing failed for $Path"
+        $sig = Get-AuthenticodeSignature -FilePath $Path
+        if ($sig.Status -ne 'Valid') {
+            throw "Signing failed or signature is invalid for $Path"
         }
     }
 
@@ -99,30 +121,10 @@ function Ensure-Nsis {
             Expires = if ($certificate) { $certificate.NotAfter.ToString("yyyy-MM-dd") } else { "(none)" }
         } | Format-List
 
-        if (-not $certificate -or $signature.Status -notin @('Valid', 'UnknownError')) {
+        if ($SigningMode -eq "Production" -and (-not $certificate -or $signature.Status -notin @('Valid', 'UnknownError'))) {
             throw "Binary has no verifiable Authenticode signature: $Path ($($signature.Status))"
         }
     }
-
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget) {
-        Write-Host "NSIS not found; installing via winget..."
-        & $winget install --id NSIS.NSIS -e --accept-source-agreements --accept-package-agreements | Out-Host
-        $candidate = @(
-            'C:\Program Files\NSIS\makensis.exe',
-            'C:\Program Files (x86)\NSIS\makensis.exe'
-        )
-        foreach ($path in $candidate) {
-            if (Test-Path $path) {
-                $env:Path += ";$(Split-Path -Parent $path)"
-                return $path
-            }
-        }
-    }
-
-    throw "makensis is required to build the real Windows installer. Install NSIS and try again."
-}
-
 Write-Host "Verifying source tree..."
 
 $IconPath = Join-Path $DesktopAgentDir "assets\icon.ico"
@@ -259,7 +261,11 @@ if (Test-Path $staleInstaller) {
 Write-Host "Building NSIS installer..."
 $makensisPath = Ensure-Nsis
 Set-Location $InstallerDir
-& $makensisPath "/DDESKSTREAM_SIGNING_SCRIPT=$signingScript" "DeskStream.nsi"
+if ($signingScript) {
+    & $makensisPath "/DDESKSTREAM_SIGNING_SCRIPT=$signingScript" "DeskStream.nsi"
+} else {
+    & $makensisPath "DeskStream.nsi"
+}
 if ($LASTEXITCODE -ne 0) {
     throw "NSIS installer build failed."
 }

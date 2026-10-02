@@ -1,3 +1,2 @@
-2026/10/02-13:19:01.546 b38 Reusing MANIFEST C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Sync Data\LevelDB/MANIFEST-000001
-2026/10/02-13:19:01.548 b38 Recovering log #3
-2026/10/02-13:19:01.549 b38 Reusing old log C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Sync Data\LevelDB/000003.log 
+2026/10/02-16:57:56.360 1128 Creating DB C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Sync Data\LevelDB since it was missing.
+2026/10/02-16:57:56.391 1128 Reusing MANIFEST C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Sync Data\LevelDB/MANIFEST-000001

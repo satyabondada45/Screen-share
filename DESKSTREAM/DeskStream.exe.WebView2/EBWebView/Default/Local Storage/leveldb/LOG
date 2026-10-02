@@ -1,3 +1,2 @@
-2026/10/02-13:19:01.922 5c08 Reusing MANIFEST C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Local Storage\leveldb/MANIFEST-000001
-2026/10/02-13:19:01.926 5c08 Recovering log #3
-2026/10/02-13:19:01.931 5c08 Reusing old log C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Local Storage\leveldb/000003.log 
+2026/10/02-16:57:57.184 2920 Creating DB C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Local Storage\leveldb since it was missing.
+2026/10/02-16:57:57.228 2920 Reusing MANIFEST C:\xampp\htdocs\Screen Share\DESKSTREAM\DeskStream.exe.WebView2\EBWebView\Default\Local Storage\leveldb/MANIFEST-000001

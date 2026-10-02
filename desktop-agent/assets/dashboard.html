@@ -3183,8 +3183,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             document.body.classList.add('b-session-active');
             // Show the floating controls — always, regardless of IPC availability.
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.style.display = 'flex';
+            if (window.ipc && !window.location.search.includes('overlay=1')) {
+                window.ipc.postMessage('open_overlay');
+            } else {
+                const overlay = document.getElementById('bSessionOverlay');
+                if (overlay) overlay.style.display = 'flex';
+            }
             // Start session timer
             _bSessionStartTime = Date.now();
             if (_bSessionTimerInterval) clearInterval(_bSessionTimerInterval);
@@ -3234,6 +3238,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function _dismissBSessionOverlay() {
             if (!_bSessionActive) return;
+            if (window.ipc) window.ipc.postMessage('close_overlay');
             stopBSessionChatTyping();
             _bSessionActive = false;
             _bSessionWatchdogMissCount = 0;
@@ -3756,6 +3761,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 handle.addEventListener('pointerdown', (e) => {
                     // Start drag only if we didn't click one of the sub-menu items
                     if (e.target.closest('#optionsMenu')) return;
+                    if (window.location.search.includes('overlay=1') && window.ipc) {
+                        window.ipc.postMessage('drag_overlay');
+                        return;
+                    }
                     const rect = overlay.getBoundingClientRect();
                     dragState = { 
                         startX: e.clientX, 
@@ -3790,6 +3799,33 @@ document.addEventListener('DOMContentLoaded', () => {
                     dragState = null; 
                 });
                 window.addEventListener('pointercancel', () => { dragState = null; });
+            }
+
+            if (window.location.search.includes('overlay=1')) {
+                document.documentElement.style.background = 'transparent';
+                document.documentElement.style.pointerEvents = 'none';
+                document.body.style.background = 'transparent';
+                document.body.style.pointerEvents = 'none';
+                document.body.style.overflow = 'hidden';
+                
+                // Hide everything except bSessionOverlay
+                Array.from(document.body.children).forEach(child => {
+                    if (child.id !== 'bSessionOverlay' && child.tagName !== 'SCRIPT' && child.tagName !== 'STYLE') {
+                        child.style.display = 'none';
+                    }
+                });
+                
+                overlay.style.display = 'flex';
+                overlay.style.position = 'fixed';
+                overlay.style.top = '10px';
+                overlay.style.right = '10px';
+                overlay.style.left = 'auto';
+                overlay.style.bottom = 'auto';
+
+                // Try to make the window small if Wry allows it
+                try {
+                    window.resizeTo(350, 150);
+                } catch(e) {}
             }
         })();
 

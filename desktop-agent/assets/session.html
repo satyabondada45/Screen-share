@@ -927,7 +927,10 @@ window.addEventListener('DOMContentLoaded', () => {
         let audioCtx = null;
 
         let nextAudioTime = 0;
-
+        let isAudioEnabled = true;
+        let audioReceiverDiagnosticCount = 0;
+        let audioSenderDiagnosticCount = 0;
+        let activeAudioNodes = [];
 
         let microphoneStream = null;
         let microphoneContext = null;
@@ -1409,70 +1412,35 @@ window.addEventListener('DOMContentLoaded', () => {
         ============================================================ */
 
         async function toggleAudio() {
-
-            isAudioEnabled =
-                !isAudioEnabled;
-
+            isAudioEnabled = !isAudioEnabled;
+            const audioBtn = document.getElementById("audioBtn");
             if (isAudioEnabled) {
-
-                audioBtn.textContent =
-                    "🔊 Mute Audio";
-
-                audioBtn.classList.remove(
-                    "btn-secondary"
-                );
-
-                audioBtn.classList.add(
-                    "btn-warning"
-                );
-
-                try {
-
-                    if (!audioCtx) {
-
-                        audioCtx =
-                            new (
-                                window.AudioContext ||
-                                window.webkitAudioContext
-                            )();
-
-                    }
-
-                    if (
-                        audioCtx.state ===
-                        "suspended"
-                    ) {
-
-                        await audioCtx.resume();
-
-                    }
-
-                } catch (error) {
-
-                    console.error(
-                        "[AUDIO] Init error:",
-                        error
-                    );
-
+                if (audioBtn) {
+                    audioBtn.textContent = "🔊 Mute Audio";
+                    audioBtn.classList.remove("btn-secondary");
+                    audioBtn.classList.add("btn-warning");
                 }
-
+                try {
+                    if (!audioCtx) {
+                        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                            latencyHint: "interactive",
+                            sampleRate: 48000
+                        });
+                    }
+                    if (audioCtx.state === "suspended") {
+                        await audioCtx.resume();
+                    }
+                } catch (error) {
+                    console.error("[AUDIO] Init error:", error);
+                }
             } else {
-
-                audioBtn.textContent =
-                    "🔈 Listen Audio";
-
-                audioBtn.classList.remove(
-                    "btn-warning"
-                );
-
-                audioBtn.classList.add(
-                    "btn-secondary"
-                );
-
+                if (audioBtn) {
+                    audioBtn.textContent = "🔈 Listen Audio";
+                    audioBtn.classList.remove("btn-warning");
+                    audioBtn.classList.add("btn-secondary");
+                }
                 nextAudioTime = 0;
-
             }
-
         }
 
         async function toggleMicrophone() {
@@ -1485,37 +1453,64 @@ window.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             try {
+                // Low-latency voice capture with automatic echo cancellation, noise suppression, and gain control
                 microphoneStream = await navigator.mediaDevices.getUserMedia({
-                    audio: { channelCount: 1 },
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 48000,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
                     video: false
                 });
-                microphoneContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                microphoneContext = new (window.AudioContext || window.webkitAudioContext)({
+                    latencyHint: "interactive",
+                    sampleRate: 48000
+                });
                 await microphoneContext.resume();
+
                 microphoneSource = microphoneContext.createMediaStreamSource(microphoneStream);
-                microphoneProcessor = microphoneContext.createScriptProcessor(2048, 1, 1);
+                // 1024 buffer size (~21.3ms @ 48kHz) optimizes voice latency without CPU thrashing
+                microphoneProcessor = microphoneContext.createScriptProcessor(1024, 1, 1);
                 const silentOutput = microphoneContext.createGain();
                 silentOutput.gain.value = 0;
+
                 microphoneProcessor.onaudioprocess = event => {
                     if (!microphoneStream || !isSocketOpen()) return;
+                    const tCapture = performance.now();
                     const input = event.inputBuffer.getChannelData(0);
                     const bytes = input.length * 4;
                     const packet = new Uint8Array(11 + bytes);
                     const view = new DataView(packet.buffer);
-                    packet[0] = 17;
+
+                    packet[0] = 17; // TYPE 17 = AUDIO
                     view.setUint32(1, bytes, false);
                     view.setUint32(5, microphoneContext.sampleRate, false);
                     view.setUint16(9, 1, false);
-                    for (let index = 0; index < input.length; index++) {
-                        view.setFloat32(11 + index * 4, input[index], true);
-                    }
+
+                    // High performance direct Float32 LE buffer copy (eliminating 1024-iteration element loop)
+                    const floatBytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+                    packet.set(floatBytes, 11);
+
+                    const tCreated = performance.now();
                     ws.send(packet);
+                    const tSent = performance.now();
+
+                    audioSenderDiagnosticCount = (audioSenderDiagnosticCount || 0) + 1;
+                    if (audioSenderDiagnosticCount % 100 === 1) {
+                        console.log(`[A-AUDIO] capture: ${tCapture.toFixed(2)}ms | packet created: +${(tCreated - tCapture).toFixed(2)}ms | packet sent: +${(tSent - tCreated).toFixed(2)}ms | chunk_samples: ${input.length} | sampleRate: ${microphoneContext.sampleRate}Hz`);
+                    }
                 };
+
                 microphoneSource.connect(microphoneProcessor);
                 microphoneProcessor.connect(silentOutput);
                 silentOutput.connect(microphoneContext.destination);
+
                 const micText = document.getElementById("micBtnText");
                 if (micText) micText.textContent = "Mic On";
-                console.log("[MIC] TYPE 17 microphone transmission enabled.");
+                console.log("[MIC] TYPE 17 microphone transmission enabled (1024-sample low-latency stream).");
             } catch (error) {
                 stopMicrophone();
                 console.error("[MIC] Failed to enable microphone:", error);
@@ -1542,6 +1537,7 @@ window.addEventListener('DOMContentLoaded', () => {
             }
             const micText = document.getElementById("micBtnText");
             if (micText) micText.textContent = "Mic Off";
+            console.log("[MIC] Microphone stopped.");
         }
 
         function receiveReverseRequest() {
@@ -2072,6 +2068,11 @@ window.addEventListener('DOMContentLoaded', () => {
             }
             console.log("[STREAM STATE]", newState);
             if (newState === "WAITING_FOR_KEYFRAME") {
+                if (isSocketOpen()) {
+                    console.log("[VIDEO RECOVERY] Requesting IDR from Host...");
+                    const pkt = new Uint8Array([99]);
+                    ws.send(pkt);
+                }
                 console.warn(
                     `[VIDEO WAIT DIAGNOSTIC] reason=decoder_wait ` +
                     `lastPacketAt=${videoDiagnostics.lastPacketAt || "none"} ` +
@@ -3011,7 +3012,6 @@ window.addEventListener('DOMContentLoaded', () => {
         ============================================================ */
 
         function handleAudioPacket(buffer) {
-
             /*
                 TYPE 17 = AUDIO
         
@@ -3019,9 +3019,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 [4 bytes data size (u32 BE)]
                 [4 bytes sample rate (u32 BE)]
                 [2 bytes channels (u16 BE)]
-                [N bytes audio data]
+                [N bytes audio data: Float32 PCM LE]
             */
-
+            const tRx = performance.now();
             const type = new Uint8Array(buffer)[0];
 
             if (type !== 17) {
@@ -3029,38 +3029,19 @@ window.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-
-
-            if (buffer.byteLength < 11) {
-
-                console.warn(
-                    "[AUDIO] Packet too small."
-                );
-
+            if (!isAudioEnabled) {
                 return;
-
             }
 
-            const view =
-                new DataView(buffer);
+            if (buffer.byteLength < 11) {
+                console.warn("[AUDIO] Packet too small.");
+                return;
+            }
 
-            const byteLen =
-                view.getUint32(
-                    1,
-                    false
-                );
-
-            const sampleRate =
-                view.getUint32(
-                    5,
-                    false
-                );
-
-            const channels =
-                view.getUint16(
-                    9,
-                    false
-                );
+            const view = new DataView(buffer);
+            const byteLen = view.getUint32(1, false);
+            const sampleRate = view.getUint32(5, false);
+            const channels = view.getUint16(9, false);
 
             if (
                 byteLen <= 0 ||
@@ -3071,135 +3052,97 @@ window.addEventListener('DOMContentLoaded', () => {
                 channels <= 0 ||
                 channels > 32
             ) {
-
                 return;
-
             }
 
             const start = 11;
-
-            const end =
-                start + byteLen;
-
-            if (
-                end > buffer.byteLength
-            ) {
-
-                console.error(
-                    "[AUDIO] Invalid audio length."
-                );
-
+            const end = start + byteLen;
+            if (end > buffer.byteLength) {
+                console.error("[AUDIO] Invalid audio length.");
                 return;
-
             }
 
-            const audioBytes =
-                buffer.slice(
-                    start,
-                    end
-                );
-
-            const floatArray =
-                new Float32Array(
-                    audioBytes
-                );
+            const tDecodeStart = performance.now();
+            // Fast extraction of Float32Array: sliced ArrayBuffer starts at offset 0 (4-byte aligned)
+            const audioBytes = buffer.slice(start, end);
+            const floatArray = new Float32Array(audioBytes);
 
             if (!floatArray.length) {
-
                 return;
-
             }
 
             if (!audioCtx) {
-
-                audioCtx =
-                    new (
-                        window.AudioContext ||
-                        window.webkitAudioContext
-                    )();
-
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                    latencyHint: "interactive",
+                    sampleRate: sampleRate || 48000
+                });
             }
 
-            if (
-                audioCtx.state ===
-                "suspended"
-            ) {
-
-                audioCtx.resume()
-                    .catch(console.error);
-
+            if (audioCtx.state === "suspended") {
+                audioCtx.resume().catch(console.error);
             }
 
-            const frames =
-                Math.floor(
-                    floatArray.length /
-                    channels
-                );
-
+            const frames = Math.floor(floatArray.length / channels);
             if (frames <= 0 || floatArray.length % channels !== 0) {
-
                 return;
-
             }
 
-            const audioBuffer =
-                audioCtx.createBuffer(
-                    channels,
-                    frames,
-                    sampleRate
-                );
+            const audioBuffer = audioCtx.createBuffer(
+                channels,
+                frames,
+                sampleRate
+            );
 
-            for (
-                let c = 0;
-                c < channels;
-                c++
-            ) {
-
-                const channelData =
-                    audioBuffer.getChannelData(c);
-
-                for (
-                    let i = 0;
-                    i < frames;
-                    i++
-                ) {
-
-                    channelData[i] =
-                        floatArray[
-                        i * channels + c
-                        ];
-
+            if (channels === 1) {
+                // Direct fast copy for mono voice (zero nested loops)
+                audioBuffer.copyToChannel(floatArray, 0);
+            } else {
+                for (let c = 0; c < channels; c++) {
+                    const channelData = audioBuffer.getChannelData(c);
+                    for (let i = 0; i < frames; i++) {
+                        channelData[i] = floatArray[i * channels + c];
+                    }
                 }
+            }
+            const tDecodeEnd = performance.now();
 
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioCtx.destination);
+
+            const curTime = audioCtx.currentTime;
+            const TARGET_JITTER_BUFFER = 0.025; // 25ms optimal jitter buffer for real-time speech
+            const MAX_ALLOWED_LATENCY = 0.080;   // 80ms max queue lag before resynchronizing
+
+            // If audio underran (gap in speech / starting fresh)
+            if (nextAudioTime < curTime) {
+                nextAudioTime = curTime + TARGET_JITTER_BUFFER;
+            } 
+            // If audio queue accumulated excessive latency (e.g. background tab throttling or network burst)
+            else if (nextAudioTime > curTime + MAX_ALLOWED_LATENCY) {
+                // Stop any queued but unplayed nodes to prevent overlapping echo/distortion
+                for (let i = 0; i < activeAudioNodes.length; i++) {
+                    try { activeAudioNodes[i].stop(); } catch (_) {}
+                }
+                activeAudioNodes = [];
+                nextAudioTime = curTime + TARGET_JITTER_BUFFER;
             }
 
-            const source =
-                audioCtx.createBufferSource();
+            source.start(nextAudioTime);
+            activeAudioNodes.push(source);
+            source.onended = () => {
+                const idx = activeAudioNodes.indexOf(source);
+                if (idx !== -1) activeAudioNodes.splice(idx, 1);
+            };
 
-            source.buffer =
-                audioBuffer;
+            const scheduledTime = nextAudioTime;
+            nextAudioTime += audioBuffer.duration;
 
-            source.connect(
-                audioCtx.destination
-            );
-
-            if (
-                nextAudioTime <
-                audioCtx.currentTime || nextAudioTime > audioCtx.currentTime + 0.3
-            ) {
-
-                nextAudioTime =
-                    audioCtx.currentTime + .05;
-
+            audioReceiverDiagnosticCount = (audioReceiverDiagnosticCount || 0) + 1;
+            if (audioReceiverDiagnosticCount % 100 === 1) {
+                const queueDurationMs = Math.max(0, (nextAudioTime - curTime) * 1000);
+                console.log(`[B-AUDIO] rx: ${tRx.toFixed(2)}ms | decode: ${(tDecodeEnd - tDecodeStart).toFixed(2)}ms | scheduled_at: ${scheduledTime.toFixed(3)}s (cur: ${curTime.toFixed(3)}s) | queue_depth: ${queueDurationMs.toFixed(1)}ms | chunk_dur: ${(audioBuffer.duration * 1000).toFixed(1)}ms`);
             }
-
-            source.start(
-                nextAudioTime
-            );
-
-            nextAudioTime +=
-                audioBuffer.duration;
-
         }
 
 
