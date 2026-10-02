@@ -3116,23 +3116,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const _bSessionHandledOffers = new Set();
 
         function setBSessionNavigationVisible(visible) {
-            const workspace = document.getElementById('mainWorkspace');
-            const content = document.getElementById('mainContentArea');
-            if (!workspace || !content) return;
-
-            if (visible) {
-                if (_bSessionSidebar) {
-                    workspace.insertBefore(_bSessionSidebar, content);
-                    _bSessionSidebar = null;
-                }
-                return;
-            }
-
-            const sidebar = workspace.querySelector('.sidebar');
-            if (sidebar) {
-                _bSessionSidebar = sidebar;
-                sidebar.remove();
-            }
+            // Do not remove the sidebar. 
+            // The dashboard layout must remain intact during a B-session.
         }
 
         async function syncBSessionStateFromHealth() {
@@ -3684,7 +3669,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <line x1="12" y1="19" x2="12" y2="22"></line>
                     </svg> Mic
                 </button>
-                <button class="floating-btn" id="bScreenFitBtn" type="button" title="Screen Fit" onclick="if(window.ipc){window.ipc.postMessage('toggle_fullscreen');} toggleBOptions(event);">
+                <button class="floating-btn" id="bScreenFitBtn" type="button" title="Screen Fit" onclick="if(typeof toggleFullscreen === 'function'){toggleFullscreen();} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                         <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
                     </svg> Screen Fit
@@ -3716,30 +3701,52 @@ document.addEventListener('DOMContentLoaded', () => {
             document.body.style.margin = '0';
             document.body.style.padding = '0';
             document.body.style.overflow = 'hidden';
+            document.body.style.pointerEvents = 'none';
             document.documentElement.style.background = 'transparent';
             document.documentElement.style.overflow = 'hidden';
+            document.documentElement.style.pointerEvents = 'none';
             document.body.classList.add('overlay-mode');
 
             // Drag logic for overlay
             let dragState = null;
-            const handle = document.getElementById('bToolbarHandle');
+            const handle = document.getElementById('optionsToggleBtn');
             if (handle) {
                 handle.addEventListener('pointerdown', (e) => {
-                    e.preventDefault();
+                    // Start drag only if we didn't click one of the sub-menu items
+                    if (e.target.closest('#optionsMenu')) return;
                     const rect = overlay.getBoundingClientRect();
-                    dragState = { startX: e.clientX, startY: e.clientY, originLeft: rect.left, originTop: rect.top };
+                    dragState = { 
+                        startX: e.clientX, 
+                        startY: e.clientY, 
+                        originLeft: rect.left, 
+                        originTop: rect.top,
+                        isDragging: false
+                    };
                 });
                 window.addEventListener('pointermove', (e) => {
                     if (!dragState) return;
-                    const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth);
-                    const maxTop = Math.max(0, window.innerHeight - overlay.offsetHeight);
-                    const left = Math.min(Math.max(0, dragState.originLeft + (e.clientX - dragState.startX)), maxLeft);
-                    const top = Math.min(Math.max(0, dragState.originTop + (e.clientY - dragState.startY)), maxTop);
-                    overlay.style.left = `${left}px`;
-                    overlay.style.top = `${top}px`;
-                    overlay.style.right = 'auto';
+                    const dx = e.clientX - dragState.startX;
+                    const dy = e.clientY - dragState.startY;
+                    // Threshold to differentiate click from drag
+                    if (!dragState.isDragging && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+                        dragState.isDragging = true;
+                    }
+                    if (dragState.isDragging) {
+                        const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth);
+                        const maxTop = Math.max(0, window.innerHeight - overlay.offsetHeight);
+                        const left = Math.min(Math.max(0, dragState.originLeft + dx), maxLeft);
+                        const top = Math.min(Math.max(0, dragState.originTop + dy), maxTop);
+                        overlay.style.left = `${left}px`;
+                        overlay.style.top = `${top}px`;
+                        overlay.style.right = 'auto';
+                    }
                 });
-                window.addEventListener('pointerup', () => { dragState = null; });
+                window.addEventListener('pointerup', (e) => { 
+                    if (dragState && !dragState.isDragging) {
+                        // It was a click, not a drag. Let the click handler work.
+                    }
+                    dragState = null; 
+                });
                 window.addEventListener('pointercancel', () => { dragState = null; });
             }
             document.body.classList.add('overlay-mode');
@@ -3779,6 +3786,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 const menu = document.getElementById('optionsMenu');
                 if (!menu) return;
                 menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+            };
+            window.toggleFullscreen = function() {
+                const box = document.documentElement;
+                if (!document.fullscreenElement) {
+                    if (box.requestFullscreen) box.requestFullscreen();
+                    else if (box.webkitRequestFullscreen) box.webkitRequestFullscreen();
+                } else {
+                    if (document.exitFullscreen) document.exitFullscreen();
+                }
             };
             window.addEventListener('click', (e) => {
                 const menu = document.getElementById('optionsMenu');

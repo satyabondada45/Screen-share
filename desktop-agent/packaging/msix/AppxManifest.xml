@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  IgnorableNamespaces="uap rescap desktop">
+
+  <!-- PLACEHOLDERS: MUST BE REPLACED WITH ACTUAL STORE IDENTITY -->
+  <Identity
+    Name="DeskStreamPlaceholder"
+    Publisher="CN=PublisherPlaceholder"
+    Version="1.1.3.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>DeskStream</DisplayName>
+    <PublisherDisplayName>PublisherPlaceholder</PublisherDisplayName>
+    <Description>Screen Share Remote Desktop Agent</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22000.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <!-- Required for Win32 desktop apps -->
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="privateNetworkClientServer" />
+    <Capability Name="internetClientServer" />
+  </Capabilities>
+
+  <Applications>
+    <Application
+      Id="DeskStreamApp"
+      Executable="DeskStream.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      
+      <uap:VisualElements
+        DisplayName="DeskStream"
+        Description="Screen Share Remote Desktop"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        BackgroundColor="transparent">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+      
+      <Extensions>
+        <!-- Windows Startup Task to launch the agent automatically (replacing registry/shortcut) -->
+        <desktop:Extension Category="windows.startupTask" Executable="DeskStream.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="DeskStreamAgentStartup" Enabled="true" DisplayName="DeskStream Background Agent" />
+        </desktop:Extension>
+      </Extensions>
+
+    </Application>
+  </Applications>
+</Package>
