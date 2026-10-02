@@ -266,8 +266,8 @@ unsafe fn tray_thread(quit: Arc<AtomicBool>) {
         return;
     }
 
-    // Load icon from the EXE's embedded resources (set by build.rs / winres)
-    let hicon = LoadIconW(hinstance, IDI_APPLICATION as *const u16);
+    // winres::set_icon stores the application icon as resource ID 1.
+    let hicon = LoadIconW(hinstance, 1usize as *const u16);
     // If that fails, use the system default
     let hicon = if hicon == 0 {
         LoadIconW(0, IDI_APPLICATION as *const u16)

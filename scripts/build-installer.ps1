@@ -1,14 +1,107 @@
+param (
+    [ValidateSet("Production", "Development")]
+    [string]$SigningMode = "Production"
+)
+
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = $PSScriptRoot | Split-Path -Parent
 $DesktopAgentDir = Join-Path $ProjectRoot "desktop-agent"
 $InstallerDir = Join-Path $ProjectRoot "installer"
 $DistDir = Join-Path $ProjectRoot "dist-installer"
+$ProductionSigner = Join-Path $ProjectRoot "scripts\sign-release.ps1"
+$DevelopmentSigner = Join-Path $ProjectRoot "scripts\sign-windows.ps1"
+$SignatureVerifier = Join-Path $ProjectRoot "scripts\verify-release-signature.ps1"
 
 function Ensure-Nsis {
     $existing = Get-Command makensis -ErrorAction SilentlyContinue
     if ($existing) {
         return $existing.Source
+    }
+
+    function Get-CodeSigningCertificate([string]$Thumbprint) {
+        foreach ($store in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\My')) {
+            $certificate = Get-ChildItem $store -ErrorAction SilentlyContinue |
+                Where-Object { $_.Thumbprint -eq $Thumbprint -and $_.HasPrivateKey } |
+                Select-Object -First 1
+            if ($certificate) {
+                return $certificate
+            }
+        }
+        return $null
+    }
+
+    Write-Host "Signing mode: $SigningMode"
+    if ($SigningMode -eq "Production") {
+        if (-not $env:DESKSTREAM_CERT_THUMBPRINT) {
+            throw "Production signing requires DESKSTREAM_CERT_THUMBPRINT for a trusted code-signing certificate. Use -SigningMode Development only for local testing."
+        }
+        if (-not (Test-Path $ProductionSigner) -or -not (Test-Path $SignatureVerifier)) {
+            throw "Production signing or verification script is missing."
+        }
+
+        $productionCert = Get-CodeSigningCertificate $env:DESKSTREAM_CERT_THUMBPRINT
+        if (-not $productionCert -or $productionCert.NotBefore -gt (Get-Date) -or $productionCert.NotAfter -lt (Get-Date)) {
+            throw "The configured production signing certificate is missing, has no private key, or is expired."
+        }
+        if ($productionCert.Subject -eq $productionCert.Issuer) {
+            throw "A self-signed certificate cannot be used for Production signing."
+        }
+
+        $codeSigningEku = @($productionCert.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId.Value })
+        if ($codeSigningEku -notcontains '1.3.6.1.5.5.7.3.3') {
+            throw "The configured production certificate does not have the Code Signing EKU."
+        }
+
+        $signTool = $env:DESKSTREAM_SIGNTOOL
+        if (-not $signTool) {
+            $signTool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1 -ExpandProperty FullName
+        }
+        if (-not $signTool -or -not (Test-Path $signTool)) {
+            throw "signtool.exe was not found. Set DESKSTREAM_SIGNTOOL to its full path."
+        }
+        $env:DESKSTREAM_SIGNTOOL = $signTool
+        $signingScript = $ProductionSigner
+    } else {
+        if (-not (Test-Path $DevelopmentSigner)) {
+            throw "Development signing script is missing."
+        }
+        $signingScript = $DevelopmentSigner
+        Write-Warning "Development signatures are self-signed and will NOT provide public Smart App Control trust."
+    }
+
+    function Sign-Binary([string]$Path) {
+        Write-Host "Signing $Path..."
+        & $signingScript -ExePath $Path
+        if ($LASTEXITCODE -ne 0) {
+            throw "Signing failed for $Path"
+        }
+    }
+
+    function Verify-ProductionSignature([string]$Path) {
+        & $SignatureVerifier -ExePath $Path
+        if ($LASTEXITCODE -ne 0) {
+            throw "Production signature verification failed for $Path"
+        }
+    }
+
+    function Report-Signature([string]$Path) {
+        $signature = Get-AuthenticodeSignature -FilePath $Path
+        $certificate = $signature.SignerCertificate
+        [pscustomobject]@{
+            File = [IO.Path]::GetFileName($Path)
+            Status = $signature.Status
+            Publisher = if ($certificate) { $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { "(none)" }
+            Subject = if ($certificate) { $certificate.Subject } else { "(none)" }
+            Issuer = if ($certificate) { $certificate.Issuer } else { "(none)" }
+            Expires = if ($certificate) { $certificate.NotAfter.ToString("yyyy-MM-dd") } else { "(none)" }
+        } | Format-List
+
+        if (-not $certificate -or $signature.Status -notin @('Valid', 'UnknownError')) {
+            throw "Binary has no verifiable Authenticode signature: $Path ($($signature.Status))"
+        }
     }
 
     $winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -151,15 +244,8 @@ if ($CargoExeHash -ne $ExeHash) {
     throw "SHA256 mismatch: Copied EXE does not match the Cargo target EXE!"
 }
 
-# DEVELOPMENT SIGNING
-$EnableCodeSigning = $true
-
-if ($EnableCodeSigning) {
-    Write-Host "Signing DeskStream.exe..."
-    & (Join-Path $ProjectRoot 'scripts\sign-windows.ps1') -ExePath $ExePath
-} else {
-    Write-Host "Skipping code signing because EnableCodeSigning is false."
-}
+Sign-Binary $ExePath
+$ExeHash = (Get-FileHash $ExePath -Algorithm SHA256).Hash
 
 if (-Not (Test-Path $DistDir)) {
     New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
@@ -173,7 +259,7 @@ if (Test-Path $staleInstaller) {
 Write-Host "Building NSIS installer..."
 $makensisPath = Ensure-Nsis
 Set-Location $InstallerDir
-& $makensisPath "DeskStream.nsi"
+& $makensisPath "/DDESKSTREAM_SIGNING_SCRIPT=$signingScript" "DeskStream.nsi"
 if ($LASTEXITCODE -ne 0) {
     throw "NSIS installer build failed."
 }
@@ -187,11 +273,14 @@ if ((Get-Item $InstallerPath).Length -lt 1024) {
     throw "The generated setup file is too small to be a real installer: $InstallerPath"
 }
 
-if ($EnableCodeSigning) {
-    Write-Host "Signing NSIS Installer..."
-    & (Join-Path $ProjectRoot 'scripts\sign-windows.ps1') -ExePath $InstallerPath
+Sign-Binary $InstallerPath
+
+if ($SigningMode -eq "Production") {
+    Verify-ProductionSignature $ExePath
+    Verify-ProductionSignature $InstallerPath
 } else {
-    Write-Host "Skipping code signing for installer because EnableCodeSigning is false."
+    Report-Signature $ExePath
+    Report-Signature $InstallerPath
 }
 
 $InstallerHash = (Get-FileHash $InstallerPath -Algorithm SHA256).Hash

@@ -20,6 +20,10 @@ UninstallIcon "..\desktop-agent\assets\icon.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\DeskStream.exe"
 !insertmacro MUI_PAGE_FINISH
 
+!ifdef DESKSTREAM_SIGNING_SCRIPT
+!uninstfinalize 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${DESKSTREAM_SIGNING_SCRIPT}" -ExePath "%1"' = 0
+!endif
+
 !insertmacro MUI_UNPAGE_WELCOME
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES

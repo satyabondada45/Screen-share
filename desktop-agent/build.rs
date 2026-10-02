@@ -15,8 +15,7 @@ fn main() {
         // Embed the DeskStream app icon
         res.set_icon("assets/icon.ico");
 
-        if let Err(e) = res.compile() {
-            println!("cargo:warning=Failed to compile Windows resources: {}", e);
-        }
+        res.compile()
+            .expect("Failed to compile Windows resources, including the DeskStream icon");
     }
 }
