@@ -2769,8 +2769,22 @@ function getRelativeTime($timestamp)
             if (inner && iframe) {
                 inner.style.display = 'none';
                 iframe.style.display = 'block';
-                // Add a query param so session.php knows it's embedded
-                iframe.src = url + "&integrated=1";
+                
+                // A SYSTEM: Make full screen by hiding dashboard chrome
+                const sidebar = document.querySelector('.sidebar');
+                const topbar = document.querySelector('.topbar');
+                const footerBar = document.querySelector('.footer-bar');
+                const workspace = document.querySelector('.workspace');
+                const content = document.querySelector('.content');
+
+                if (sidebar) sidebar.style.display = 'none';
+                if (topbar) topbar.style.display = 'none';
+                if (footerBar) footerBar.style.display = 'none';
+                if (workspace) workspace.style.padding = '0';
+                if (content) content.style.padding = '0';
+
+                // Add a query param so session.php knows it's embedded and requests layer A
+                iframe.src = url + "&integrated=1&layer=A";
             }
         }
         
@@ -2783,6 +2797,20 @@ function getRelativeTime($timestamp)
                     iframe.src = 'about:blank';
                     iframe.style.display = 'none';
                     inner.style.display = 'block';
+                    
+                    // Restore dashboard chrome
+                    const sidebar = document.querySelector('.sidebar');
+                    const topbar = document.querySelector('.topbar');
+                    const footerBar = document.querySelector('.footer-bar');
+                    const workspace = document.querySelector('.workspace');
+                    const content = document.querySelector('.content');
+
+                    if (sidebar) sidebar.style.display = '';
+                    if (topbar) topbar.style.display = '';
+                    if (footerBar) footerBar.style.display = '';
+                    if (workspace) workspace.style.padding = '';
+                    if (content) content.style.padding = '';
+
                     fetchAllDevices();
                 }
             } else if (e.source === document.getElementById('remoteSessionIframe')?.contentWindow

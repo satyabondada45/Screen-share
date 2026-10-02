@@ -1351,25 +1351,38 @@
             top: 20px;
             right: 20px;
             z-index: 10000;
-            background: transparent;
-            border: none;
-            box-shadow: none;
-            backdrop-filter: none;
-            display: flex;
-            gap: 6px;
-            pointer-events: none;
-        }
-
-        .floating-controls > * {
-            pointer-events: auto;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15);
+            backdrop-filter: blur(8px);
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
         }
 
         .floating-controls.dragging {
-            box-shadow: none;
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.22);
         }
 
         .floating-drag-handle {
-            display: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-height: 24px;
+            padding: 0;
+            cursor: grab;
+            background: rgba(248, 250, 252, 0.8);
+            touch-action: none;
+            border-radius: 8px;
+        }
+
+        .floating-drag-handle:active {
+            cursor: grabbing;
+        }
+
+        .floating-drag-handle svg {
+            width: 14px;
+            height: 14px;
+            margin: 0;
         }
 
         .floating-btn {
@@ -1378,23 +1391,21 @@
             align-items: center;
             justify-content: center;
             gap: 6px;
-            background: rgba(255, 255, 255, 0.95);
-            border: 1px solid rgba(148, 163, 184, 0.5);
-            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
-            padding: 8px 12px;
-            min-height: 36px;
+            background: transparent;
+            border: 1px solid transparent;
+            padding: 6px;
+            min-height: 32px;
             color: var(--text-dark);
             cursor: pointer;
             border-radius: 8px;
             line-height: 1;
             white-space: nowrap;
-            transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+            transition: background 0.15s ease, border-color 0.15s ease;
         }
 
         .floating-btn:hover {
-            background: #ffffff;
-            border-color: #cbd5e1;
-            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.2);
+            background: #f8fafc;
+            border-color: #e2e8f0;
         }
 
         .floating-btn.danger {
@@ -1674,7 +1685,16 @@
             </div>
         </div>
 
-        <div class="topbar-center" id="topbarTabsContainer" style="display:none;">
+                <div class="topbar-center" id="topbarTabsContainer" style="display:flex; gap:8px;">
+            <button class="topbar-tab-btn active" type="button" id="dashboardTabBtn" onclick="switchSessionTab('dashboard')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="3" width="20" height="14" rx="2" />
+                    <line x1="8" y1="21" x2="16" y2="21" />
+                    <line x1="12" y1="17" x2="12" y2="21" />
+                </svg>
+                Dashboard
+            </button>
+            <!-- Dynamic session tabs will be inserted here -->
         </div>
 
         <div style="display:flex;align-items:center;gap:14px;">
@@ -3007,11 +3027,94 @@
         let currentActiveTab = 'dashboard';
 
         function switchSessionTab(tabId) {
-            // No-op for direct navigation
+            currentActiveTab = tabId;
+            const inner = document.getElementById('dashboardInnerContent');
+            const mainContent = document.getElementById('mainContentArea');
+            
+            document.querySelectorAll('.topbar-tab-btn').forEach(btn => btn.classList.remove('active'));
+            
+            if (tabId === 'dashboard') {
+                const dbBtn = document.getElementById('dashboardTabBtn');
+                if(dbBtn) dbBtn.classList.add('active');
+                inner.style.display = 'block';
+                mainContent.classList.remove('a-session-active');
+                
+                const sidebar = document.querySelector('.sidebar');
+                const topbar = document.querySelector('.topbar');
+                const footerBar = document.querySelector('.footer-bar');
+                const workspace = document.querySelector('.workspace');
+                const content = document.querySelector('.content');
+
+                if (sidebar) sidebar.style.display = '';
+                if (topbar) topbar.style.display = '';
+                if (footerBar) footerBar.style.display = '';
+                if (workspace) workspace.style.padding = '';
+                if (content) content.style.padding = '';
+                
+                Object.values(activeSessions).forEach(s => s.iframe.style.display = 'none');
+            } else {
+                const session = activeSessions[tabId];
+                if (session) {
+                    session.tabBtn.classList.add('active');
+                    inner.style.display = 'none';
+                    mainContent.classList.add('a-session-active');
+                    
+                    const sidebar = document.querySelector('.sidebar');
+                    const topbar = document.querySelector('.topbar');
+                    const footerBar = document.querySelector('.footer-bar');
+                    const workspace = document.querySelector('.workspace');
+                    const content = document.querySelector('.content');
+
+                    if (sidebar) sidebar.style.display = 'none';
+                    if (topbar) topbar.style.display = 'none';
+                    if (footerBar) footerBar.style.display = 'none';
+                    if (workspace) workspace.style.padding = '0';
+                    if (content) content.style.padding = '0';
+                    
+                    Object.entries(activeSessions).forEach(([key, s]) => {
+                        s.iframe.style.display = (key === tabId) ? 'block' : 'none';
+                    });
+                }
+            }
         }
 
         function openIntegratedSession(url) {
-            window.location.href = url + "&layer=A";
+            const targetId = new URL(url, window.location.origin).searchParams.get('id');
+            const targetName = new URL(url, window.location.origin).searchParams.get('target_name') || 'Remote Device';
+            
+            if (activeSessions[targetId]) {
+                switchSessionTab(targetId);
+                return;
+            }
+            
+            const iframe = document.createElement('iframe');
+            iframe.src = url + "&integrated=1&layer=A";
+            iframe.id = 'sessionIframe_' + targetId;
+            iframe.className = 'remote-session-iframe';
+            iframe.style.display = 'none';
+            iframe.style.position = 'relative';
+            iframe.style.width = '100%';
+            iframe.style.height = '100%';
+            iframe.style.zIndex = '50';
+            iframe.style.margin = '0';
+            iframe.style.border = 'none';
+            iframe.style.flex = '1';
+            iframe.allow = "fullscreen; clipboard-read; clipboard-write";
+            
+            document.getElementById('mainContentArea').appendChild(iframe);
+            
+            const tabBtn = document.createElement('button');
+            tabBtn.className = 'topbar-tab-btn';
+            tabBtn.innerHTML = `
+                <span style="margin-right:8px;font-size:16px;color:#10b981;">●</span>
+                <span style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${targetName}</span>
+                <span class="tab-close-btn" onclick="event.stopPropagation(); closeSessionTab('${targetId}')" style="margin-left:8px;padding:2px;cursor:pointer;">✕</span>
+            `;
+            tabBtn.onclick = () => switchSessionTab(targetId);
+            document.getElementById('topbarTabsContainer').appendChild(tabBtn);
+            
+            activeSessions[targetId] = { name: targetName, iframe, tabBtn };
+            switchSessionTab(targetId);
         }
 
         function closeSessionTab(targetId) {
@@ -3661,6 +3764,16 @@ document.addEventListener('DOMContentLoaded', () => {
     
     <!-- B-Side Overlay Container -->
     <div id="bSessionOverlay" class="floating-controls" style="display: none; flex-direction: column;">
+        <div class="floating-btn floating-drag-handle" id="bToolbarHandle" title="Drag session controls">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <circle cx="8" cy="7" r="1.2"></circle>
+                <circle cx="16" cy="7" r="1.2"></circle>
+                <circle cx="8" cy="12" r="1.2"></circle>
+                <circle cx="16" cy="12" r="1.2"></circle>
+                <circle cx="8" cy="17" r="1.2"></circle>
+                <circle cx="16" cy="17" r="1.2"></circle>
+            </svg>
+        </div>
 
         <div style="position: relative; display: flex; flex-direction: column; align-items: center;">
             <button class="floating-btn" id="optionsToggleBtn" type="button" title="Options" style="color: #1e293b;" onclick="toggleBOptions(event)">
@@ -3683,11 +3796,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
                         <line x1="12" y1="19" x2="12" y2="22"></line>
                     </svg> Mic
-                </button>
-                <button class="floating-btn" id="bScreenFitBtn" type="button" title="Screen Fit" onclick="if(window.ipc){window.ipc.postMessage('toggle_fullscreen');} toggleBOptions(event);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
-                    </svg> Screen Fit
                 </button>
                 <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">

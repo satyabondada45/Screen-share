@@ -27,6 +27,9 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
 
 $deviceUid = $_GET['id'] ?? null;
 $sessionToken = $_GET['token'] ?? null;
+$isIntegrated = isset($_GET['integrated']) && $_GET['integrated'] == '1';
+$layer = $_GET['layer'] ?? ($isIntegrated ? 'A' : 'B');
+
 
 if (!$deviceUid) {
     header("Location: ../dashboard.php");
@@ -374,7 +377,24 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             display: flex;
             gap: 4px;
             padding: 6px;
-            z-index: 50;
+            z-index: 150;
+            transition: opacity 0.2s;
+        }
+
+        .toolbar-drag-handle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 6px;
+            cursor: grab;
+            color: #94a3b8;
+            border-right: 1px solid var(--border);
+            margin-right: 4px;
+            user-select: none;
+        }
+        
+        .toolbar-drag-handle:active {
+            cursor: grabbing;
         }
 
         .floating-btn {
@@ -614,6 +634,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
 <body>
 
+    <?php if ($layer === 'A'): ?>
     <div class="viewer-header">
         <div class="header-left">
             <div class="logo" aria-label="DeskStream">
@@ -689,6 +710,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             <?php endif; ?>
         </div>
     </div>
+    <?php endif; ?>
 
     <div class="stream-container" id="stream-box">
         <div id="hud" class="hud-badge">CONNECTING...</div>
@@ -700,7 +722,19 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
         <canvas id="remoteCanvas" tabindex="0"></canvas>
 
-        <div class="floating-controls">
+        <?php if ($layer === 'B'): ?>
+        <div class="floating-controls" id="floatingControls">
+            <div class="toolbar-drag-handle" id="toolbarHandle" title="Drag to move">
+                <svg width="12" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="8" cy="4" r="1.5"></circle>
+                    <circle cx="8" cy="12" r="1.5"></circle>
+                    <circle cx="8" cy="20" r="1.5"></circle>
+                    <circle cx="16" cy="4" r="1.5"></circle>
+                    <circle cx="16" cy="12" r="1.5"></circle>
+                    <circle cx="16" cy="20" r="1.5"></circle>
+                </svg>
+            </div>
+            
             <button class="floating-btn" id="fullscreenBtn" onclick="toggleFullscreen()">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path
@@ -715,9 +749,77 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     <circle cx="12" cy="5" r="1"></circle>
                     <circle cx="12" cy="19" r="1"></circle>
                 </svg>
-                More
+                Options
+            </button>
+            <button class="floating-btn" style="color: var(--primary);" onclick="endSessionAndRedirect(event)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                </svg>
+                End Session
             </button>
         </div>
+        
+        <script>
+            // Drag logic for floating controls
+            const floatingControls = document.getElementById('floatingControls');
+            const toolbarHandle = document.getElementById('toolbarHandle');
+            
+            if (floatingControls && toolbarHandle) {
+                let isDragging = false;
+                let startX, startY, initialX, initialY;
+
+                toolbarHandle.addEventListener('mousedown', (e) => {
+                    isDragging = true;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    const rect = floatingControls.getBoundingClientRect();
+                    initialX = rect.left;
+                    initialY = rect.top;
+                    
+                    // Switch to fixed positioning for precise dragging relative to viewport
+                    floatingControls.style.position = 'fixed';
+                    floatingControls.style.bottom = 'auto';
+                    floatingControls.style.right = 'auto';
+                    floatingControls.style.left = initialX + 'px';
+                    floatingControls.style.top = initialY + 'px';
+                    floatingControls.style.transition = 'none'; // Disable transition during drag
+                    
+                    e.preventDefault();
+                });
+
+                window.addEventListener('mousemove', (e) => {
+                    if (!isDragging) return;
+                    
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    
+                    // Calculate bounds
+                    let newLeft = initialX + dx;
+                    let newTop = initialY + dy;
+                    
+                    // Keep within window bounds
+                    const maxX = window.innerWidth - floatingControls.offsetWidth;
+                    const maxY = window.innerHeight - floatingControls.offsetHeight;
+                    
+                    newLeft = Math.max(0, Math.min(newLeft, maxX));
+                    newTop = Math.max(0, Math.min(newTop, maxY));
+                    
+                    floatingControls.style.left = newLeft + 'px';
+                    floatingControls.style.top = newTop + 'px';
+                });
+
+                window.addEventListener('mouseup', () => {
+                    if (isDragging) {
+                        isDragging = false;
+                        floatingControls.style.transition = ''; // Restore transition
+                    }
+                });
+                
+                // Prevent drag from propagating to canvas
+                floatingControls.addEventListener('mousedown', (e) => e.stopPropagation());
+            }
+        </script>
+        <?php endif; ?>
 
         <!-- Session / Settings Panel -->
         <div class="session-panel" id="sessionPanel">
@@ -3650,11 +3752,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     console.log(`[WS] state at close: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount} rxPackets=${browserPerf.rxPackets}`);
 
                     if (isStreaming) {
-
-                        setHud(
-                            "DISCONNECTED"
-                        );
-
+                        setStreamState("DISCONNECTED");
                     }
 
                 };
@@ -3716,9 +3814,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             }
 
 
-            setHud(
-                "DISCONNECTED"
-            );
+            setStreamState("DISCONNECTED");
 
             if (chatPanel) {
                 chatPanel.classList.remove(

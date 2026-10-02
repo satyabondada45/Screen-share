@@ -124,9 +124,16 @@
             overflow: hidden;
         }
 
-        /* HEADER */
         .viewer-header {
             display: none;
+            align-items: center;
+            justify-content: space-between;
+            background: #fff;
+            border-bottom: 1px solid #e5e5e5;
+            padding: 0 16px;
+            height: 52px;
+            flex-shrink: 0;
+            width: 100%;
         }
 
         .window-controls {
@@ -191,24 +198,7 @@
         }
 
         .floating-drag-handle {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 26px;
-            min-width: 26px;
-            height: 30px;
-            padding: 0;
-            border-right: 1px solid transparent;
-            border-radius: 10px 0 0 10px;
-            cursor: grab;
-            background: rgba(255, 255, 255, 0.95);
-            border: 1px solid rgba(148, 163, 184, 0.65);
-            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
-            touch-action: none;
-        }
-
-        .floating-drag-handle:active {
-            cursor: grabbing;
+            display: none;
         }
 
         .floating-drag-handle svg {
@@ -498,56 +488,80 @@ window.addEventListener('DOMContentLoaded', () => {
 
 <body>
 
-    <div class="viewer-header">
-        <div class="header-left">
-            <a href="dashboard.html" class="logo">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-accent">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-                    <line x1="8" y1="21" x2="16" y2="21"></line>
-                    <line x1="12" y1="17" x2="12" y2="21"></line>
-                </svg>
-                DeskStream
+    <div class="viewer-header" id="viewerHeader">
+        <div class="header-left" style="display: flex; align-items: center;">
+            <a href="dashboard.html" class="logo" style="text-decoration: none; display: flex; align-items: center;">
+                <img src="deskstream-logo.png" style="height: 20px; width: auto;" alt="DeskStream">
             </a>
-            <div class="device-info">
-                <div class="device-name" id="headerDeviceName">Remote Device</div>
-                <div class="device-meta">
-                    <div class="dot"></div>
-                    <span class="dot-text">Connected</span>
-                    <span id="headerDeviceId"></span>
+            <div style="width: 1px; height: 32px; background: #e5e7eb; margin: 0 16px;"></div>
+            <div class="device-info" style="display: flex; flex-direction: column;">
+                <div class="device-name" id="headerDeviceName" style="display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; color: #1e293b;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                        <line x1="8" y1="21" x2="16" y2="21"></line>
+                        <line x1="12" y1="17" x2="12" y2="21"></line>
+                    </svg>
+                    <span id="headerDeviceNameText">Remote Device</span>
+                </div>
+                <div class="device-meta" style="font-size: 11px; color: #64748b; margin-top: 2px; display: flex; align-items: center; gap: 4px;">
+                    <span>Full Control</span> <span style="color: #cbd5e1;">|</span> <span id="headerDeviceId"></span> <span style="color: #cbd5e1;">|</span>
+                    <div class="dot" style="margin-left: 2px;"></div>
+                    <span class="dot-text">Connecting...</span>
                 </div>
             </div>
         </div>
 
-        <div class="header-right">
-            <div class="action-group">
-                <button class="btn" id="chatBtn">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <div class="header-right" style="display: flex; align-items: center; gap: 8px;">
+            <div class="action-group" style="display: flex; gap: 6px;">
+                <button class="btn" id="chatBtn" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                     </svg>
                     Chat
                 </button>
-                <button class="btn" id="micBtn" onclick="toggleMic()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
-                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                <button class="btn" id="fileTransferBtn" onclick="toggleFileTransfer()" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                        <polyline points="13 2 13 9 20 9"></polyline>
                     </svg>
-                    Mic
+                    File Transfer
                 </button>
-                <button class="btn" id="reverseBtn" onclick="requestReverseControl()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M5 12h14M12 5l7 7-7 7"></path>
+                <button class="btn" id="settingsBtn" onclick="toggleSettings()" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                     </svg>
-                    Reverse
+                    Settings
                 </button>
             </div>
+            
+            <div style="width: 1px; height: 32px; background: #e5e7eb; margin: 0 4px;"></div>
 
-            <button class="btn btn-end" id="endSessionBtn" onclick="endSessionAndRedirect(event)">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <button class="btn btn-end" id="endSessionBtn" onclick="endSessionAndRedirect(event)" style="background: transparent; border: 1px solid #ef4444; color: #ef4444; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <rect x="3" y="3" width="18" height="18" rx="2"></rect>
                 </svg>
                 End Session
             </button>
+            
+            <div class="window-controls" style="display: flex; align-items: center; gap: 4px; margin-left: 8px;">
+                <button class="win-btn" onclick="minimizeWindow()" style="background: transparent; border: none; cursor: pointer; color: #64748b;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="4" y1="12" x2="20" y2="12"></line>
+                    </svg>
+                </button>
+                <button class="win-btn maximize-window-btn" onclick="maximizeWindow()" style="background: transparent; border: none; cursor: pointer; color: #64748b;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                    </svg>
+                </button>
+                <button class="win-btn close-btn" onclick="closeWindow()" style="background: transparent; border: none; cursor: pointer; color: #64748b;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
         </div>
     </div>
     <div class="stream-container" id="stream-box">
@@ -558,18 +572,8 @@ window.addEventListener('DOMContentLoaded', () => {
             <small style="font-size:0.9rem;">Files will be placed in RemoteDrop/</small>
         </div>
 
-        <!-- FLOATING CONTROLS (State A) -->
-        <div id="floatingControls" class="floating-controls" style="flex-direction: row;">
-            <div class="floating-btn floating-drag-handle" id="toolbarHandle" title="Drag session controls">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                    <circle cx="8" cy="7" r="1.2"></circle>
-                    <circle cx="16" cy="7" r="1.2"></circle>
-                    <circle cx="8" cy="12" r="1.2"></circle>
-                    <circle cx="16" cy="12" r="1.2"></circle>
-                    <circle cx="8" cy="17" r="1.2"></circle>
-                    <circle cx="16" cy="17" r="1.2"></circle>
-                </svg>
-            </div>
+        <!-- FLOATING CONTROLS -->
+        <div id="floatingControls" class="floating-controls" style="flex-direction: row; display: none;">
             
             <div style="position: relative; display: flex; align-items: center;">
                 <button class="floating-btn" id="optionsToggleBtn" type="button" title="Options" style="color: #1e293b;" onclick="toggleOptions(event)">
@@ -591,6 +595,11 @@ window.addEventListener('DOMContentLoaded', () => {
                             <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
                             <line x1="12" y1="19" x2="12" y2="22"></line>
                         </svg> Mic
+                    </button>
+                    <button class="floating-btn" type="button" title="Screen Fit" onclick="toggleFullscreen(); toggleOptions(event);">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
+                        </svg> Screen Fit
                     </button>
                     <button class="floating-btn" type="button" title="Reverse control" onclick="requestReverseControl(); toggleOptions(event);">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -787,6 +796,69 @@ window.addEventListener('DOMContentLoaded', () => {
         const DIAGNOSTIC_SYSTEM_ID = REQUESTER_SYSTEM_ID;
 
         const WS_URL = "wss://admin.friendssoftwaresolutions.in";
+
+        const isIntegrated = SESSION_PARAMS.get('integrated') === '1';
+        const layer = SESSION_PARAMS.get('layer') || (isIntegrated ? 'A' : 'B');
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            const vHeader = document.getElementById('viewerHeader');
+            const fControls = document.getElementById('floatingControls');
+            
+            if (layer === 'A') {
+                if (vHeader) vHeader.style.display = 'flex';
+                if (fControls) fControls.style.display = 'none';
+            } else {
+                if (vHeader) vHeader.style.display = 'none';
+                if (fControls) fControls.style.display = 'flex';
+                
+                // Init drag for B layer
+                let isDragging = false;
+                let startX, startY, initialX, initialY;
+                const toolbarHandle = document.getElementById('toolbarHandle');
+                
+                if (fControls && toolbarHandle) {
+                    toolbarHandle.addEventListener('mousedown', (e) => {
+                        isDragging = true;
+                        startX = e.clientX;
+                        startY = e.clientY;
+                        const rect = fControls.getBoundingClientRect();
+                        initialX = rect.left;
+                        initialY = rect.top;
+                        
+                        fControls.style.position = 'fixed';
+                        fControls.style.bottom = 'auto';
+                        fControls.style.right = 'auto';
+                        fControls.style.left = initialX + 'px';
+                        fControls.style.top = initialY + 'px';
+                        fControls.style.transition = 'none';
+                        e.preventDefault();
+                    });
+
+                    window.addEventListener('mousemove', (e) => {
+                        if (!isDragging) return;
+                        const dx = e.clientX - startX;
+                        const dy = e.clientY - startY;
+                        let newLeft = initialX + dx;
+                        let newTop = initialY + dy;
+                        const maxX = window.innerWidth - fControls.offsetWidth;
+                        const maxY = window.innerHeight - fControls.offsetHeight;
+                        newLeft = Math.max(0, Math.min(newLeft, maxX));
+                        newTop = Math.max(0, Math.min(newTop, maxY));
+                        fControls.style.left = newLeft + 'px';
+                        fControls.style.top = newTop + 'px';
+                    });
+
+                    window.addEventListener('mouseup', () => {
+                        if (isDragging) {
+                            isDragging = false;
+                            fControls.style.transition = '';
+                        }
+                    });
+                    
+                    fControls.addEventListener('mousedown', (e) => e.stopPropagation());
+                }
+            }
+        });
 
         // TEMPORARY SESSION DIAGNOSTICS: sent through the existing WebView IPC only.
         function sessionDebug(event, fields = {}) {
@@ -1521,7 +1593,11 @@ window.addEventListener('DOMContentLoaded', () => {
                 window.parent.postMessage({ type: "end_integrated_session", targetId: params.get("id") }, "*");
                 return;
             }
-            window.location.href = "../dashboard.php";
+            if (window.ipc || window.location.protocol === 'file:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                window.location.href = "dashboard.html";
+            } else {
+                window.location.href = "../dashboard.php";
+            }
         }
 
 
@@ -3746,11 +3822,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     console.log(`[WS] state at close: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount} rxPackets=${browserPerf.rxPackets}`);
 
                     if (isStreaming) {
-
-                        setHud(
-                            "DISCONNECTED"
-                        );
-
+                        setStreamState("DISCONNECTED");
                     }
 
                 };
@@ -3812,9 +3884,7 @@ window.addEventListener('DOMContentLoaded', () => {
             }
 
 
-            setHud(
-                "DISCONNECTED"
-            );
+            setStreamState("DISCONNECTED");
 
             if (chatPanel) {
                 chatPanel.classList.remove(
@@ -4996,6 +5066,32 @@ window.addEventListener('DOMContentLoaded', () => {
             } else {
                 if (document.exitFullscreen) {
                     document.exitFullscreen();
+                }
+            }
+        }
+
+        function toggleFileTransfer() {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.multiple = true;
+            fileInput.style.display = 'none';
+            fileInput.onchange = (e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                    const event = { target: fileInput };
+                    handleFileInput(event);
+                }
+            };
+            document.body.appendChild(fileInput);
+            fileInput.click();
+            setTimeout(() => document.body.removeChild(fileInput), 1000);
+        }
+
+        function toggleSettings() {
+            const panel = document.getElementById('sessionPanel');
+            if (panel) {
+                panel.style.display = panel.style.display === 'flex' ? 'none' : 'flex';
+                if (panel.style.display === 'flex') {
+                    switchPanelTab('session');
                 }
             }
         }
