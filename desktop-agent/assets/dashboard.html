@@ -3513,67 +3513,74 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
 
+        let _bSessionOfferPollRunning = false;
         async function pollBSessionFileOffers() {
-            const response = await fetch('/desktop-api/session/offers');
-            if (!response.ok) throw new Error(`File offer poll failed: ${response.status}`);
-            const offers = await response.json();
-            for (const offer of offers) {
-                if (_bSessionHandledOffers.has(offer.transfer_id)) continue;
-                _bSessionHandledOffers.add(offer.transfer_id);
-                
-                const filenamePath = offer.filename.replace(/\\/g, '/');
-                const isFolderBatch = filenamePath.includes('/');
-                const folderName = isFolderBatch ? filenamePath.split('/')[0] : null;
+            if (_bSessionOfferPollRunning) return;
+            _bSessionOfferPollRunning = true;
+            try {
+                const response = await fetch('/desktop-api/session/offers');
+                if (!response.ok) throw new Error(`File offer poll failed: ${response.status}`);
+                const offers = await response.json();
+                for (const offer of offers) {
+                    if (_bSessionHandledOffers.has(offer.transfer_id)) continue;
+                    _bSessionHandledOffers.add(offer.transfer_id);
+                    
+                    const filenamePath = offer.filename.replace(/\\/g, '/');
+                    const isFolderBatch = filenamePath.includes('/');
+                    const folderName = isFolderBatch ? filenamePath.split('/')[0] : null;
 
-                let accept = false;
+                    let accept = false;
 
-                if (isFolderBatch) {
-                    if (currentFolderBatch !== folderName) {
-                        currentFolderBatch = folderName;
-                        currentFolderAllowAll = false;
-                        currentFolderFilesReceived = 0;
-                    }
+                    if (isFolderBatch) {
+                        if (currentFolderBatch !== folderName) {
+                            currentFolderBatch = folderName;
+                            currentFolderAllowAll = false;
+                            currentFolderFilesReceived = 0;
+                        }
 
-                    if (currentFolderAllowAll) {
-                        accept = true;
-                        currentFolderFilesReceived++;
-                    } else {
-                        const choice = await showFileApprovalModal(offer, true, folderName);
-                        if (choice === 'allow_all') {
-                            currentFolderAllowAll = true;
-                            accept = true;
-                            currentFolderFilesReceived++;
-                        } else if (choice === 'allow') {
+                        if (currentFolderAllowAll) {
                             accept = true;
                             currentFolderFilesReceived++;
                         } else {
-                            accept = false;
+                            const choice = await showFileApprovalModal(offer, true, folderName);
+                            if (choice === 'allow_all') {
+                                currentFolderAllowAll = true;
+                                accept = true;
+                                currentFolderFilesReceived++;
+                            } else if (choice === 'allow') {
+                                accept = true;
+                                currentFolderFilesReceived++;
+                            } else {
+                                accept = false;
+                            }
                         }
+                    } else {
+                        currentFolderBatch = null;
+                        currentFolderAllowAll = false;
+                        currentFolderFilesReceived = 0;
+                        const choice = await showFileApprovalModal(offer, false, null);
+                        accept = (choice === 'allow');
                     }
-                } else {
-                    currentFolderBatch = null;
-                    currentFolderAllowAll = false;
-                    currentFolderFilesReceived = 0;
-                    const choice = await showFileApprovalModal(offer, false, null);
-                    accept = (choice === 'allow');
-                }
 
-                console.info(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} filename=${JSON.stringify(offer.filename)} total_bytes=${offer.size} decision=${accept ? 'accept' : 'reject'}`);
-                const decision = await fetch('/desktop-api/session/offer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ transfer_id: offer.transfer_id, accept })
-                });
-                if (!decision.ok) {
-                    const error = await decision.text();
-                    console.error(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} response_failed=${decision.status} error=${error}`);
-                    showToast(`File offer response failed: ${error}`);
-                    _bSessionHandledOffers.delete(offer.transfer_id);
-                    currentFolderAllowAll = false;
+                    console.info(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} filename=${JSON.stringify(offer.filename)} total_bytes=${offer.size} decision=${accept ? 'accept' : 'reject'}`);
+                    const decision = await fetch('/desktop-api/session/offer', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transfer_id: offer.transfer_id, accept })
+                    });
+                    if (!decision.ok) {
+                        const error = await decision.text();
+                        console.error(`[FILE RX OFFER] direction=A->B transfer_id=${offer.transfer_id} response_failed=${decision.status} error=${error}`);
+                        showToast(`File offer response failed: ${error}`);
+                        _bSessionHandledOffers.delete(offer.transfer_id);
+                        currentFolderAllowAll = false;
+                    }
                 }
+                await pollBSessionReverseRequest();
+                if (_bReverseRequestOutstanding) await pollBSessionReverseDecision();
+            } finally {
+                _bSessionOfferPollRunning = false;
             }
-            await pollBSessionReverseRequest();
-            if (_bReverseRequestOutstanding) await pollBSessionReverseDecision();
         }
 
         function showBSessionTransferChoice() {

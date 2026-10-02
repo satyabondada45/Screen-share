@@ -4870,30 +4870,36 @@ window.addEventListener('DOMContentLoaded', () => {
                     const items = event.dataTransfer.items;
                     if (items) {
                         const files = [];
+                        const rootEntries = [];
+                        for (let i = 0; i < items.length; i++) {
+                            const item = items[i];
+                            if (item.webkitGetAsEntry) {
+                                const entry = item.webkitGetAsEntry();
+                                if (entry) rootEntries.push(entry);
+                            }
+                        }
+
                         async function traverse(entry, path) {
                             if (entry.isFile) {
-                                const file = await new Promise(resolve => entry.file(resolve));
+                                const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
                                 file.customPath = path + file.name;
                                 files.push(file);
                             } else if (entry.isDirectory) {
                                 const dirReader = entry.createReader();
                                 let entries = [];
-                                let readEntries = await new Promise(resolve => dirReader.readEntries(resolve));
+                                let readEntries = await new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
                                 while (readEntries.length > 0) {
                                     entries.push(...readEntries);
-                                    readEntries = await new Promise(resolve => dirReader.readEntries(resolve));
+                                    readEntries = await new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
                                 }
                                 for (const e of entries) {
                                     await traverse(e, path + entry.name + "/");
                                 }
                             }
                         }
-                        for (let i = 0; i < items.length; i++) {
-                            const item = items[i];
-                            if (item.webkitGetAsEntry) {
-                                const entry = item.webkitGetAsEntry();
-                                if (entry) await traverse(entry, "");
-                            }
+                        
+                        for (const entry of rootEntries) {
+                            await traverse(entry, "");
                         }
                         await sendFiles(files);
                     } else {
@@ -4908,9 +4914,7 @@ window.addEventListener('DOMContentLoaded', () => {
         ============================================================ */
 
 
-        if (micBtn) {
-            micBtn.addEventListener("click", toggleMicrophone);
-        }
+        // Removed duplicate micBtn event listener to prevent two getUserMedia streams which freezes the session
         document.getElementById("reverseAcceptBtn").addEventListener("click", () => answerReverseRequest(true));
         document.getElementById("reverseRejectBtn").addEventListener("click", () => answerReverseRequest(false));
         window.addEventListener("pagehide", stopMicrophone);
@@ -5084,19 +5088,13 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         function toggleFileTransfer() {
-            const fileInput = document.createElement('input');
-            fileInput.type = 'file';
-            fileInput.multiple = true;
-            fileInput.style.display = 'none';
-            fileInput.onchange = (e) => {
-                if (e.target.files && e.target.files.length > 0) {
-                    const event = { target: fileInput };
-                    handleFileInput(event);
-                }
-            };
-            document.body.appendChild(fileInput);
-            fileInput.click();
-            setTimeout(() => document.body.removeChild(fileInput), 1000);
+            if (confirm("Would you like to send a Folder? (Click Cancel to send Files)")) {
+                const folderInput = document.getElementById('folderUploadInput');
+                if (folderInput) folderInput.click();
+            } else {
+                const fileInput = document.getElementById('fileUploadInput');
+                if (fileInput) fileInput.click();
+            }
         }
 
         function toggleSettings() {
