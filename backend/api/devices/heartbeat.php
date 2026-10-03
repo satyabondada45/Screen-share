@@ -31,6 +31,9 @@ try {
     ");
     $stmt->execute([$systemId, $systemId, $machineId]);
     $affected = $stmt->rowCount();
+    error_log('[DESKSTREAM HEARTBEAT] received system_id=' . ($systemId ?: 'none')
+        . ' machine_identifier=' . ($machineId ?: 'none')
+        . ' updated=' . ($affected > 0 ? 'true' : 'false'));
 
     echo json_encode([
         "status" => "success",
@@ -40,6 +43,7 @@ try {
         "synced_at" => date('Y-m-d H:i:s')
     ]);
 } catch (\PDOException $e) {
+    error_log('[DESKSTREAM HEARTBEAT] database update failed: ' . $e->getMessage());
     http_response_code(500);
     echo json_encode(["status" => "error", "message" => $e->getMessage()]);
 }

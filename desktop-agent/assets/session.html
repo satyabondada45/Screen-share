@@ -890,6 +890,7 @@ window.addEventListener('DOMContentLoaded', () => {
         let wsRxProcessing = false;
         let directConnection = false;
         let directFallbackAttempted = false;
+        let lastWebSocketCloseRequest = "none";
         let websocketAuthenticated = false;
         let webrtcPeerConnection = null;
         let webrtcDataChannel = null;
@@ -3367,6 +3368,8 @@ window.addEventListener('DOMContentLoaded', () => {
                                 reverseTransitionPending = true;
                                 console.info("[REVERSE] Approved. Closing the current controller session for role handoff.");
                                 addActivityLog("Reverse request approved. Closing this session for the role handoff.");
+                                lastWebSocketCloseRequest = "reverse_approved";
+                                sessionDebug("A_DISCONNECT", { code: "close_requested_by=reverse_approved" });
                                 ws.close(1000, "Reverse session approved");
                             } else {
                                 console.info("[REVERSE] Request was rejected.");
@@ -3380,6 +3383,8 @@ window.addEventListener('DOMContentLoaded', () => {
                     }
                     else if (type === 99) {
                         console.info("[SESSION] Relay reported that the remote endpoint disconnected.");
+                        lastWebSocketCloseRequest = "relay_type99";
+                        sessionDebug("A_DISCONNECT", { code: "close_requested_by=relay_type99" });
                         wsRxBuffer = wsRxBuffer.subarray(1);
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             ws.close(1000, "Remote session ended");
@@ -3521,6 +3526,8 @@ window.addEventListener('DOMContentLoaded', () => {
             console.log("[DIRECT] Falling back to relay");
 
             const failedSocket = ws;
+            lastWebSocketCloseRequest = "direct_fallback";
+            sessionDebug("A_DISCONNECT", { code: "close_requested_by=direct_fallback" });
             ws = null;
             if (failedSocket) {
                 failedSocket.onopen = null;
@@ -3539,6 +3546,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
         function connectWebSocket(targetUrl, isDirect) {
             directConnection = isDirect;
+            lastWebSocketCloseRequest = "none";
             resetWebSocketState();
             sessionDebug('A_WS_CONNECT_START', { endpoint: targetUrl });
 
@@ -3582,7 +3590,8 @@ window.addEventListener('DOMContentLoaded', () => {
             ws.onclose = function (event) {
                 console.error('[SESSION DEBUG] ws.onclose FIRED in session.html', event.code, event.reason,
                     `| sessionWasEstablished=${sessionWasEstablished} websocketAuthenticated=${websocketAuthenticated} isStreaming=${isStreaming}`);
-                sessionDebug('A_DISCONNECT', { code: String(event.code) });
+                const closeDetails = `code=${event.code};clean=${event.wasClean};reason=${event.reason || "none"};requested_by=${lastWebSocketCloseRequest}`;
+                sessionDebug('A_DISCONNECT', { code: closeDetails });
                 stopMicrophone();
                 stopLocalChatTyping();
                 setRemoteChatTyping(false);
@@ -3817,6 +3826,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
             if (ws) {
                 try {
+                    lastWebSocketCloseRequest = "stop_web_stream";
+                    sessionDebug("A_DISCONNECT", { code: "close_requested_by=stop_web_stream" });
                     console.log(`[WS] BROWSER explicitly closing WebSocket (point: stopWebStream). isStreaming=${isStreaming} videoFrameCount=${videoFrameCount}`);
                     ws.onopen = null;
                     ws.onmessage = null;
@@ -4982,6 +4993,8 @@ window.addEventListener('DOMContentLoaded', () => {
         function endSessionAndRedirect(event) {
             if (event && event.preventDefault) event.preventDefault();
             if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                lastWebSocketCloseRequest = "end_session_button";
+                sessionDebug("A_DISCONNECT", { code: "close_requested_by=end_session_button" });
                 ws.close(1000, "Session ended by user");
             } else {
                 showSessionEnded();
@@ -5016,6 +5029,10 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         function toggleFullscreen() {
+            if (typeof window.ipc !== 'undefined') {
+                window.ipc.postMessage('toggle_maximize');
+                return;
+            }
             const box = document.documentElement;
             if (!document.fullscreenElement) {
                 if (box.requestFullscreen) {

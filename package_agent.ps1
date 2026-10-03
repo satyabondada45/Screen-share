@@ -3,37 +3,45 @@
 $ErrorActionPreference = "Stop"
 
 $ReleaseExe = Join-Path $PSScriptRoot "DESKSTREAM\DeskStream.exe"
+$CargoExe = "C:\cargo-target\deskstream\release\DeskStream.exe"
 $DownloadsDir = Join-Path $PSScriptRoot "frontend\downloads"
 $PackagePath = Join-Path $DownloadsDir "DeskStream-verified-x64.zip"
-$ExpectedExeSha256 = "AD3CF3AF97A83FDF93CFCCCF82828C2113740BE427B42A579A4AF78EC660825F"
+$SignatureVerifier = Join-Path $PSScriptRoot "scripts\verify-release-signature.ps1"
 
 if (-not (Test-Path -LiteralPath $ReleaseExe -PathType Leaf)) {
     throw "Verified release executable was not found: $ReleaseExe"
 }
+if (-not (Test-Path -LiteralPath $CargoExe -PathType Leaf)) {
+    throw "Fresh Cargo release executable was not found: $CargoExe"
+}
+if (-not (Test-Path -LiteralPath $SignatureVerifier -PathType Leaf)) {
+    throw "Production signature verifier is missing: $SignatureVerifier"
+}
 
+$cargoHash = (Get-FileHash -LiteralPath $CargoExe -Algorithm SHA256).Hash
 $releaseHash = (Get-FileHash -LiteralPath $ReleaseExe -Algorithm SHA256).Hash
-if ($releaseHash -ne $ExpectedExeSha256) {
-    throw "Release executable hash mismatch. Expected $ExpectedExeSha256; found $releaseHash."
+if ($releaseHash -ne $cargoHash) {
+    throw "Refusing to package a stale DeskStream.exe. The release copy does not match the current Cargo output."
 }
-
-if (Test-Path -LiteralPath $PackagePath) {
-    throw "Refusing to overwrite an existing package: $PackagePath"
+& $SignatureVerifier -ExePath $ReleaseExe
+if ($LASTEXITCODE -ne 0) {
+    throw "Refusing to package an unsigned or untrusted DeskStream executable."
 }
-
 New-Item -ItemType Directory -Path $DownloadsDir -Force | Out-Null
 $workDir = Join-Path ([System.IO.Path]::GetTempPath()) (
     "DeskStream-package-" + [Guid]::NewGuid().ToString("N")
 )
 $stagedExe = Join-Path $workDir "DeskStream.exe"
 $temporaryZip = Join-Path $workDir "DeskStream-verified-x64.zip"
+$temporaryPackage = Join-Path $DownloadsDir (".DeskStream-verified-x64-" + [Guid]::NewGuid().ToString("N") + ".zip")
 
 try {
     New-Item -ItemType Directory -Path $workDir | Out-Null
     Copy-Item -LiteralPath $ReleaseExe -Destination $stagedExe
 
     $stagedHash = (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash
-    if ($stagedHash -ne $ExpectedExeSha256) {
-        throw "Staged executable hash mismatch. Expected $ExpectedExeSha256; found $stagedHash."
+    if ($stagedHash -ne $releaseHash) {
+        throw "Staged executable hash differs from the verified release. Expected $releaseHash; found $stagedHash."
     }
 
     Compress-Archive -LiteralPath $stagedExe -DestinationPath $temporaryZip -CompressionLevel Optimal
@@ -57,11 +65,12 @@ try {
         $archive.Dispose()
     }
 
-    if ($entryHash -ne $ExpectedExeSha256) {
-        throw "Packaged executable hash mismatch. Expected $ExpectedExeSha256; found $entryHash."
+    if ($entryHash -ne $releaseHash) {
+        throw "Packaged executable hash differs from the verified release. Expected $releaseHash; found $entryHash."
     }
 
-    Move-Item -LiteralPath $temporaryZip -Destination $PackagePath
+    Move-Item -LiteralPath $temporaryZip -Destination $temporaryPackage
+    Move-Item -LiteralPath $temporaryPackage -Destination $PackagePath -Force
     $packageHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash
 
     Write-Host "Package created: $PackagePath"
@@ -70,6 +79,9 @@ try {
     Write-Host "Contents: DeskStream.exe (verified unified release)"
 }
 finally {
+    if (Test-Path -LiteralPath $temporaryPackage) {
+        Remove-Item -LiteralPath $temporaryPackage -Force
+    }
     if (Test-Path -LiteralPath $workDir) {
         Remove-Item -LiteralPath $workDir -Recurse -Force
     }

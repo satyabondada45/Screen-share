@@ -61,7 +61,7 @@ Write-Host "======================================"
 Write-Host "[1/5] Building release binaries..."
 
 Push-Location "$projectRoot\desktop-agent"
-cargo build --release --bin desktop-agent
+cargo build --release --bin DeskStream
 if ($LASTEXITCODE -ne 0) { Write-Error "Agent build FAILED."; exit 1 }
 cargo build --release --bin viewer
 if ($LASTEXITCODE -ne 0) { Write-Error "Viewer build FAILED."; exit 1 }
@@ -89,7 +89,7 @@ Start-Sleep -Milliseconds 1500
 Write-Host "[3/5] Installing to $deployDir..."
 if (-not (Test-Path $deployDir)) { New-Item -ItemType Directory -Path $deployDir -Force | Out-Null }
 
-$agentExe = "$projectRoot\desktop-agent\target\release\desktop-agent.exe"
+$agentExe = "$projectRoot\desktop-agent\target\release\DeskStream.exe"
 $viewerExe = "$projectRoot\desktop-agent\target\release\viewer.exe"
 $relayExe = "$projectRoot\relay-server\target\release\relay-server.exe"
 $trayScript = "$projectRoot\desktop-agent\ScreenShare-Tray.ps1"

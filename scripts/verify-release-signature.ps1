@@ -9,8 +9,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 function Fail([string]$Message) {
-    Write-Error $Message
-    exit 1
+    throw $Message
 }
 
 if (-not (Test-Path $ExePath)) {
@@ -28,12 +27,29 @@ if (-not $Sig.SignerCertificate) {
 }
 
 $Cert = $Sig.SignerCertificate
+if ($env:DESKSTREAM_CERT_THUMBPRINT -and $Cert.Thumbprint -ne $env:DESKSTREAM_CERT_THUMBPRINT) {
+    Fail 'AUTHENTICODE_STATUS=SignerDoesNotMatchConfiguredProductionCertificate'
+}
 $EkuList = @()
 if ($Cert.EnhancedKeyUsageList) {
     $EkuList = @($Cert.EnhancedKeyUsageList | ForEach-Object { $_.FriendlyName; $_.ObjectId.Value; $_.ObjectId.FriendlyName })
 }
 if (-not ($EkuList -match 'Code Signing' -or $EkuList -match 'codesigning')) {
     Fail 'AUTHENTICODE_STATUS=MissingCodeSigningEKU'
+}
+
+$signTool = $env:DESKSTREAM_SIGNTOOL
+if (-not $signTool) {
+    $signTool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $signTool -or -not (Test-Path -LiteralPath $signTool)) {
+    Fail 'AUTHENTICODE_STATUS=SignToolUnavailableForTrustedChainVerification'
+}
+& $signTool verify /pa /v $ResolvedExe
+if ($LASTEXITCODE -ne 0) {
+    Fail 'AUTHENTICODE_STATUS=WindowsSignToolChainVerificationFailed'
 }
 
 $TrustedTimestamp = $null

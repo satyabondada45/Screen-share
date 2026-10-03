@@ -1,8 +1,21 @@
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
+
+!ifndef DESKSTREAM_SIGNING_SCRIPT
+!ifndef DESKSTREAM_DEVELOPMENT_BUILD
+!error "Pass a production signing script or explicitly mark this as a development build."
+!endif
+!endif
+
+!ifndef DESKSTREAM_OUTFILE
+!define DESKSTREAM_OUTFILE "..\dist-installer\DeskStream-Setup-x64.exe"
+!endif
+
+Var VerifyPayloadDir
 
 Name "DeskStream"
-OutFile "..\dist-installer\DeskStream-Setup-x64.exe"
+OutFile "${DESKSTREAM_OUTFILE}"
 InstallDir "$LOCALAPPDATA\DeskStream"
 RequestExecutionLevel user
 
@@ -30,8 +43,27 @@ UninstallIcon "..\desktop-agent\assets\icon.ico"
 
 !insertmacro MUI_LANGUAGE "English"
 
+Function .onInit
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/VERIFY-PAYLOAD=" $R1
+  ${If} $R1 == "1"
+    ReadEnvStr $VerifyPayloadDir "DESKSTREAM_VERIFY_DIR"
+    ${If} $VerifyPayloadDir == ""
+      Abort
+    ${EndIf}
+    SetSilent silent
+  ${EndIf}
+FunctionEnd
+
 Section "DeskStream (required)"
   SectionIn RO
+
+  ${If} $VerifyPayloadDir != ""
+    SetOutPath "$VerifyPayloadDir"
+    File "..\DESKSTREAM\DeskStream.exe"
+    SetErrorLevel 0
+    Quit
+  ${EndIf}
   
   SetOutPath "$INSTDIR"
   

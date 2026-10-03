@@ -2284,6 +2284,16 @@ function getRelativeTime($timestamp)
         });
 
         let isHostOnlineGlobal = <?php echo $isHostOnline ? 'true' : 'false'; ?>;
+        let lastAgentIpcState = null;
+        let lastHostBadgeState = null;
+
+        function logAgentIpcState(connected, details = '') {
+            const state = connected ? 'connected' : 'disconnected';
+            if (lastAgentIpcState !== state) {
+                console.info('[AGENT IPC] ' + state, details);
+                lastAgentIpcState = state;
+            }
+        }
 
         function cleanId(id) {
             return String(id || '').replace(/[^0-9]/g, '');
@@ -2301,11 +2311,20 @@ function getRelativeTime($timestamp)
                     const controller = new AbortController();
                     timeoutId = setTimeout(() => controller.abort(), 3000);
                     const res = await fetch(url, { signal: controller.signal });
-                    if (!res.ok) continue;
+                    if (!res.ok) {
+                        logAgentIpcState(false, url + ' returned HTTP ' + res.status);
+                        continue;
+                    }
 
                     const data = await res.json();
                     const systemId = data && (data.system_id || data.device_id || data.id);
                     if (systemId) {
+                        logAgentIpcState(true, {
+                            url,
+                            system_id: String(systemId),
+                            status: data.status,
+                            running: data.running
+                        });
                         await registerLocalDevice({
                             system_id: String(systemId),
                             status: data.status || (data.running === false ? 'offline' : 'online'),
@@ -2313,8 +2332,9 @@ function getRelativeTime($timestamp)
                         });
                         return { ...data, system_id: String(systemId) };
                     }
+                    logAgentIpcState(false, url + ' returned no device ID');
                 } catch (e) {
-                    console.debug('[AGENT UI] Local agent probe failed for', url, e);
+                    logAgentIpcState(false, url + ' probe failed: ' + String(e));
                 } finally {
                     if (timeoutId) clearTimeout(timeoutId);
                 }
@@ -2366,6 +2386,10 @@ function getRelativeTime($timestamp)
                     }
 
                     currentHostUid = String(returnedSystemId);
+                    console.info('[DEVICE REGISTER] Agent device registered', {
+                        system_id: currentHostUid,
+                        device_name: responseData.system.device_name || PHP_DEVICE_ALIAS || PHP_HOST_ALIAS || 'Workstation'
+                    });
                     document.cookie = "local_device_id=" + encodeURIComponent(currentHostUid) + "; path=/; max-age=31536000";
                     document.getElementById('mainHostId').innerText = formatId(currentHostUid);
                     document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
@@ -2394,6 +2418,10 @@ function getRelativeTime($timestamp)
         function updateHostBadge(state) {
             const badge = document.getElementById('hostStatusBadge');
             if (!badge) return;
+            if (lastHostBadgeState !== state) {
+                console.info('[AGENT STATUS] ' + (lastHostBadgeState || 'uninitialized') + ' -> ' + state);
+                lastHostBadgeState = state;
+            }
             if (state === 'online') {
                 badge.innerHTML = `
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -2458,6 +2486,14 @@ function getRelativeTime($timestamp)
                     method: 'POST'
                 });
                 const launchData = await launchRes.json();
+                console.info('[AGENT START] Launcher response', {
+                    http_status: launchRes.status,
+                    status: launchData.status,
+                    pid: launchData.pid || null,
+                    process: launchData.process || null,
+                    executable: launchData.executable || null,
+                    message: launchData.message || null
+                });
 
                 if (launchData.status !== 'success' && launchData.status !== 'already_running') {
                     window.__agentLaunchPending = false;

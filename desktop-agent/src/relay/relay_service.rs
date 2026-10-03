@@ -702,3 +702,4 @@ fn handle_websocket_viewer(
         map.insert(session_id_thread, host);
     }
 }
+

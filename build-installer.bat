@@ -18,7 +18,15 @@ set GUI_DIR=%PROJECT_ROOT%screenshare-gui
 set SETUP_DIR=%PROJECT_ROOT%screenshare-setup
 set INSTALLER_DIR=%PROJECT_ROOT%installer
 set DOWNLOADS_DIR=%PROJECT_ROOT%frontend\downloads
+set "PREVIOUS_CARGO_TARGET_DIR=%CARGO_TARGET_DIR%"
+set "CARGO_TARGET_DIR=C:\cargo-target\deskstream"
+set AGENT_EXE=%CARGO_TARGET_DIR%\release\DeskStream.exe
 set VERSION=1.0.2
+
+if "%DESKSTREAM_CERT_THUMBPRINT%"=="" (
+    echo ERROR: DESKSTREAM_CERT_THUMBPRINT is required for production signing.
+    exit /b 1
+)
 
 echo ========================================
 echo SCREEN SHARE RELEASE BUILD
@@ -47,14 +55,26 @@ goto :parse_args
 REM -- Step 1: Build all Rust components from source --
 echo [1/7] Building Rust release binaries...
 echo   Building desktop-agent...
+if exist "%AGENT_EXE%" (
+    del /f /q "%AGENT_EXE%"
+    if exist "%AGENT_EXE%" (
+        echo ERROR: Could not remove stale Cargo output: %AGENT_EXE%
+        exit /b 1
+    )
+)
 pushd "%AGENT_DIR%"
-cargo build --release 2>&1
+cargo build --release --bin DeskStream 2>&1
 if errorlevel 1 (
     echo ERROR: desktop-agent build failed.
     popd
     exit /b 1
 )
 popd
+set "CARGO_TARGET_DIR=%PREVIOUS_CARGO_TARGET_DIR%"
+if not exist "%AGENT_EXE%" (
+    echo ERROR: Fresh Cargo output not found: %AGENT_EXE%
+    exit /b 1
+)
 
 echo   Building relay-server...
 pushd "%RELAY_DIR%"
@@ -80,7 +100,6 @@ echo.
 
 REM -- Step 2: Locate fresh EXE --
 echo [2/7] Locating fresh binaries...
-set AGENT_EXE=%AGENT_DIR%\target\release\DeskStream.exe
 set RELAY_EXE=%RELAY_DIR%\target\release\relay-server.exe
 set GUI_EXE=%GUI_DIR%\target\release\ScreenShare.exe
 
@@ -103,20 +122,31 @@ echo.
 
 REM -- Step 3: Stop old agent process --
 echo [3/7] Stopping running agent (if any)...
-taskkill /F /IM desktop-agent.exe >nul 2>&1
+powershell -NoProfile -Command "Get-Process -Name 'desktop-agent','DeskStream','ScreenShare' -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force }"
 echo      Done
 echo.
+
+REM Production distribution must be Authenticode-signed with a trusted publisher certificate.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\sign-release.ps1" -ExePath "%AGENT_EXE%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%AGENT_EXE%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\sign-release.ps1" -ExePath "%GUI_EXE%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%GUI_EXE%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\sign-release.ps1" -ExePath "%RELAY_EXE%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%RELAY_EXE%"
+if errorlevel 1 exit /b 1
 
 REM -- Step 4: Clean staging and copy fresh binaries --
 echo [4/7] Cleaning staging and copying fresh binaries...
 set STAGING_DIR=%PROJECT_ROOT%installer_staging
 
-REM Clean old staging (ONLY build artifacts, NOT user data)
-if exist "%STAGING_DIR%" (
-    rmdir /S /Q "%STAGING_DIR%"
-)
-mkdir "%STAGING_DIR%" >nul 2>&1
+if not exist "%STAGING_DIR%" mkdir "%STAGING_DIR%"
 
+copy /Y "%AGENT_EXE%" "%STAGING_DIR%\DeskStream.exe" >nul
 copy /Y "%AGENT_EXE%" "%STAGING_DIR%\desktop-agent.exe" >nul
 copy /Y "%GUI_EXE%" "%STAGING_DIR%\ScreenShare.exe" >nul
 copy /Y "%RELAY_EXE%" "%STAGING_DIR%\relay-server.exe" >nul
@@ -154,6 +184,14 @@ echo.
 
 REM -- Step 6: Build installer --
 echo [6/7] Building installer...
+set SETUP_EXE=%SETUP_DIR%\target\release\screenshare-setup.exe
+if exist "%SETUP_EXE%" (
+    del /f /q "%SETUP_EXE%"
+    if exist "%SETUP_EXE%" (
+        echo ERROR: Could not remove stale setup output: %SETUP_EXE%
+        exit /b 1
+    )
+)
 pushd "%SETUP_DIR%"
 cargo build --release 2>&1
 if errorlevel 1 (
@@ -167,6 +205,11 @@ echo.
 
 REM -- Step 7: Verify final installer --
 echo [7/7] Verifying final installer...
+ powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\sign-release.ps1" -ExePath "%SETUP_EXE%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%SETUP_EXE%"
+if errorlevel 1 exit /b 1
+
 set VERSIONED_INSTALLER=%INSTALLER_DIR%\ScreenShare-Setup-%VERSION%.exe
 set RAW_INSTALLER=%SETUP_DIR%\target\release\screenshare-setup.exe
 
@@ -194,10 +237,21 @@ echo   SHA256:
 certutil -hashfile "%VERSIONED_INSTALLER%" SHA256 | findstr /v "hash" | findstr /v "CertUtil" > "%TEMP%\final_hash.txt"
 set /p FINAL_HASH=<"%TEMP%\final_hash.txt"
 echo   %FINAL_HASH%
+del "%TEMP%\final_hash.txt" 2>nul
 
-echo.
-echo   SIGNING STATUS: NOT CONFIGURED
-echo   SIGNATURE: NotSigned
+echo   Verifying exact embedded Cargo executable...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-packaged-exe.ps1" -SourcePath "%AGENT_EXE%" -StagedPath "%STAGING_DIR%\desktop-agent.exe" -InstallerPath "%VERSIONED_INSTALLER%" -InstallerFormat Embedded
+if errorlevel 1 (
+    echo ERROR: Setup payload does not match the freshly built Cargo executable.
+    exit /b 1
+)
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%VERSIONED_INSTALLER%"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%LATEST_DIR%\ScreenShare-Setup.exe"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_ROOT%scripts\verify-release-signature.ps1" -ExePath "%DOWNLOADS_DIR%\ScreenShare-Setup.exe"
+if errorlevel 1 exit /b 1
 
 echo.
 echo ========================================

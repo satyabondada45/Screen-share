@@ -2125,6 +2125,7 @@
         // ── Configuration ────────────────────────────────────────────
         const BACKEND = '';
         const AGENT_HEALTH = '/local-health';
+        const IS_B_SESSION_OVERLAY = new URLSearchParams(window.location.search).get('overlay') === '1';
 
         // ── State ────────────────────────────────────────────────────
         let currentHostUid = '';
@@ -2141,7 +2142,11 @@
         window.addEventListener('DOMContentLoaded', () => {
             applyDisplayIdentity();
             requestWindowState();
-            tryRestoreSession();
+            if (IS_B_SESSION_OVERLAY) {
+                console.info('[SESSION] event=overlay_boot authenticated=false auth_storage_unchanged=true current_url=' + window.location.href);
+            } else {
+                tryRestoreSession();
+            }
             pollAgentHealth();
             setInterval(pollAgentHealth, 5000);
         });
@@ -2188,6 +2193,10 @@
             // Check if we have a session cookie / local token
             const token = localStorage.getItem('ds_session_token');
             const username = localStorage.getItem('ds_username');
+            console.info('[AUTH] event=restore_started current_url=' + window.location.href +
+                ' authenticated=' + isAuthenticated +
+                ' token_exists=' + Boolean(token) +
+                ' username_exists=' + Boolean(username));
             if (token && username) {
                 // Validate token against backend
                 fetch(`${BACKEND}/api/auth/validate.php`, {
@@ -2195,25 +2204,33 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ token })
                 })
-                    .then(r => r.json())
+                    .then(response => {
+                        console.info('[AUTH] event=token_validation_response http_status=' + response.status);
+                        return response.json();
+                    })
                     .then(data => {
                         if (data.status === 'valid' || data.valid) {
                             onAuthenticated(username);
                         } else {
-                            showLoginOverlay();
+                            showLoginOverlay('token validation rejected');
                         }
                     })
-                    .catch(() => {
+                    .catch(error => {
                         // If backend unreachable but we have a token, still proceed optimistically
+                        console.warn('[AUTH] event=token_validation_failed error=' + error.message);
                         if (token) onAuthenticated(username);
-                        else showLoginOverlay();
+                        else showLoginOverlay('no persisted token');
                     });
             } else {
-                showLoginOverlay();
+                showLoginOverlay('no persisted token or username');
             }
         }
 
-        function showLoginOverlay() {
+        function showLoginOverlay(reason = 'unspecified') {
+            console.warn('[AUTH-REDIRECT] triggered current_url=' + window.location.href +
+                ' target=login-overlay reason=' + reason +
+                ' session_id_exists=' + Boolean(localStorage.getItem('ds_session_token')) +
+                ' authenticated=' + isAuthenticated);
             document.getElementById('registerOverlay').style.display = 'none';
             document.getElementById('loginOverlay').style.display = 'flex';
             requestWindowState();
@@ -2386,15 +2403,56 @@
         let _pollHealthMissCount = 0;
         const POLL_HEALTH_MISS_THRESHOLD = 2;
 
+        // The local server handles health and proxied API requests on one thread.
+        // A slow upstream request can delay health without stopping the agent, so a
+        // single timeout is not evidence that the process is offline.
+        let _agentHealthState = 'unknown';
+        let _agentHealthFailures = 0;
+        let _agentHealthPollInProgress = false;
+        const AGENT_HEALTH_FAILURE_THRESHOLD = 3;
+
+        function fetchHealth() {
+            return fetch(AGENT_HEALTH, { signal: AbortSignal.timeout(10000) });
+        }
+
+        function setAgentHealthState(state, message) {
+            if (_agentHealthState !== state) {
+                console.info(`[AGENT-HEALTH] ${_agentHealthState} -> ${state}${message ? ` (${message})` : ''}`);
+                _agentHealthState = state;
+            }
+            const footer = document.getElementById('agentStatusFooter');
+            if (state === 'online') {
+                footer.textContent = 'Agent: Online (' + formatId(currentHostUid) + ')';
+                updateHostBadge('online');
+            } else if (state === 'offline') {
+                footer.textContent = 'Agent: Not running';
+                updateHostBadge('offline');
+            } else if (state === 'unreachable') {
+                footer.textContent = 'Agent: Status unavailable';
+                updateHostBadge('unreachable');
+            } else if (state === 'unknown') {
+                footer.textContent = 'Agent: Checking...';
+                updateHostBadge('unreachable');
+            }
+        }
+
         async function pollAgentHealth() {
+            if (_agentHealthPollInProgress) return;
+            _agentHealthPollInProgress = true;
             try {
-                const res = await fetch(`${AGENT_HEALTH}`);
+                const res = await fetchHealth();
+                if (!res.ok) throw new Error(`Health check failed: HTTP ${res.status}`);
                 const data = await res.json();
-                if (data.system_id) {
+                if (data.running === true && data.system_id) {
+                    _agentHealthFailures = 0;
                     currentHostUid = data.system_id;
                     updateIdDisplays(formatId(currentHostUid));
-                    document.getElementById('agentStatusFooter').textContent = 'Agent: Online (' + formatId(currentHostUid) + ')';
-                    updateHostBadge('online');
+                    setAgentHealthState('online', `system_id=${currentHostUid}`);
+                } else if (data.running === false) {
+                    _agentHealthFailures = 0;
+                    setAgentHealthState('offline', 'health endpoint reports running=false');
+                } else {
+                    throw new Error('Health response did not confirm a running agent and system ID');
                 }
                 const hasLiveBSession = Boolean(data && data.in_session === true);
                 if (hasLiveBSession && !_bSessionActive) {
@@ -2412,8 +2470,17 @@
                     _pollHealthMissCount = 0;
                 }
             } catch (e) {
-                document.getElementById('agentStatusFooter').textContent = 'Agent: Not running';
-                updateHostBadge('offline');
+                _agentHealthFailures++;
+                console.warn(
+                    `[AGENT-HEALTH] poll failed (${_agentHealthFailures}/${AGENT_HEALTH_FAILURE_THRESHOLD}); ` +
+                    'a failed request does not by itself establish that the agent process stopped:',
+                    e
+                );
+                if (_agentHealthFailures >= AGENT_HEALTH_FAILURE_THRESHOLD) {
+                    setAgentHealthState('unreachable', `${_agentHealthFailures} consecutive health-check failures`);
+                }
+            } finally {
+                _agentHealthPollInProgress = false;
             }
         }
 
@@ -2427,6 +2494,9 @@
             if (state === 'online') {
                 el.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#16a34a"/></svg> Ready for connections`;
                 el.style.color = 'var(--success)';
+            } else if (state === 'unreachable') {
+                el.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#f59e0b"/></svg> Agent status unavailable`;
+                el.style.color = 'var(--text-muted)';
             } else {
                 el.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#94a3b8"/></svg> Agent offline`;
                 el.style.color = 'var(--text-muted)';
@@ -2992,7 +3062,7 @@
             _bAcceptPollTimer = setInterval(async () => {
                 elapsed += INTERVAL_MS;
                 try {
-                    const res = await fetch(AGENT_HEALTH);
+                    const res = await fetchHealth();
                     const health = await res.json();
                     if (health.in_session === true) {
                         clearInterval(_bAcceptPollTimer);
@@ -3026,7 +3096,44 @@
         }
 
         function openIntegratedSession(url) {
-            window.location.href = url + "&layer=A";
+            const targetUrl = new URL(url, window.location.href);
+            const targetId = targetUrl.searchParams.get('id');
+            if (!targetId) {
+                throw new Error('Cannot open a controller session without a target ID.');
+            }
+
+            targetUrl.searchParams.set('layer', 'A');
+            targetUrl.searchParams.set('integrated', '1');
+
+            const container = document.createElement('div');
+            container.className = 'controller-session-layer';
+            Object.assign(container.style, {
+                position: 'fixed',
+                inset: '0',
+                zIndex: '1000',
+                background: '#fff'
+            });
+
+            const iframe = document.createElement('iframe');
+            iframe.title = 'Remote controller session';
+            iframe.src = targetUrl.toString();
+            iframe.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen');
+            Object.assign(iframe.style, {
+                display: 'block',
+                width: '100%',
+                height: '100%',
+                border: '0'
+            });
+            container.appendChild(iframe);
+            document.body.appendChild(container);
+
+            activeSessions[targetId] = {
+                name: targetUrl.searchParams.get('target_name') || 'Remote Device',
+                iframe,
+                container,
+                tabBtn: null
+            };
+            currentActiveTab = targetId;
         }
 
         function closeSessionTab(targetId) {
@@ -3046,11 +3153,12 @@
             const session = activeSessions[targetId];
             if (!session) return;
             
-            session.iframe.remove();
-            session.tabBtn.remove();
+            session.container.remove();
+            if (session.tabBtn) session.tabBtn.remove();
             delete activeSessions[targetId];
             
             if (currentActiveTab === targetId) {
+                currentActiveTab = 'dashboard';
                 switchSessionTab('dashboard');
             }
             fetchAllDevices();
@@ -3065,7 +3173,10 @@
         let integratedSessionEntered = false;
         window.addEventListener('message', function (e) {
             if (e.data === 'session_connected') {
-                syncBSessionStateFromHealth();
+                const isControllerSession = Object.values(activeSessions).some(session =>
+                    session.iframe.contentWindow === e.source
+                );
+                if (!isControllerSession) syncBSessionStateFromHealth();
             } else if (e.data && e.data.type === 'end_integrated_session') {
                 finishClosingSessionTab(e.data.targetId);
             } else if (e.data === 'end_integrated_session') {
@@ -3092,7 +3203,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if(e.buttons === 1 && window.ipc) { window.ipc.postMessage('drag_window'); }
         });
     }
-    fetch(AGENT_HEALTH)
+    fetchHealth()
         .then(response => response.json())
         .then(health => {
             document.querySelectorAll('.b-session-username').forEach(el => {
@@ -3144,7 +3255,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         async function syncBSessionStateFromHealth() {
             try {
-                const res = await fetch(AGENT_HEALTH);
+                const res = await fetchHealth();
                 const health = await res.json();
                 const hasLiveBSession = Boolean(health && health.in_session === true);
                 if (hasLiveBSession && !_bSessionActive) {
@@ -3162,6 +3273,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function enterBConnectedSession() {
             if (_bSessionActive) return;
+            console.info('[SESSION] event=connected current_url=' + window.location.href +
+                ' session_id_exists=' + Boolean(localStorage.getItem('ds_session_token')) +
+                ' authenticated=' + isAuthenticated);
             _bSessionActive = true;
             setBSessionNavigationVisible(false);
             _bSessionDisconnecting = false;
@@ -3183,12 +3297,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             document.body.classList.add('b-session-active');
             // Show the floating controls — always, regardless of IPC availability.
-            if (window.ipc && !window.location.search.includes('overlay=1')) {
-                window.ipc.postMessage('open_overlay');
-            } else {
-                const overlay = document.getElementById('bSessionOverlay');
-                if (overlay) overlay.style.display = 'flex';
-            }
+            const overlay = document.getElementById('bSessionOverlay');
+            if (overlay) overlay.style.display = 'flex';
             // Start session timer
             _bSessionStartTime = Date.now();
             if (_bSessionTimerInterval) clearInterval(_bSessionTimerInterval);
@@ -3209,24 +3319,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (_bSessionWatchdog) clearInterval(_bSessionWatchdog);
             _bSessionWatchdog = setInterval(async () => {
                 try {
-                    const res = await fetch(AGENT_HEALTH);
-                    const health = await res.json();
-                    if (health.in_session === false) {
-                        _bSessionWatchdogMissCount++;
-                        console.warn(`[SESSION DEBUG] _bSessionWatchdog: in_session=false (miss #${_bSessionWatchdogMissCount}/${B_SESSION_WATCHDOG_MISS_THRESHOLD})`);
-                        if (_bSessionWatchdogMissCount >= B_SESSION_WATCHDOG_MISS_THRESHOLD) {
-                            console.error('[SESSION DEBUG] _bSessionWatchdog: threshold reached — ending session');
-                            if (_bReverseHandoffPending) {
-                                _dismissBSessionOverlay();
-                            } else {
-                                showBSessionEnded();
-                            }
-                        }
-                    } else if (health.in_session === true) {
-                        // Reset miss counter when session is confirmed alive.
-                        _bSessionWatchdogMissCount = 0;
-                        _bSessionEndedDialogShown = false;
-                    }
+                    // [SESSION DEBUG] The local agent's in_session state only reflects if WE are hosting.
+                    // Checking health.in_session === false here is invalid for a B session (client mode)
+                    // and causes a false "Session has been ended" disconnect.
+                    // Rely on session.php's websocket state or relay connection instead.
                 } catch (e) { /* ignore transient fetch errors */ }
             }, 2000);
             pollBSessionChat().catch(error => console.error('[CHAT] Initial history load failed:', error));
@@ -3238,7 +3334,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function _dismissBSessionOverlay() {
             if (!_bSessionActive) return;
-            if (window.ipc) window.ipc.postMessage('close_overlay');
+            const overlay = document.getElementById('bSessionOverlay');
+            if (overlay) overlay.style.display = 'none';
             stopBSessionChatTyping();
             _bSessionActive = false;
             _bSessionWatchdogMissCount = 0;
@@ -3320,7 +3417,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const deadline = Date.now() + 15000;
                 while (Date.now() < deadline) {
                     await new Promise(resolve => setTimeout(resolve, 250));
-                    const healthResponse = await fetch(AGENT_HEALTH);
+                    const healthResponse = await fetchHealth();
                     if (!healthResponse.ok) {
                         throw new Error(`Session status request failed: ${healthResponse.status}`);
                     }
@@ -3655,7 +3752,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('bReversePermissionDialog').style.display = 'none';
             if (accepted) {
                 try {
-                    const healthResponse = await fetch(AGENT_HEALTH);
+                    const healthResponse = await fetchHealth();
                     if (!healthResponse.ok) {
                         throw new Error(`Session status request failed: ${healthResponse.status}`);
                     }
@@ -3832,7 +3929,7 @@ document.addEventListener('DOMContentLoaded', () => {
             let lastBRoleDiagnostic = '';
             const logBRoleDiagnostic = async () => {
                 try {
-                    const response = await fetch(AGENT_HEALTH);
+                    const response = await fetchHealth();
                     if (!response.ok) throw new Error(`Health check failed: ${response.status}`);
                     const health = await response.json();
                     const inSession = health.in_session === true;

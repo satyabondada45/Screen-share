@@ -7,8 +7,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 function Fail([string]$Message) {
-    Write-Error $Message
-    exit 1
+    throw $Message
 }
 
 if (-not $ExePath) {
@@ -42,7 +41,7 @@ $CertThumbprint = $env:DESKSTREAM_CERT_THUMBPRINT
 $TimestampUrl = $env:DESKSTREAM_TIMESTAMP_URL
 
 if (-not $TimestampUrl) {
-    $TimestampUrl = 'http://timestamp.digicert.com'
+    $TimestampUrl = 'https://timestamp.digicert.com'
 }
 
 if (-not $CertThumbprint) {
@@ -54,7 +53,7 @@ $CertMatches = @(
         Where-Object {
             $_.Thumbprint -eq $CertThumbprint -and
             $_.HasPrivateKey -and
-            ($_.EnhancedKeyUsageList -match 'Code Signing' -or $_.EnhancedKeyUsageList -match 'codesigning') -and
+            ($_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3') -and
             $_.NotBefore -le (Get-Date) -and
             $_.NotAfter -ge (Get-Date) -and
             $_.Issuer -ne $_.Subject
@@ -66,6 +65,19 @@ if (-not $CertMatches -or $CertMatches.Count -eq 0) {
 }
 
 $ProductionCert = $CertMatches[0]
+$chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+try {
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+    $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+    if (-not $chain.Build($ProductionCert)) {
+        $chainErrors = ($chain.ChainStatus | ForEach-Object { $_.StatusInformation.Trim() }) -join '; '
+        Fail "Configured signing certificate does not chain to a trusted root: $chainErrors"
+    }
+} finally {
+    $chain.Dispose()
+}
 
 $SignArgs = @(
     'sign',
@@ -94,6 +106,9 @@ if (-not $Signature -or $Signature.Status -ne 'Valid') {
 
 if (-not $Signature.SignerCertificate) {
     Fail 'SignerCertificate is missing after signing.'
+}
+if ($Signature.SignerCertificate.Thumbprint -ne $ProductionCert.Thumbprint) {
+    Fail 'The resulting Authenticode signature does not match DESKSTREAM_CERT_THUMBPRINT.'
 }
 
 if (-not $Signature.SignerCertificate.Extensions) {
