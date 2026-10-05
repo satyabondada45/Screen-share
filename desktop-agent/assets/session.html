@@ -3870,6 +3870,9 @@ window.addEventListener('DOMContentLoaded', () => {
                     window.parent.postMessage({ type: "end_integrated_session", targetId: params.get("id") }, "*");
                 } else if (sessionWasEstablished) {
                     showSessionEnded();
+                    if (window.parent && window.parent !== window) {
+                        window.parent.postMessage('session_ended', '*');
+                    }
                 }
             };
         }

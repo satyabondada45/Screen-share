@@ -2400,8 +2400,6 @@
         // Miss counter for the background 5-second pollAgentHealth poller.
         // Only dismiss an active B-session after 2 consecutive in_session=false readings,
         // preventing false teardowns during the relay handshake window.
-        let _pollHealthMissCount = 0;
-        const POLL_HEALTH_MISS_THRESHOLD = 2;
 
         // The local server handles health and proxied API requests on one thread.
         // A slow upstream request can delay health without stopping the agent, so a
@@ -2455,20 +2453,7 @@
                     throw new Error('Health response did not confirm a running agent and system ID');
                 }
                 const hasLiveBSession = Boolean(data && data.in_session === true);
-                if (hasLiveBSession && !_bSessionActive) {
-                    _pollHealthMissCount = 0;
-                    enterBConnectedSession();
-                } else if (!hasLiveBSession && _bSessionActive) {
-                    _pollHealthMissCount++;
-                    console.warn(`[SESSION DEBUG] pollAgentHealth: in_session=false while B-session active (miss #${_pollHealthMissCount}/${POLL_HEALTH_MISS_THRESHOLD})`);
-                    if (_pollHealthMissCount >= POLL_HEALTH_MISS_THRESHOLD) {
-                        console.error('[SESSION DEBUG] pollAgentHealth: threshold reached — dismissing B-session overlay');
-                        _pollHealthMissCount = 0;
-                        _dismissBSessionOverlay();
-                    }
-                } else {
-                    _pollHealthMissCount = 0;
-                }
+                if (hasLiveBSession && !_bSessionActive) window.deskStreamBSession.enter();
             } catch (e) {
                 _agentHealthFailures++;
                 console.warn(
@@ -3176,12 +3161,31 @@
                 const isControllerSession = Object.values(activeSessions).some(session =>
                     session.iframe.contentWindow === e.source
                 );
-                if (!isControllerSession) syncBSessionStateFromHealth();
+                if (!isControllerSession) window.deskStreamBSession.enter();
+            } else if (e.data === 'session_ended') {
+                const isControllerSession = Object.values(activeSessions).some(session =>
+                    session.iframe.contentWindow === e.source
+                );
+                if (!isControllerSession) window.deskStreamBSession.dismiss();
             } else if (e.data && e.data.type === 'end_integrated_session') {
-                finishClosingSessionTab(e.data.targetId);
+                const isControllerSession = Object.values(activeSessions).some(session =>
+                    session.iframe.contentWindow === e.source
+                );
+                if (isControllerSession) {
+                    finishClosingSessionTab(e.data.targetId);
+                } else {
+                    window.deskStreamBSession.dismiss();
+                }
             } else if (e.data === 'end_integrated_session') {
-                // Fallback for single session if targetId isn't provided
-                finishClosingSessionTab(currentActiveTab);
+                const isControllerSession = Object.values(activeSessions).some(session =>
+                    session.iframe.contentWindow === e.source
+                );
+                if (isControllerSession) {
+                    // Fallback for single session if targetId isn't provided
+                    finishClosingSessionTab(currentActiveTab);
+                } else {
+                    window.deskStreamBSession.dismiss();
+                }
             } else if (e.data && e.data.type === 'reverse_remote_approved') {
                 const requesterId = String(e.data.requester_system_id || '');
                 if (/^\d{9}$/.test(requesterId)) {
@@ -3259,7 +3263,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 const health = await res.json();
                 const hasLiveBSession = Boolean(health && health.in_session === true);
                 if (hasLiveBSession && !_bSessionActive) {
-                    _pollHealthMissCount = 0;
                     _bSessionWatchdogMissCount = 0;
                     enterBConnectedSession();
                     return;
@@ -3339,7 +3342,6 @@ document.addEventListener('DOMContentLoaded', () => {
             stopBSessionChatTyping();
             _bSessionActive = false;
             _bSessionWatchdogMissCount = 0;
-            _pollHealthMissCount = 0;
             setBSessionNavigationVisible(true);
             _bSessionDisconnecting = false;
             currentFolderBatch = null;
@@ -3362,9 +3364,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.remove('b-session-active');
-            // Hide the floating controls — always, regardless of IPC availability.
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.style.display = 'none';
             document.getElementById('bSessionChatPanel')?.classList.remove('open');
             document.getElementById('bSessionChatMessages')?.replaceChildren();
             if (_bSessionTimerInterval) { clearInterval(_bSessionTimerInterval); _bSessionTimerInterval = null; }
@@ -3381,6 +3380,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (timerEl) timerEl.textContent = '00:00:00';
             _bSessionHandledOffers.clear();
         }
+
+        window.deskStreamBSession = {
+            enter: enterBConnectedSession,
+            dismiss: _dismissBSessionOverlay
+        };
 
         function showBSessionEnded() {
             if (_bSessionEndedDialogShown) return;
