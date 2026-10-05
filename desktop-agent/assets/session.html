@@ -811,7 +811,10 @@ window.addEventListener('DOMContentLoaded', () => {
                 if (fControls) fControls.style.display = 'none';
             } else {
                 if (vHeader) vHeader.style.display = 'none';
-                if (fControls) fControls.style.display = 'flex';
+                if (fControls) {
+                    fControls.style.display = 'flex';
+                    positionFloatingToolbar();
+                }
                 
                 // Init drag for B layer
                 let isDragging = false;
