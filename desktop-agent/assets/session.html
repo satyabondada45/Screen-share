@@ -875,6 +875,34 @@ window.addEventListener('DOMContentLoaded', () => {
             }));
         }
 
+        let webSocketGeneration = 0;
+        let activeWebSocketGeneration = 0;
+
+        function traceType99(direction, source, reason, generation = activeWebSocketGeneration) {
+            const timestamp = new Date().toISOString();
+            const socketIsCurrent = generation === activeWebSocketGeneration;
+            const details = {
+                component: "VIEWER",
+                direction,
+                device_id: String(DEVICE_ID || "unknown"),
+                session_id: String(DEVICE_ID || "unknown"),
+                source,
+                reason,
+                timestamp,
+                connection_id: String(generation),
+                socket_current: String(socketIsCurrent)
+            };
+            console.info("[TYPE99 TRACE]", details);
+            const event = ({
+                RECV: "A_TYPE99_RECEIVE",
+                RECV_COMPLETE: "A_TYPE99_RECEIVE_COMPLETE",
+                CLOSE_REQUEST: "A_TYPE99_CLOSE_REQUEST",
+                CLOSE_REQUEST_COMPLETE: "A_TYPE99_CLOSE_REQUEST_COMPLETE",
+                SEND_COMPLETE: "A_TYPE99_SEND_COMPLETE"
+            })[direction] || "A_TYPE99_SEND";
+            sessionDebug(event, details);
+        }
+
         sessionDebug('A_START');
         sessionDebug('ROLE');
         sessionDebug('A_WS_CONFIG', { endpoint: WS_URL });
@@ -888,6 +916,7 @@ window.addEventListener('DOMContentLoaded', () => {
         let ws = null;
         let wsRxBuffer = new Uint8Array(0);
         let wsRxProcessing = false;
+        let lastViewerRxPacket = "none";
         let directConnection = false;
         let directFallbackAttempted = false;
         let lastWebSocketCloseRequest = "none";
@@ -2070,9 +2099,7 @@ window.addEventListener('DOMContentLoaded', () => {
             console.log("[STREAM STATE]", newState);
             if (newState === "WAITING_FOR_KEYFRAME") {
                 if (isSocketOpen()) {
-                    console.log("[VIDEO RECOVERY] Requesting IDR from Host...");
-                    const pkt = new Uint8Array([99]);
-                    ws.send(pkt);
+                    console.log("[VIDEO RECOVERY] Waiting for the Host's periodic IDR.");
                 }
                 console.warn(
                     `[VIDEO WAIT DIAGNOSTIC] reason=decoder_wait ` +
@@ -3212,7 +3239,7 @@ window.addEventListener('DOMContentLoaded', () => {
            WEBSOCKET MESSAGE
         ============================================================ */
 
-        async function handleMessage(event) {
+        async function handleMessage(event, connectionGeneration = activeWebSocketGeneration) {
             let chunk;
             if (event.data instanceof ArrayBuffer) {
                 chunk = new Uint8Array(event.data);
@@ -3224,6 +3251,24 @@ window.addEventListener('DOMContentLoaded', () => {
             }
 
             if (chunk.length === 0) return;
+
+            const incomingType = chunk[0];
+            const incomingHex = incomingType === 13 || incomingType === 15
+                ? "video-payload-omitted"
+                : Array.from(chunk.subarray(0, 32))
+                    .map(byte => byte.toString(16).padStart(2, "0"))
+                    .join(" ");
+            console.info("[VIEWER RX]", {
+                timestamp: new Date().toISOString(),
+                device_id: String(DEVICE_ID || "unknown"),
+                session_id: String(DEVICE_ID || "unknown"),
+                connection_id: connectionGeneration,
+                socket_current: connectionGeneration === activeWebSocketGeneration,
+                type: incomingType,
+                length: chunk.length,
+                first_32_bytes_hex: incomingHex,
+                previous_packet: lastViewerRxPacket
+            });
 
             const newBuf = new Uint8Array(wsRxBuffer.length + chunk.length);
             newBuf.set(wsRxBuffer);
@@ -3279,6 +3324,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         if (bufferLen < totalPacketSize) {
                             return;
                         }
+                        lastViewerRxPacket = `type=${type} bytes=${totalPacketSize}`;
 
                         if (!window.__videoParserLogLast || (performance.now() - window.__videoParserLogLast) > 3000) {
                             console.log(`[VIDEO PARSER]\nfirstByte=${type}\nheaderSize=21\nwidth=${width}\nheight=${height}\npayloadSize=${payloadSize}\navailable=${bufferLen}\nexpected=${totalPacketSize}\nfirstBytes=${Array.from(wsRxBuffer.slice(0, 16)).map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
@@ -3383,17 +3429,57 @@ window.addEventListener('DOMContentLoaded', () => {
                     }
                     else if (type === 99) {
                         console.info("[SESSION] Relay reported that the remote endpoint disconnected.");
+                        const previousPacket = lastViewerRxPacket;
+                        traceType99(
+                            "RECV",
+                            "handleMessage",
+                            `binary_type_99 buffer_bytes=${bufferLen} previous_packet=${previousPacket} stream_state=${currentStreamState} authenticated=${websocketAuthenticated}`,
+                            connectionGeneration
+                        );
                         lastWebSocketCloseRequest = "relay_type99";
                         sessionDebug("A_DISCONNECT", { code: "close_requested_by=relay_type99" });
                         wsRxBuffer = wsRxBuffer.subarray(1);
+                        traceType99(
+                            "RECV_COMPLETE",
+                            "handleMessage",
+                            "binary_type_99_consumed",
+                            connectionGeneration
+                        );
                         if (ws && ws.readyState === WebSocket.OPEN) {
+                            console.info("[VIEWER TYPE99]", {
+                                timestamp: new Date().toISOString(),
+                                device_id: String(DEVICE_ID || "unknown"),
+                                session_id: String(DEVICE_ID || "unknown"),
+                                packet_type: 99,
+                                ws_ready_state: ws.readyState,
+                                source: "viewer WebSocket binary receive/parser",
+                                previous_packet: previousPacket,
+                                connection_state: currentStreamState,
+                                close_reason: "Remote session ended",
+                                connection_id: connectionGeneration,
+                                socket_current: connectionGeneration === activeWebSocketGeneration
+                            });
+                            traceType99(
+                                "CLOSE_REQUEST",
+                                "handleMessage",
+                                "received_type_99",
+                                connectionGeneration
+                            );
                             ws.close(1000, "Remote session ended");
+                            traceType99(
+                                "CLOSE_REQUEST_COMPLETE",
+                                "handleMessage",
+                                "websocket_close_invoked",
+                                connectionGeneration
+                            );
                         }
+                        lastViewerRxPacket = "type=99 bytes=1";
                         continue;
                     }
                     else if (type === 1) {
                         websocketAuthenticated = true;
                         sessionWasEstablished = true;
+                        lastViewerRxPacket = `type=${type} bytes=1`;
                         sessionDebug('A_SESSION_APPROVED', { result: 'TYPE1' });
                         console.log("[WS] Session approved by host.");
                         setStreamState("STREAM_ACTIVE");
@@ -3403,6 +3489,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     else if (type === 2) {
                         websocketAuthenticated = true;
                         sessionWasEstablished = true;
+                        lastViewerRxPacket = `type=${type} bytes=1`;
                         notifyParentSessionConnected();
                         setStreamState("STREAM_ACTIVE");
                         wsRxBuffer = wsRxBuffer.slice(1);
@@ -3549,6 +3636,14 @@ window.addEventListener('DOMContentLoaded', () => {
             lastWebSocketCloseRequest = "none";
             resetWebSocketState();
             sessionDebug('A_WS_CONNECT_START', { endpoint: targetUrl });
+            const connectionGeneration = ++webSocketGeneration;
+            activeWebSocketGeneration = connectionGeneration;
+            console.info("[WS CONNECTION]", {
+                event: "create",
+                connection_id: connectionGeneration,
+                endpoint: targetUrl,
+                timestamp: new Date().toISOString()
+            });
 
             try {
                 ws = new WebSocket(targetUrl);
@@ -3575,7 +3670,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 console.log("[AUTH DEBUG] Waiting for authentication response");
             };
 
-            ws.onmessage = handleMessage;
+            ws.onmessage = event => handleMessage(event, connectionGeneration);
 
             ws.onerror = function (error) {
                 sessionDebug('A_WS_CONNECT_FAILED', { result: 'error_event' });
@@ -3588,6 +3683,16 @@ window.addEventListener('DOMContentLoaded', () => {
             };
 
             ws.onclose = function (event) {
+                console.info("[WS CONNECTION]", {
+                    event: "close",
+                    connection_id: connectionGeneration,
+                    socket_current: connectionGeneration === activeWebSocketGeneration,
+                    device_id: String(DEVICE_ID || "unknown"),
+                    timestamp: new Date().toISOString(),
+                    code: event.code,
+                    reason: event.reason || "none",
+                    wasClean: event.wasClean
+                });
                 console.error('[SESSION DEBUG] ws.onclose FIRED in session.html', event.code, event.reason,
                     `| sessionWasEstablished=${sessionWasEstablished} websocketAuthenticated=${websocketAuthenticated} isStreaming=${isStreaming}`);
                 const closeDetails = `code=${event.code};clean=${event.wasClean};reason=${event.reason || "none"};requested_by=${lastWebSocketCloseRequest}`;

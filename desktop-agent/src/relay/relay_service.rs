@@ -62,6 +62,17 @@ fn read_exact_logged(stream: &mut TcpStream, buffer: &mut [u8], _name: &str) -> 
     stream.read_exact(buffer).is_ok()
 }
 
+fn trace_type99(direction: &str, device_id: &str, session_id: &str, source: &str, reason: &str) {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    println!(
+        "[TYPE99 TRACE] component=RELAY_LEGACY direction={} device_id={} session_id={} source={} reason={} timestamp_ms={}",
+        direction, device_id, session_id, source, reason, timestamp_ms
+    );
+}
+
 pub struct RelayService {
     pub bind_addr: String,
     pub is_running: Arc<AtomicBool>,
@@ -509,6 +520,7 @@ fn handle_websocket_viewer(
 
     let session_id_thread = session_id.clone();
     let s_frames = Arc::clone(&stats_frames);
+    let session_id_host_reader = session_id.clone();
 
     let host_to_viewer_thread = thread::spawn(move || {
         let mut relay_frame_count: u64 = 0;
@@ -520,6 +532,15 @@ fn handle_websocket_viewer(
 
             let packet_type = type_buf[0];
             println!("[RELAY RX] type={}", packet_type);
+            if packet_type == 99 {
+                trace_type99(
+                    "RECV",
+                    &session_id_host_reader,
+                    &session_id_host_reader,
+                    "host_to_viewer",
+                    "host_tcp_type_99_not_forwarded",
+                );
+            }
 
             match packet_type {
                 13 | 15 => {
@@ -666,6 +687,7 @@ fn handle_websocket_viewer(
         }
     });
 
+    let session_id_viewer_reader = session_id.clone();
     let viewer_to_host_thread = thread::spawn(move || {
         loop {
             let msg = {
@@ -678,8 +700,27 @@ fn handle_websocket_viewer(
 
             match msg {
                 Ok(Message::Binary(data)) => {
+                    let is_type99 = data.first() == Some(&99);
+                    if is_type99 {
+                        trace_type99(
+                            "RECV",
+                            &session_id_viewer_reader,
+                            &session_id_viewer_reader,
+                            "viewer_websocket_binary",
+                            "binary_type_99",
+                        );
+                    }
                     if !send_all(&mut host_writer, &data) {
                         break;
+                    }
+                    if is_type99 {
+                        trace_type99(
+                            "SEND",
+                            &session_id_viewer_reader,
+                            &session_id_viewer_reader,
+                            "viewer_to_host",
+                            "viewer_binary_forwarded_to_host",
+                        );
                     }
                 }
                 Ok(Message::Close(_)) | Err(_) => break,
@@ -692,7 +733,29 @@ fn handle_websocket_viewer(
     let _ = viewer_to_host_thread.join();
     
     // Send TYPE 99 (Viewer Disconnected) to the host
-    let _ = host.write_all(&[99u8]);
+    trace_type99(
+        "SEND",
+        &session_id_thread,
+        &session_id_thread,
+        "session_cleanup",
+        "viewer_session_closed",
+    );
+    match host.write_all(&[99u8]) {
+        Ok(()) => trace_type99(
+            "SEND_COMPLETE",
+            &session_id_thread,
+            &session_id_thread,
+            "session_cleanup",
+            "viewer_disconnect_type_99_written_to_host",
+        ),
+        Err(error) => trace_type99(
+            "SEND_FAILED",
+            &session_id_thread,
+            &session_id_thread,
+            "session_cleanup",
+            &format!("viewer_disconnect_type_99_write_failed:{error}"),
+        ),
+    }
     
     println!("[RELAY] Session {} closed.", session_id_thread);
     println!("[RELAY] Returning host to pool: {}", session_id_thread);
@@ -702,4 +765,3 @@ fn handle_websocket_viewer(
         map.insert(session_id_thread, host);
     }
 }
-

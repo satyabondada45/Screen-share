@@ -37,6 +37,12 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "A_FIRST_TYPE13_RECEIVED",
         "A_FIRST_FRAME_DECODED",
         "A_FIRST_FRAME_DISPLAYED",
+        "A_TYPE99_SEND",
+        "A_TYPE99_SEND_COMPLETE",
+        "A_TYPE99_RECEIVE",
+        "A_TYPE99_RECEIVE_COMPLETE",
+        "A_TYPE99_CLOSE_REQUEST",
+        "A_TYPE99_CLOSE_REQUEST_COMPLETE",
         "A_DISCONNECT",
         "STATE_CHANGE",
         "A_CHAT_SEND_START",
@@ -74,9 +80,12 @@ fn handle_session_debug_ipc(message: &str) -> bool {
     };
     let mut details = Vec::new();
     for name in [
+        "component",
         "role",
         "video_direction",
         "target_system_id",
+        "device_id",
+        "session_id",
         "endpoint",
         "state",
         "old",
@@ -96,6 +105,12 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "panel_open",
         "rendered",
         "error",
+        "direction",
+        "source",
+        "reason",
+        "timestamp",
+        "connection_id",
+        "socket_current",
     ] {
         let value = field(name);
         if !value.is_empty() {

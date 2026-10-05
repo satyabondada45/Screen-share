@@ -192,6 +192,162 @@ fn current_time_millis() -> u64 {
         .as_millis() as u64
 }
 
+struct SessionReadStream {
+    inner: TcpStream,
+    identity: String,
+    is_connected: Arc<AtomicBool>,
+    is_in_session: Arc<AtomicBool>,
+    intentional_reconnect: bool,
+}
+
+struct LifecycleTcpStream {
+    inner: TcpStream,
+    identity: String,
+    function: &'static str,
+    socket: &'static str,
+    event: &'static str,
+    is_connected: Option<Arc<AtomicBool>>,
+    is_in_session: Option<Arc<AtomicBool>>,
+    intentional_reconnect: bool,
+}
+
+impl LifecycleTcpStream {
+    fn new(
+        inner: TcpStream,
+        identity: String,
+        function: &'static str,
+        socket: &'static str,
+        event: &'static str,
+        is_connected: Option<Arc<AtomicBool>>,
+        is_in_session: Option<Arc<AtomicBool>>,
+        intentional_reconnect: bool,
+    ) -> Self {
+        Self {
+            inner,
+            identity,
+            function,
+            socket,
+            event,
+            is_connected,
+            is_in_session,
+            intentional_reconnect,
+        }
+    }
+}
+
+impl std::ops::Deref for LifecycleTcpStream {
+    type Target = TcpStream;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for LifecycleTcpStream {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for LifecycleTcpStream {
+    fn drop(&mut self) {
+        crate::session_debug::lifecycle(
+            &self.identity,
+            self.event,
+            self.function,
+            self.socket,
+            self.is_connected.as_deref(),
+            self.is_in_session.as_deref(),
+            self.intentional_reconnect,
+            "TcpStream handle dropped; no explicit shutdown requested here",
+        );
+    }
+}
+
+impl Read for SessionReadStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buffer)
+    }
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> std::io::Result<()> {
+        let result = self.inner.read_exact(buffer);
+        if let Err(error) = &result {
+            let detail = format!("error={:?}", error);
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                crate::session_debug::lifecycle(
+                    &self.identity,
+                    "SOCKET_EOF",
+                    "session_input_reader",
+                    "cloned_session_stream",
+                    Some(self.is_connected.as_ref()),
+                    Some(self.is_in_session.as_ref()),
+                    self.intentional_reconnect,
+                    &detail,
+                );
+            }
+            crate::session_debug::lifecycle(
+                &self.identity,
+                "SOCKET_READ_ERROR",
+                "session_input_reader",
+                "cloned_session_stream",
+                Some(self.is_connected.as_ref()),
+                Some(self.is_in_session.as_ref()),
+                self.intentional_reconnect,
+                &detail,
+            );
+        }
+        result
+    }
+}
+
+impl Drop for SessionReadStream {
+    fn drop(&mut self) {
+        crate::session_debug::lifecycle(
+            &self.identity,
+            "SESSION_STREAM_DROP",
+            "session_input_reader",
+            "cloned_session_reader_stream",
+            Some(self.is_connected.as_ref()),
+            Some(self.is_in_session.as_ref()),
+            self.intentional_reconnect,
+            "reader TcpStream clone dropped",
+        );
+    }
+}
+
+fn mark_session_disconnected(
+    identity: &str,
+    function: &str,
+    socket: &str,
+    is_connected: &AtomicBool,
+    is_in_session: &AtomicBool,
+    intentional_reconnect: bool,
+    detail: &str,
+) {
+    crate::session_debug::lifecycle(
+        identity,
+        "SESSION_END_REQUESTED",
+        function,
+        socket,
+        Some(is_connected),
+        Some(is_in_session),
+        intentional_reconnect,
+        detail,
+    );
+    if is_connected.swap(false, Ordering::SeqCst) {
+        crate::session_debug::lifecycle(
+            identity,
+            "IS_CONNECTED_FALSE",
+            function,
+            socket,
+            Some(is_connected),
+            Some(is_in_session),
+            intentional_reconnect,
+            detail,
+        );
+    }
+}
+
 // ============================================================
 // KEY MAPPING
 // ============================================================
@@ -877,6 +1033,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
     let mut intentional_reconnect = false;
 
     loop {
+        let reconnect_was_requested = intentional_reconnect;
         if intentional_reconnect {
             intentional_reconnect = false;
         } else {
@@ -884,10 +1041,40 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         }
 
         agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
+        crate::session_debug::lifecycle(
+            &system_id,
+            "OUTER_LOOP_RECONNECT_STARTED",
+            "run_agent_loop",
+            "original_relay_socket",
+            None,
+            None,
+            reconnect_was_requested,
+            "starting TcpStream::connect",
+        );
+        crate::session_debug::lifecycle(
+            &system_id,
+            "RECONNECT_STARTED",
+            "run_agent_loop",
+            "original_relay_socket",
+            None,
+            None,
+            reconnect_was_requested,
+            "starting TcpStream::connect",
+        );
         crate::session_debug::log(&system_id, "B_TCP_CONNECT_START");
 
-        let mut stream = match TcpStream::connect(&relay_addr) {
+        let stream = match TcpStream::connect(&relay_addr) {
             Ok(s) => {
+                crate::session_debug::lifecycle(
+                    &system_id,
+                    "NEW_RELAY_CONNECTION",
+                    "run_agent_loop",
+                    "original_relay_socket",
+                    None,
+                    None,
+                    reconnect_was_requested,
+                    "TcpStream::connect succeeded",
+                );
                 crate::session_debug::log(&system_id, "B_TCP_CONNECT_SUCCESS");
                 let _ = s.set_nodelay(true);
                 let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
@@ -914,6 +1101,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                 continue;
             }
         };
+        let mut stream = LifecycleTcpStream::new(
+            stream,
+            system_id.clone(),
+            "run_agent_loop",
+            "original_relay_socket",
+            "RELAY_STREAM_DROP",
+            None,
+            None,
+            reconnect_was_requested,
+        );
 
         println!("[RELAY] TCP connection established");
         println!("[RELAY] Sending registration for System ID: {}", system_id);
@@ -983,11 +1180,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
         let is_running_conn = Arc::new(AtomicBool::new(true));
         let is_in_session = Arc::new(AtomicBool::new(false));
+        stream.is_in_session = Some(Arc::clone(&is_in_session));
 
         // Heartbeat thread: Sends Type 14 to relay every 5s during idle state
         let hb_write = Arc::clone(&idle_write_stream);
         let hb_running = Arc::clone(&is_running_conn);
         let hb_in_session = Arc::clone(&is_in_session);
+        let heartbeat_identity = system_id.clone();
 
         let heartbeat_handle = thread::spawn(move || {
             while hb_running.load(Ordering::SeqCst) {
@@ -998,7 +1197,18 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                     if let Ok(mut writer) = hb_write.lock() {
                         let _ = writer.set_write_timeout(Some(Duration::from_secs(2)));
-                        let _ = writer.write_all(&ping_pkt);
+                        if let Err(error) = writer.write_all(&ping_pkt) {
+                            crate::session_debug::lifecycle(
+                                &heartbeat_identity,
+                                "SOCKET_WRITE_ERROR",
+                                "relay_heartbeat",
+                                "cloned_idle_heartbeat_stream",
+                                None,
+                                Some(hb_in_session.as_ref()),
+                                false,
+                                &format!("Type 14 heartbeat write_all failed: {:?}", error),
+                            );
+                        }
                     }
                 }
                 thread::sleep(Duration::from_secs(5));
@@ -1016,14 +1226,60 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                         14 => {
                             let mut time_buf = [0u8; 8];
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                            if stream.read_exact(&mut time_buf).is_ok() {
-                                println!("[HEARTBEAT] -> {}", system_id);
-                                println!("[HEARTBEAT] <- ACK");
+                            match stream.read_exact(&mut time_buf) {
+                                Ok(()) => {
+                                    println!("[HEARTBEAT] -> {}", system_id);
+                                    println!("[HEARTBEAT] <- ACK");
+                                }
+                                Err(error) => {
+                                    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                                        crate::session_debug::lifecycle(
+                                            &system_id,
+                                            "SOCKET_EOF",
+                                            "run_agent_loop",
+                                            "original_relay_socket",
+                                            None,
+                                            Some(is_in_session.as_ref()),
+                                            reconnect_was_requested,
+                                            &format!("Type 14 ACK read_exact failed: {:?}", error),
+                                        );
+                                    }
+                                    crate::session_debug::lifecycle(
+                                        &system_id,
+                                        "SOCKET_READ_ERROR",
+                                        "run_agent_loop",
+                                        "original_relay_socket",
+                                        None,
+                                        Some(is_in_session.as_ref()),
+                                        reconnect_was_requested,
+                                        &format!("Type 14 ACK read_exact failed: {:?}", error),
+                                    );
+                                }
                             }
                         }
 
                         // Type 3: Incoming session request / Authentication
                         3 => {
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "AUTH_REQUEST_RECEIVED",
+                                "run_agent_loop",
+                                "original_relay_socket",
+                                None,
+                                Some(is_in_session.as_ref()),
+                                reconnect_was_requested,
+                                "received Type 3 authentication request",
+                            );
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "TYPE3_RECEIVED",
+                                "run_agent_loop",
+                                "original_relay_socket",
+                                None,
+                                Some(is_in_session.as_ref()),
+                                intentional_reconnect,
+                                "received type byte 3",
+                            );
                             crate::session_debug::log(
                                 &system_id,
                                 &format!(
@@ -1033,7 +1289,29 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             );
                             let mut auth_hash = [0u8; 32];
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                            if stream.read_exact(&mut auth_hash).is_err() {
+                            if let Err(error) = stream.read_exact(&mut auth_hash) {
+                                if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                                    crate::session_debug::lifecycle(
+                                        &system_id,
+                                        "SOCKET_EOF",
+                                        "run_agent_loop",
+                                        "original_relay_socket",
+                                        None,
+                                        Some(is_in_session.as_ref()),
+                                        reconnect_was_requested,
+                                        &format!("Type 3 authentication hash read_exact failed: {:?}", error),
+                                    );
+                                }
+                                crate::session_debug::lifecycle(
+                                    &system_id,
+                                    "SOCKET_READ_ERROR",
+                                    "run_agent_loop",
+                                    "original_relay_socket",
+                                    None,
+                                    Some(is_in_session.as_ref()),
+                                    reconnect_was_requested,
+                                    &format!("Type 3 authentication hash read_exact failed: {:?}", error),
+                                );
                                 eprintln!("[Agent] Failed to read auth hash from relay.");
                                 break 'viewer_loop;
                             }
@@ -1056,13 +1334,33 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             // This keeps the host relay state machine aligned with the relay's idle-loop
                             // heartbeat handling and avoids a stray '1' being treated as an unexpected idle byte.
                             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-                            if stream.write_all(&[1u8]).is_err() {
+                            if let Err(error) = stream.write_all(&[1u8]) {
+                                crate::session_debug::lifecycle(
+                                    &system_id,
+                                    "SOCKET_WRITE_ERROR",
+                                    "run_agent_loop",
+                                    "original_relay_socket",
+                                    None,
+                                    Some(is_in_session.as_ref()),
+                                    reconnect_was_requested,
+                                    &format!("approval ACK write_all failed: {:?}", error),
+                                );
                                 eprintln!("[Agent] Failed to send approval ACK to relay.");
                                 break 'viewer_loop;
                             }
                             crate::session_debug::log(
                                 &system_id,
                                 "B_SESSION_APPROVAL_SENT ack=1",
+                            );
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "APPROVAL_SENT",
+                                "run_agent_loop",
+                                "original_relay_socket",
+                                None,
+                                Some(is_in_session.as_ref()),
+                                intentional_reconnect,
+                                "approval ACK byte 1 written",
                             );
 
                             println!("[Host] Approval response sent successfully (APPROVED)");
@@ -1081,14 +1379,49 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let backend_clone = backend.clone();
                             let system_id_clone = system_id.clone();
                             let is_in_session_clone = Arc::clone(&is_in_session);
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "SESSION_PIPELINE_SOCKET_CLONED",
+                                "run_agent_loop",
+                                "original_relay_socket",
+                                None,
+                                Some(is_in_session.as_ref()),
+                                intentional_reconnect,
+                                "session worker TcpStream::try_clone succeeded",
+                            );
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "SESSION_PIPELINE_STARTED",
+                                "run_agent_loop",
+                                "cloned_session_stream",
+                                None,
+                                Some(is_in_session.as_ref()),
+                                intentional_reconnect,
+                                "spawning session worker",
+                            );
                             
                             thread::spawn(move || {
-                                let mut stream = session_stream;
+                                let panic_identity = system_id_clone.clone();
+                                let panic_in_session = Arc::clone(&is_in_session_clone);
+                                let panic_connected = Arc::new(AtomicBool::new(true));
+                                let worker_connected = Arc::clone(&panic_connected);
+                                let worker_result = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                let mut stream = LifecycleTcpStream::new(
+                                    session_stream,
+                                    system_id_clone.clone(),
+                                    "session_pipeline",
+                                    "session_worker_stream",
+                                    "SESSION_STREAM_DROP",
+                                    Some(Arc::clone(&worker_connected)),
+                                    Some(Arc::clone(&is_in_session_clone)),
+                                    false,
+                                );
                                 let system_id = system_id_clone;
                                 let backend = backend_clone;
                                 let is_in_session = is_in_session_clone;
 
-                                let is_connected = Arc::new(AtomicBool::new(true));
+                                let is_connected = worker_connected;
                                 let is_conn_read = Arc::clone(&is_connected);
                                 let is_conn_write = Arc::clone(&is_connected);
                                 let is_conn_capture = Arc::clone(&is_connected);
@@ -1101,14 +1434,51 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
 
                                 // TCP INPUT
-                                let mut read_stream = match stream.try_clone() {
-                                    Ok(s) => s,
-                                    Err(_) => {
-                                        is_connected.store(false, Ordering::Release);
+                                let read_stream = match stream.try_clone() {
+                                    Ok(s) => {
+                                        crate::session_debug::lifecycle(
+                                            &system_id,
+                                            "SESSION_PIPELINE_SOCKET_CLONED",
+                                            "session_pipeline",
+                                            "session_worker_stream",
+                                            Some(is_connected.as_ref()),
+                                            Some(is_in_session.as_ref()),
+                                            false,
+                                            "created input reader TcpStream clone",
+                                        );
+                                        s
+                                    }
+                                    Err(e) => {
+                                        crate::session_debug::lifecycle(
+                                            &system_id,
+                                            "SOCKET_READ_ERROR",
+                                            "session_pipeline",
+                                            "session_worker_stream",
+                                            Some(is_connected.as_ref()),
+                                            Some(is_in_session.as_ref()),
+                                            false,
+                                            &format!("TcpStream::try_clone failed: {:?}", e),
+                                        );
+                                        mark_session_disconnected(
+                                            &system_id,
+                                            "session_pipeline",
+                                            "session_worker_stream",
+                                            is_connected.as_ref(),
+                                            is_in_session.as_ref(),
+                                            false,
+                                            &format!("reader socket clone failed: {:?}", e),
+                                        );
                                         return;
                                     }
                             };
                             let _ = read_stream.set_read_timeout(None);
+                            let mut read_stream = SessionReadStream {
+                                inner: read_stream,
+                                identity: system_id.clone(),
+                                is_connected: Arc::clone(&is_connected),
+                                is_in_session: Arc::clone(&is_in_session),
+                                intentional_reconnect: false,
+                            };
 
                             // Bounded Send Buffer: 64KB ensures the OS doesn't hide seconds of latency
                             #[cfg(windows)]
@@ -1135,13 +1505,53 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             
                             let (out_tx, out_rx) = sync_channel::<Vec<u8>>(512);
                             let write_stream = out_tx.clone();
-                            let mut write_tcp = match stream.try_clone() {
-                                Ok(s) => s,
-                                Err(_) => {
-                                    is_connected.store(false, Ordering::Release);
+                            let write_tcp = match stream.try_clone() {
+                                Ok(s) => {
+                                    crate::session_debug::lifecycle(
+                                        &system_id,
+                                        "SESSION_PIPELINE_SOCKET_CLONED",
+                                        "session_pipeline",
+                                        "session_worker_stream",
+                                        Some(is_connected.as_ref()),
+                                        Some(is_in_session.as_ref()),
+                                        false,
+                                        "created packet writer TcpStream clone",
+                                    );
+                                    s
+                                }
+                                Err(e) => {
+                                    crate::session_debug::lifecycle(
+                                        &system_id,
+                                        "SOCKET_WRITE_ERROR",
+                                        "session_pipeline",
+                                        "session_worker_stream",
+                                        Some(is_connected.as_ref()),
+                                        Some(is_in_session.as_ref()),
+                                        false,
+                                        &format!("TcpStream::try_clone failed: {:?}", e),
+                                    );
+                                    mark_session_disconnected(
+                                        &system_id,
+                                        "session_pipeline",
+                                        "session_worker_stream",
+                                        is_connected.as_ref(),
+                                        is_in_session.as_ref(),
+                                        false,
+                                        &format!("writer socket clone failed: {:?}", e),
+                                    );
                                     return;
                                 }
                             };
+                            let mut write_tcp = LifecycleTcpStream::new(
+                                write_tcp,
+                                system_id.clone(),
+                                "session_writer",
+                                "cloned_session_writer_stream",
+                                "SESSION_STREAM_DROP",
+                                Some(Arc::clone(&is_connected)),
+                                Some(Arc::clone(&is_in_session)),
+                                false,
+                            );
                             let _ = write_tcp.set_write_timeout(None);
 
                             let write_connected = Arc::clone(&is_connected);
@@ -1152,49 +1562,129 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 &system_id,
                                 "B_STREAM_STATE state=ACTIVE",
                             );
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "SESSION_STREAM_STARTED",
+                                "session_pipeline",
+                                "cloned_session_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "session stream entered ACTIVE state",
+                            );
                             let diagnostic_system_id = system_id.clone();
+                            let diagnostic_connected = Arc::clone(&is_connected);
+                            let diagnostic_in_session = Arc::clone(&is_in_session);
 
                             let writer_handle = thread::spawn(move || {
+                                crate::session_debug::lifecycle(
+                                    &diagnostic_system_id,
+                                    "SESSION_WRITE_STARTED",
+                                    "session_writer",
+                                    "cloned_session_writer_stream",
+                                    Some(diagnostic_connected.as_ref()),
+                                    Some(diagnostic_in_session.as_ref()),
+                                    false,
+                                    "writer thread entered packet loop",
+                                );
+                                // Maximum number of bytes written per OS send() call for
+                                // TYPE 13 / TYPE 15 video packets.  Keeping each write ≤ the
+                                // socket SO_SNDBUF (64 KB) prevents write_all() from blocking
+                                // for seconds while the kernel drains a 300-500 KB IDR frame
+                                // through a congested WAN link — which was the confirmed root
+                                // cause of the relay's ~4 s session-bridge timer firing.
+                                //
+                                // The byte stream emitted to the relay is UNCHANGED; only the
+                                // number of underlying OS write() calls changes.  The receiver
+                                // sees:  [TYPE13 header (21 B)] [H264 payload, in order]
+                                // exactly as before.
+                                //
+                                // TYPE 13 header layout (21 bytes, from packet construction):
+                                //   [0]      type byte (13)
+                                //   [1..5]   width  u32 BE
+                                //   [5..9]   height u32 BE
+                                //   [9..13]  payload_len u32 BE
+                                //   [13..21] captured_at_ms u64 BE
+                                //   [21..]   H264 payload
+                                const TYPE13_HEADER_LEN: usize = 21; // verified from construction above
+                                const MAX_VIDEO_WRITE_CHUNK: usize = 32 * 1024; // 32 KB
+
+                                // Counters captured by the closure below.
                                 let mut video_trace_count = 0u64;
                                 let mut diagnostic_video_count = 0u64;
+
                                 let mut write_packet = |packet: Vec<u8>| -> bool {
                                     if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
                                         video_trace_count += 1;
-                                        if video_trace_count == 1 || video_trace_count % 60 == 0 {
-                                            let ts = u64::from_be_bytes(packet[13..21].try_into().unwrap_or([0; 8]));
-                                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                                        let is_log_frame = video_trace_count == 1 || video_trace_count % 60 == 0;
+
+                                        if is_log_frame {
+                                            let ts = if packet.len() > TYPE13_HEADER_LEN {
+                                                u64::from_be_bytes(
+                                                    packet[13..21].try_into().unwrap_or([0; 8])
+                                                )
+                                            } else { 0 };
+                                            let now = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis() as u64;
                                             if ts > 0 && now > ts {
-                                                println!("[VIDEO TRACE] frames={} send_timestamp={} ageMs={}", video_trace_count, now, now - ts);
+                                                println!(
+                                                    "[VIDEO TRACE] frames={} send_timestamp={} ageMs={}",
+                                                    video_trace_count, now, now - ts
+                                                );
                                             }
                                         }
-                                    }
-                                    match write_tcp.write_all(&packet) {
-                                        Ok(_) => {
-                                            if packet.first() == Some(&13u8) {
-                                                diagnostic_video_count += 1;
-                                                if diagnostic_video_count == 1 {
-                                                    crate::session_debug::log(
-                                                        &diagnostic_system_id,
-                                                        "B_FIRST_TYPE13_SENT",
-                                                    );
-                                                }
-                                                if diagnostic_video_count == 1
-                                                    || diagnostic_video_count % 60 == 0
-                                                {
-                                                    crate::session_debug::log(
-                                                        &diagnostic_system_id,
-                                                        &format!(
-                                                            "B_TYPE13_SENT count={}",
-                                                            diagnostic_video_count
-                                                        ),
-                                                    );
-                                                }
-                                            }
-                                            true
-                                        }
-                                        Err(e) => {
+
+                                        // --- Chunked write for large video packets ---
+                                        //
+                                        // Write the fixed header (21 bytes) first, then the
+                                        // H264 payload in MAX_VIDEO_WRITE_CHUNK slices.
+                                        // This keeps each OS write call ≤ SO_SNDBUF so
+                                        // write_all never blocks for more than a single
+                                        // buffer-drain cycle (a few ms), instead of
+                                        // stalling 2.5 s on a 400 KB IDR.
+                                        //
+                                        // The resulting byte stream is byte-for-byte identical
+                                        // to a single write_all(&packet).
+
+                                        let header_bytes = packet.len().min(TYPE13_HEADER_LEN);
+                                        let payload_bytes = packet.len().saturating_sub(TYPE13_HEADER_LEN);
+                                        let chunk_count = (payload_bytes + MAX_VIDEO_WRITE_CHUNK - 1)
+                                            .saturating_div(MAX_VIDEO_WRITE_CHUNK)
+                                            .max(1);
+
+                                        let write_start = std::time::Instant::now();
+
+                                        // 1. Write the header
+                                        if let Err(e) = write_tcp.write_all(&packet[..header_bytes]) {
+                                            crate::session_debug::lifecycle(
+                                                &diagnostic_system_id,
+                                                "SOCKET_WRITE_ERROR",
+                                                "session_writer",
+                                                "cloned_session_writer_stream",
+                                                Some(diagnostic_connected.as_ref()),
+                                                Some(diagnostic_in_session.as_ref()),
+                                                false,
+                                                &format!(
+                                                    "write_all failed (TYPE13 header): {:?}; type={} bytes={}",
+                                                    e,
+                                                    packet.first().copied().unwrap_or(255),
+                                                    packet.len()
+                                                ),
+                                            );
+                                            crate::session_debug::lifecycle(
+                                                &diagnostic_system_id,
+                                                "SESSION_END_REQUESTED",
+                                                "session_writer",
+                                                "cloned_session_writer_stream",
+                                                Some(diagnostic_connected.as_ref()),
+                                                Some(diagnostic_in_session.as_ref()),
+                                                false,
+                                                "session packet write failed",
+                                            );
                                             eprintln!(
-                                                "[Writer] TCP packet write failed: type={} bytes={} error={:?}; ending session to preserve stream framing",
+                                                "[Writer] TCP video header write failed: type={} bytes={} error={:?}; ending session",
                                                 packet.first().copied().unwrap_or(255),
                                                 packet.len(),
                                                 e
@@ -1204,11 +1694,171 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 &diagnostic_system_id,
                                                 &format!("B_VIDEO_WRITE_FAILED error={}", e),
                                             );
-                                            write_connected.store(false, Ordering::Release);
-                                            false
+                                            mark_session_disconnected(
+                                                &diagnostic_system_id,
+                                                "session_writer",
+                                                "cloned_session_writer_stream",
+                                                diagnostic_connected.as_ref(),
+                                                diagnostic_in_session.as_ref(),
+                                                false,
+                                                &format!("write_all failed (video header): {:?}", e),
+                                            );
+                                            return false;
+                                        }
+
+                                        // 2. Write the H264 payload in chunks
+                                        if payload_bytes > 0 {
+                                            for chunk in packet[TYPE13_HEADER_LEN..].chunks(MAX_VIDEO_WRITE_CHUNK) {
+                                                if let Err(e) = write_tcp.write_all(chunk) {
+                                                    crate::session_debug::lifecycle(
+                                                        &diagnostic_system_id,
+                                                        "SOCKET_WRITE_ERROR",
+                                                        "session_writer",
+                                                        "cloned_session_writer_stream",
+                                                        Some(diagnostic_connected.as_ref()),
+                                                        Some(diagnostic_in_session.as_ref()),
+                                                        false,
+                                                        &format!(
+                                                            "write_all failed (TYPE13 payload chunk): {:?}; type={} bytes={}",
+                                                            e,
+                                                            packet.first().copied().unwrap_or(255),
+                                                            packet.len()
+                                                        ),
+                                                    );
+                                                    crate::session_debug::lifecycle(
+                                                        &diagnostic_system_id,
+                                                        "SESSION_END_REQUESTED",
+                                                        "session_writer",
+                                                        "cloned_session_writer_stream",
+                                                        Some(diagnostic_connected.as_ref()),
+                                                        Some(diagnostic_in_session.as_ref()),
+                                                        false,
+                                                        "session packet write failed",
+                                                    );
+                                                    eprintln!(
+                                                        "[Writer] TCP packet write failed: type={} bytes={} error={:?}; ending session to preserve stream framing",
+                                                        packet.first().copied().unwrap_or(255),
+                                                        packet.len(),
+                                                        e
+                                                    );
+                                                    println!("[VIDEO STATE] WRITE_FAILED");
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!("B_VIDEO_WRITE_FAILED error={}", e),
+                                                    );
+                                                    mark_session_disconnected(
+                                                        &diagnostic_system_id,
+                                                        "session_writer",
+                                                        "cloned_session_writer_stream",
+                                                        diagnostic_connected.as_ref(),
+                                                        diagnostic_in_session.as_ref(),
+                                                        false,
+                                                        &format!("write_all failed (video payload chunk): {:?}", e),
+                                                    );
+                                                    return false;
+                                                }
+                                            }
+                                        }
+
+                                        let elapsed_ms = write_start.elapsed().as_millis();
+
+                                        // Log first TYPE 13 and every 60th
+                                        if packet.first() == Some(&13u8) {
+                                            diagnostic_video_count += 1;
+                                            if diagnostic_video_count == 1 {
+                                                println!(
+                                                    "[VIDEO WRITE] first TYPE13 total_bytes={} payload_bytes={} chunks={} write_ms={}",
+                                                    packet.len(),
+                                                    payload_bytes,
+                                                    chunk_count,
+                                                    elapsed_ms
+                                                );
+                                                crate::session_debug::log(
+                                                    &diagnostic_system_id,
+                                                    "B_FIRST_TYPE13_SENT",
+                                                );
+                                            }
+                                            if diagnostic_video_count == 1 || diagnostic_video_count % 60 == 0 {
+                                                if diagnostic_video_count > 1 {
+                                                    println!(
+                                                        "[VIDEO WRITE] TYPE13 count={} total_bytes={} payload_bytes={} chunks={} write_ms={}",
+                                                        diagnostic_video_count,
+                                                        packet.len(),
+                                                        payload_bytes,
+                                                        chunk_count,
+                                                        elapsed_ms
+                                                    );
+                                                }
+                                                crate::session_debug::log(
+                                                    &diagnostic_system_id,
+                                                    &format!(
+                                                        "B_TYPE13_SENT count={}",
+                                                        diagnostic_video_count
+                                                    ),
+                                                );
+                                            }
+                                        }
+
+                                        true
+                                    } else {
+                                        // Non-video packets (control, audio, clipboard, file, ping):
+                                        // use the original single write_all — they are small and
+                                        // latency-sensitive; chunking adds no benefit.
+                                        match write_tcp.write_all(&packet) {
+                                            Ok(_) => true,
+                                            Err(e) => {
+                                                crate::session_debug::lifecycle(
+                                                    &diagnostic_system_id,
+                                                    "SOCKET_WRITE_ERROR",
+                                                    "session_writer",
+                                                    "cloned_session_writer_stream",
+                                                    Some(diagnostic_connected.as_ref()),
+                                                    Some(diagnostic_in_session.as_ref()),
+                                                    false,
+                                                    &format!(
+                                                        "write_all failed: {:?}; type={} bytes={}",
+                                                        e,
+                                                        packet.first().copied().unwrap_or(255),
+                                                        packet.len()
+                                                    ),
+                                                );
+                                                crate::session_debug::lifecycle(
+                                                    &diagnostic_system_id,
+                                                    "SESSION_END_REQUESTED",
+                                                    "session_writer",
+                                                    "cloned_session_writer_stream",
+                                                    Some(diagnostic_connected.as_ref()),
+                                                    Some(diagnostic_in_session.as_ref()),
+                                                    false,
+                                                    "session packet write failed",
+                                                );
+                                                eprintln!(
+                                                    "[Writer] TCP packet write failed: type={} bytes={} error={:?}; ending session to preserve stream framing",
+                                                    packet.first().copied().unwrap_or(255),
+                                                    packet.len(),
+                                                    e
+                                                );
+                                                println!("[VIDEO STATE] WRITE_FAILED");
+                                                crate::session_debug::log(
+                                                    &diagnostic_system_id,
+                                                    &format!("B_VIDEO_WRITE_FAILED error={}", e),
+                                                );
+                                                mark_session_disconnected(
+                                                    &diagnostic_system_id,
+                                                    "session_writer",
+                                                    "cloned_session_writer_stream",
+                                                    diagnostic_connected.as_ref(),
+                                                    diagnostic_in_session.as_ref(),
+                                                    false,
+                                                    &format!("write_all failed: {:?}", e),
+                                                );
+                                                false
+                                            }
                                         }
                                     }
                                 };
+
+
 
                                 while write_connected.load(Ordering::Acquire) {
                                     let mut sent_control = false;
@@ -1246,6 +1896,26 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         }
                                     }
                                 }
+                                crate::session_debug::lifecycle(
+                                    &diagnostic_system_id,
+                                    "SESSION_WRITE_RETURNED",
+                                    "session_writer",
+                                    "cloned_session_writer_stream",
+                                    Some(diagnostic_connected.as_ref()),
+                                    Some(diagnostic_in_session.as_ref()),
+                                    false,
+                                    "writer loop exited",
+                                );
+                                crate::session_debug::lifecycle(
+                                    &diagnostic_system_id,
+                                    "THREAD_EXIT",
+                                    "session_writer",
+                                    "cloned_session_writer_stream",
+                                    Some(diagnostic_connected.as_ref()),
+                                    Some(diagnostic_in_session.as_ref()),
+                                    false,
+                                    "writer thread returning",
+                                );
                             });
 
                             let write_stream_clip = write_stream.clone();
@@ -1331,9 +2001,22 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 crate::status::set_session_active(true);
                             }
                             let write_stream_input = write_stream.clone();
+                            let input_identity = system_id.clone();
+                            let input_connected = Arc::clone(&is_connected);
+                            let input_in_session = Arc::clone(&is_in_session);
 
                             // INPUT THREAD
                             let input_handle = thread::spawn(move || {
+                                crate::session_debug::lifecycle(
+                                    &input_identity,
+                                    "SESSION_READ_STARTED",
+                                    "session_input_reader",
+                                    "cloned_session_reader_stream",
+                                    Some(input_connected.as_ref()),
+                                    Some(input_in_session.as_ref()),
+                                    false,
+                                    "reader thread entered packet loop",
+                                );
                                 let (_audio_output_stream, audio_playback_queue, audio_output_rate) =
                                     setup_session_audio_playback();
                                 println!("[INPUT THREAD] Started native input processing loop");
@@ -1369,7 +2052,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 while is_conn_read.load(Ordering::SeqCst) {
                                     let mut pkt_type_buf = [0u8; 1];
                                     if read_stream.read_exact(&mut pkt_type_buf).is_err() {
-                                        is_conn_read.store(false, Ordering::SeqCst);
+                                        mark_session_disconnected(
+                                            &input_identity,
+                                            "session_input_reader",
+                                            "cloned_session_reader_stream",
+                                            input_connected.as_ref(),
+                                            input_in_session.as_ref(),
+                                            false,
+                                            "failed reading packet type",
+                                        );
                                         break;
                                     }
 
@@ -1377,9 +2068,27 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         0..=10 => {
                                             let mut data = [0u8; 8];
                                             if read_stream.read_exact(&mut data).is_err() {
-                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    "failed reading control packet payload",
+                                                );
                                                 break;
                                             }
+                                            crate::session_debug::lifecycle(
+                                                &input_identity,
+                                                "CONTROL_RECEIVED",
+                                                "session_input_reader",
+                                                "cloned_session_reader_stream",
+                                                Some(input_connected.as_ref()),
+                                                Some(input_in_session.as_ref()),
+                                                false,
+                                                &format!("control_type={} payload_bytes=8", pkt_type_buf[0]),
+                                            );
                                             attach_thread_to_input_desktop();
                                             let event_type = pkt_type_buf[0];
                                             
@@ -1602,7 +2311,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         31 => {
                                             let mut decision = [0u8; 1];
                                             if read_stream.read_exact(&mut decision).is_err() {
-                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    "failed reading Type 31 decision",
+                                                );
                                                 break;
                                             }
                                             if decision[0] > 1 {
@@ -1616,7 +2333,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         32 => {
                                             let mut peer_id = [0u8; 9];
                                             if read_stream.read_exact(&mut peer_id).is_err() {
-                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    "failed reading Type 32 peer identity",
+                                                );
                                                 break;
                                             }
                                             match String::from_utf8(peer_id.to_vec()) {
@@ -1636,7 +2361,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         17 => {
                                             let mut header = [0u8; 10];
                                             if read_stream.read_exact(&mut header).is_err() {
-                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    "failed reading Type 17 header",
+                                                );
                                                 break;
                                             }
                                             let payload_len = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
@@ -1644,12 +2377,28 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             let channels = u16::from_be_bytes(header[8..10].try_into().unwrap());
                                             if payload_len == 0 || payload_len > 10 * 1024 * 1024 {
                                                 eprintln!("[AUDIO RX] Invalid TYPE 17 payload length={}", payload_len);
-                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    &format!("invalid Type 17 payload length {}", payload_len),
+                                                );
                                                 break;
                                             }
                                             let mut payload = vec![0u8; payload_len];
                                             if read_stream.read_exact(&mut payload).is_err() {
-                                                is_conn_read.store(false, Ordering::SeqCst);
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    "failed reading Type 17 payload",
+                                                );
                                                 break;
                                             }
                                             if let Some(samples) = decode_audio_packet(
@@ -1941,13 +2690,65 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         99 => {
                                             println!("[SESSION DISCONNECT] Received TYPE 99 from relay; terminating active session.");
-                                            is_conn_read.store(false, Ordering::SeqCst);
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[TYPE99 TRACE] component=HOST direction=RECV device_id={} session_id={} source=session_input_reader reason=packet_byte_99",
+                                                    input_identity, input_identity
+                                                ),
+                                            );
+                                            crate::session_debug::lifecycle(
+                                                &input_identity,
+                                                "TYPE99_RECEIVED",
+                                                "session_input_reader",
+                                                "cloned_session_reader_stream",
+                                                Some(input_connected.as_ref()),
+                                                Some(input_in_session.as_ref()),
+                                                false,
+                                                "received session disconnect type 99",
+                                            );
+                                            mark_session_disconnected(
+                                                &input_identity,
+                                                "session_input_reader",
+                                                "cloned_session_reader_stream",
+                                                input_connected.as_ref(),
+                                                input_in_session.as_ref(),
+                                                false,
+                                                "received Type 99 from relay",
+                                            );
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[TYPE99 TRACE] component=HOST direction=RECV_COMPLETE device_id={} session_id={} source=session_input_reader reason=session_disconnected",
+                                                    input_identity, input_identity
+                                                ),
+                                            );
                                             break;
                                         }
 
                                         _ => {}
                                     }
                                 }
+                                crate::session_debug::lifecycle(
+                                    &input_identity,
+                                    "SESSION_READ_RETURNED",
+                                    "session_input_reader",
+                                    "cloned_session_reader_stream",
+                                    Some(input_connected.as_ref()),
+                                    Some(input_in_session.as_ref()),
+                                    false,
+                                    "reader loop exited",
+                                );
+                                crate::session_debug::lifecycle(
+                                    &input_identity,
+                                    "THREAD_EXIT",
+                                    "session_input_reader",
+                                    "cloned_session_reader_stream",
+                                    Some(input_connected.as_ref()),
+                                    Some(input_in_session.as_ref()),
+                                    false,
+                                    "reader thread returning",
+                                );
                                 current_file = None;
                                 if let Some(path) = current_file_path.take() {
                                     let _ = fs::remove_file(path);
@@ -2096,6 +2897,97 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let mut current_enc_width: u32 = 0;
                             let mut current_enc_height: u32 = 0;
                             let mut encode_error_count = 0u64;
+
+                            // ── PRE-WARM ENCODER ─────────────────────────────────────────────
+                            // The encoder was previously initialized lazily on the first captured
+                            // frame.  On a 4K display this incurred a 3-8 second GPU/MF setup
+                            // delay during which the relay received no TYPE 13 video packets.
+                            // The relay's internal session-idle timer fired (≈3-4 s) and sent
+                            // TYPE 99, terminating every session before video could ever begin.
+                            //
+                            // Fix: initialize the encoder immediately at session start using the
+                            // current screen resolution.  When the first captured frame arrives it
+                            // will pass the `hw_encoder.is_none()` check as false, skipping
+                            // re-initialization and encoding the frame without any GPU ramp-up
+                            // penalty.  If dimensions differ from the pre-warmed values the
+                            // existing reinit path handles it normally.
+                            // ─────────────────────────────────────────────────────────────────
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "ENCODER_PREWARM_START",
+                                "session_pipeline",
+                                "cloned_session_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "pre-warming H264 encoder before first captured frame",
+                            );
+                            #[cfg(windows)]
+                            let (prewarm_w, prewarm_h) = unsafe {
+                                (
+                                    windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                                        windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+                                    ) as u32,
+                                    windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                                        windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
+                                    ) as u32,
+                                )
+                            };
+                            #[cfg(not(windows))]
+                            let (prewarm_w, prewarm_h) = (1920u32, 1080u32);
+                            if prewarm_w > 0 && prewarm_h > 0 {
+                                let dynamic_bitrate =
+                                    ((prewarm_w as usize).saturating_mul(prewarm_h as usize)
+                                        as f64
+                                        * 16.0) as u32;
+                                let target_bitrate =
+                                    dynamic_bitrate.clamp(20_000_000, 75_000_000);
+                                match HardwareH264Encoder::new(
+                                    prewarm_w,
+                                    prewarm_h,
+                                    TARGET_FPS,
+                                    target_bitrate,
+                                ) {
+                                    Ok(enc) => {
+                                        hw_encoder = Some(enc);
+                                        current_enc_width = prewarm_w;
+                                        current_enc_height = prewarm_h;
+                                        println!(
+                                            "[H264 HW] Encoder pre-warmed {}x{} — ready for first frame",
+                                            prewarm_w, prewarm_h
+                                        );
+                                        crate::session_debug::lifecycle(
+                                            &system_id,
+                                            "ENCODER_PREWARM_OK",
+                                            "session_pipeline",
+                                            "cloned_session_stream",
+                                            Some(is_connected.as_ref()),
+                                            Some(is_in_session.as_ref()),
+                                            false,
+                                            &format!(
+                                                "encoder ready {}x{} before first captured frame",
+                                                prewarm_w, prewarm_h
+                                            ),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[H264 HW] Pre-warm failed (lazy init on first frame): {}",
+                                            e
+                                        );
+                                        crate::session_debug::lifecycle(
+                                            &system_id,
+                                            "ENCODER_PREWARM_FAILED",
+                                            "session_pipeline",
+                                            "cloned_session_stream",
+                                            Some(is_connected.as_ref()),
+                                            Some(is_in_session.as_ref()),
+                                            false,
+                                            &format!("pre-warm error: {}", e),
+                                        );
+                                    }
+                                }
+                            }
 
                             while is_conn_write.load(Ordering::SeqCst) {
                                 let frame_opt = {
@@ -2278,7 +3170,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     Ok(q) => q,
                                     Err(_) => {
                                         println!("[VIDEO TX QUEUE ERROR]\nerror=slot_poisoned");
-                                        is_conn_write.store(false, Ordering::SeqCst);
+                                        mark_session_disconnected(
+                                            &system_id,
+                                            "session_capture_pipeline",
+                                            "cloned_session_writer_stream",
+                                            is_connected.as_ref(),
+                                            is_in_session.as_ref(),
+                                            false,
+                                            "video packet queue mutex poisoned",
+                                        );
                                         break;
                                     }
                                 };
@@ -2296,7 +3196,38 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             }
 
                             // SHUTDOWN OF SESSION
-                            is_connected.store(false, Ordering::SeqCst);
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "SESSION_CLEANUP",
+                                "session_pipeline",
+                                "cloned_session_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "session worker entered ordered cleanup",
+                            );
+                            if is_connected.swap(false, Ordering::SeqCst) {
+                                crate::session_debug::lifecycle(
+                                    &system_id,
+                                    "IS_CONNECTED_FALSE",
+                                    "session_pipeline",
+                                    "cloned_session_stream",
+                                    Some(is_connected.as_ref()),
+                                    Some(is_in_session.as_ref()),
+                                    false,
+                                    "session worker cleanup",
+                                );
+                            }
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "SOCKET_SHUTDOWN",
+                                "session_pipeline",
+                                "cloned_session_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "no explicit TcpStream::shutdown call; worker-owned handles are released during cleanup",
+                            );
                             drop(write_stream);
 
                             let _ = input_handle.join();
@@ -2314,6 +3245,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             println!("[Agent] Session ended. Preparing for next request...");
                             is_in_session.store(false, Ordering::SeqCst);
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "IS_IN_SESSION_FALSE",
+                                "session_pipeline",
+                                "cloned_session_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "normal session cleanup completed",
+                            );
                             // Session ended — update the health endpoint so B's overlay hides.
                             crate::status::set_session_active(false);
                             if let Err(error) = crate::status::set_session_writer(None) {
@@ -2323,8 +3264,116 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 eprintln!("[SESSION UI] Failed to clear session peer identity: {}", error);
                             }
                             thread::sleep(Duration::from_millis(500));
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "SESSION_PIPELINE_EXIT",
+                                "session_pipeline",
+                                "cloned_session_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "normal worker return",
+                            );
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "THREAD_EXIT",
+                                "session_pipeline",
+                                "session_worker_stream",
+                                Some(is_connected.as_ref()),
+                                Some(is_in_session.as_ref()),
+                                false,
+                                "session worker returning",
+                            );
+                                    }),
+                                );
+                                if let Err(payload) = worker_result {
+                                    let panic_message = payload
+                                        .downcast_ref::<String>()
+                                        .map(String::as_str)
+                                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                                        .unwrap_or("non-string panic payload");
+                                    crate::session_debug::lifecycle(
+                                        &panic_identity,
+                                        "SESSION_END_REQUESTED",
+                                        "session_pipeline",
+                                        "cloned_session_stream",
+                                        Some(panic_connected.as_ref()),
+                                        Some(panic_in_session.as_ref()),
+                                        false,
+                                        &format!("session worker panicked: {}", panic_message),
+                                    );
+                                    crate::session_debug::lifecycle(
+                                        &panic_identity,
+                                        "THREAD_PANIC",
+                                        "session_pipeline",
+                                        "session_worker_stream",
+                                        Some(panic_connected.as_ref()),
+                                        Some(panic_in_session.as_ref()),
+                                        false,
+                                        &format!("panic payload: {}", panic_message),
+                                    );
+                                    crate::session_debug::lifecycle(
+                                        &panic_identity,
+                                        "SESSION_PIPELINE_EXIT",
+                                        "session_pipeline",
+                                        "cloned_session_stream",
+                                        Some(panic_connected.as_ref()),
+                                        Some(panic_in_session.as_ref()),
+                                        false,
+                                        &format!("panic payload: {}", panic_message),
+                                    );
+                                    std::panic::resume_unwind(payload);
+                                } else if panic_in_session.load(Ordering::SeqCst) {
+                                    crate::session_debug::lifecycle(
+                                        &panic_identity,
+                                        "SESSION_PIPELINE_EXIT",
+                                        "session_pipeline",
+                                        "cloned_session_stream",
+                                        Some(panic_connected.as_ref()),
+                                        Some(panic_in_session.as_ref()),
+                                        false,
+                                        "worker returned before clearing is_in_session",
+                                    );
+                                } else {
+                                    crate::session_debug::lifecycle(
+                                        &panic_identity,
+                                        "THREAD_EXIT",
+                                        "session_pipeline",
+                                        "session_worker_stream",
+                                        Some(panic_connected.as_ref()),
+                                        Some(panic_in_session.as_ref()),
+                                        false,
+                                        "session worker thread returning",
+                                    );
+                                }
                             }); // END OF THREAD
 
+                            if is_in_session.load(Ordering::SeqCst) {
+                                crate::session_debug::lifecycle(
+                                    &system_id,
+                                    "OUTER_LOOP_RECONNECT_BLOCKED_BY_ACTIVE_SESSION",
+                                    "run_agent_loop",
+                                    "original_relay_socket",
+                                    None,
+                                    Some(is_in_session.as_ref()),
+                                    reconnect_was_requested,
+                                    "waiting for session worker cleanup",
+                                );
+                            }
+                            while is_in_session.load(Ordering::SeqCst) {
+                                thread::sleep(Duration::from_millis(200));
+                            }
+
+                            crate::session_debug::lifecycle(
+                                &system_id,
+                                "OUTER_LOOP_RECONNECT_REQUESTED",
+                                "run_agent_loop",
+                                "original_relay_socket",
+                                None,
+                                Some(is_in_session.as_ref()),
+                                true,
+                                "session worker completed; intentional reconnect requested",
+                            );
                             intentional_reconnect = true;
                             break 'viewer_loop;
                         }
@@ -2332,6 +3381,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                         // Type 99: Session disconnect signal
                         99 => {
                             println!("[Agent] Idle state confirmed.");
+                            crate::session_debug::log(
+                                &system_id,
+                                &format!(
+                                    "[TYPE99 TRACE] component=HOST direction=RECV device_id={} session_id={} source=idle_relay_reader reason=packet_byte_99",
+                                    system_id, system_id
+                                ),
+                            );
                         }
 
                         _ => {}
@@ -2342,6 +3398,28 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                     if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
                         continue 'viewer_loop;
                     }
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        crate::session_debug::lifecycle(
+                            &system_id,
+                            "SOCKET_EOF",
+                            "run_agent_loop",
+                            "original_relay_socket",
+                            None,
+                            Some(is_in_session.as_ref()),
+                            reconnect_was_requested,
+                            &format!("relay type read_exact returned EOF: {:?}", e),
+                        );
+                    }
+                    crate::session_debug::lifecycle(
+                        &system_id,
+                        "SOCKET_READ_ERROR",
+                        "run_agent_loop",
+                        "original_relay_socket",
+                        None,
+                        Some(is_in_session.as_ref()),
+                        reconnect_was_requested,
+                        &format!("relay type read_exact failed: {:?}", e),
+                    );
                     println!("[RELAY][DISCONNECT] reason=Socket read error or closed by relay: {:?}", e);
                     println!("[RELAY][DISCONNECT] system_id={}", system_id);
                     println!("[RELAY][DISCONNECT] socket_error={:?}", e);

@@ -151,14 +151,35 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             if path == "/desktop-api/session/disconnect"
                 && request.method() == &tiny_http::Method::Post
             {
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[TYPE99 TRACE] component=HOST direction=SEND device_id={} session_id={} source=desktop_api_session_disconnect reason=explicit_local_disconnect",
+                        system_id, system_id
+                    ),
+                );
                 match crate::status::send_session_packet(vec![99]) {
                     Ok(()) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[TYPE99 TRACE] component=HOST direction=SEND_COMPLETE device_id={} session_id={} source=desktop_api_session_disconnect reason=packet_queued",
+                                system_id, system_id
+                            ),
+                        );
                         println!("[SESSION DISCONNECT] TYPE 99 queued for active relay session.");
                         let response = Response::from_string("{\"success\":true}")
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                         let _ = request.respond(response);
                     }
                     Err(error) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[TYPE99 TRACE] component=HOST direction=SEND_FAILED device_id={} session_id={} source=desktop_api_session_disconnect reason={}",
+                                system_id, system_id, error
+                            ),
+                        );
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
                     }
                 }

@@ -55,6 +55,45 @@ macro_rules! eprintln {
     };
 }
 
+fn trace_type99(
+    direction: &str,
+    device_id: &str,
+    session_id: &str,
+    source: &str,
+    reason: &str,
+) {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    println!(
+        "[TYPE99 TRACE] component=RELAY direction={} device_id={} session_id={} source={} reason={} timestamp_ms={}",
+        direction, device_id, session_id, source, reason, timestamp_ms
+    );
+}
+
+fn trace_packet(
+    direction: &str,
+    device_id: &str,
+    source: &str,
+    destination: &str,
+    packet_type: u8,
+    packet_len: usize,
+) {
+    if !matches!(packet_type, 1 | 2 | 3 | 13 | 14 | 32 | 99) {
+        return;
+    }
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let thread_id = format!("{:?}", thread::current().id());
+    println!(
+        "[TRACE99][RELAY][{}] timestamp={} device={} session={} source={} destination={} type={} length={} thread={}",
+        direction, timestamp_ms, device_id, device_id, source, destination, packet_type, packet_len, thread_id
+    );
+}
+
 struct ViewerSessionRequest {
     auth_hash: [u8; 32],
     response_tx: Sender<bool>,
@@ -381,14 +420,38 @@ fn run_websocket_bridge(
     let ws_writer_handle = thread::spawn(move || {
         // Guarantee that the Viewer receives the Approval packet (Type 1) AND Stream Active (Type 2) FIRST
         if let Ok(mut ws) = ws_arc_writer.lock() {
+            trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", 1, 1);
             let _ = ws.send(Message::Binary(vec![1u8]));
+            trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", 2, 1);
             let _ = ws.send(Message::Binary(vec![2u8]));
         }
 
         let mut idle_ms = 0;
+        let mut forwarded_video_count = 0u64;
+        let mut forwarded_heartbeat_count = 0u64;
         while is_active_writer.load(Ordering::SeqCst) {
             let mut did_work = false;
             for msg_bytes in take_control_burst(&ws_rx_ctrl) {
+                if let Some(&packet_type) = msg_bytes.first() {
+                    trace_packet(
+                        "RELAY->VIEWER",
+                        &session_id_writer,
+                        "RELAY",
+                        "VIEWER",
+                        packet_type,
+                        msg_bytes.len(),
+                    );
+                }
+                let is_type99 = msg_bytes.first() == Some(&99);
+                if is_type99 {
+                    trace_type99(
+                        "SEND",
+                        &session_id_writer,
+                        &session_id_writer,
+                        "ws_writer_control_queue",
+                        "queued_binary_type_99",
+                    );
+                }
                 let mut lock = match ws_arc_writer.lock() {
                     Ok(lock) => lock,
                     Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
@@ -399,6 +462,15 @@ fn run_websocket_bridge(
                     is_active_writer.store(false, Ordering::SeqCst);
                     break;
                 }
+                if is_type99 {
+                    trace_type99(
+                        "SEND_COMPLETE",
+                        &session_id_writer,
+                        &session_id_writer,
+                        "ws_writer_control_queue",
+                        "binary_type_99_sent_to_viewer",
+                    );
+                }
                 did_work = true;
                 idle_ms = 0;
             }
@@ -406,6 +478,29 @@ fn run_websocket_bridge(
 
             match ws_rx_vid.try_recv() {
                 Ok(msg_bytes) => {
+                    if let Some(&packet_type) = msg_bytes.first() {
+                        forwarded_video_count += u64::from(packet_type == 13 || packet_type == 15);
+                        if forwarded_video_count == 1 || forwarded_video_count % 60 == 0 || packet_type == 99 {
+                            trace_packet(
+                                "RELAY->VIEWER",
+                                &session_id_writer,
+                                "RELAY",
+                                "VIEWER",
+                                packet_type,
+                                msg_bytes.len(),
+                            );
+                        }
+                    }
+                    let is_type99 = msg_bytes.first() == Some(&99);
+                    if is_type99 {
+                        trace_type99(
+                            "SEND",
+                            &session_id_writer,
+                            &session_id_writer,
+                            "ws_writer_video_queue",
+                            "queued_binary_type_99",
+                        );
+                    }
                     let mut lock = match ws_arc_writer.lock() {
                         Ok(lock) => lock,
                         Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
@@ -415,6 +510,15 @@ fn run_websocket_bridge(
                         eprintln!("[WS CLOSE] component=ws_writer reason=vid_send_failed error={:?} device={}", error, session_id_writer);
                         is_active_writer.store(false, Ordering::SeqCst);
                         break;
+                    }
+                    if is_type99 {
+                        trace_type99(
+                            "SEND_COMPLETE",
+                            &session_id_writer,
+                            &session_id_writer,
+                            "ws_writer_video_queue",
+                            "binary_type_99_sent_to_viewer",
+                        );
                     }
                     did_work = true;
                     idle_ms = 0;
@@ -426,6 +530,31 @@ fn run_websocket_bridge(
             if !did_work {
                 match ws_rx_ctrl.recv_timeout(Duration::from_millis(10)) {
                     Ok(msg_bytes) => {
+                        if let Some(&packet_type) = msg_bytes.first() {
+                            if packet_type == 14 {
+                                forwarded_heartbeat_count += 1;
+                            }
+                            if packet_type != 14 || forwarded_heartbeat_count == 1 || forwarded_heartbeat_count % 50 == 0 {
+                                trace_packet(
+                                    "RELAY->VIEWER",
+                                    &session_id_writer,
+                                    "RELAY",
+                                    "VIEWER",
+                                    packet_type,
+                                    msg_bytes.len(),
+                                );
+                            }
+                        }
+                        let is_type99 = msg_bytes.first() == Some(&99);
+                        if is_type99 {
+                            trace_type99(
+                                "SEND",
+                                &session_id_writer,
+                                &session_id_writer,
+                                "ws_writer_control_recv_timeout",
+                                "queued_binary_type_99",
+                            );
+                        }
                         let mut lock = match ws_arc_writer.lock() {
                             Ok(lock) => lock,
                             Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
@@ -436,6 +565,15 @@ fn run_websocket_bridge(
                             is_active_writer.store(false, Ordering::SeqCst);
                             break;
                         }
+                        if is_type99 {
+                            trace_type99(
+                                "SEND_COMPLETE",
+                                &session_id_writer,
+                                &session_id_writer,
+                                "ws_writer_control_recv_timeout",
+                                "binary_type_99_sent_to_viewer",
+                            );
+                        }
                         did_work = true;
                         idle_ms = 0;
                     }
@@ -444,6 +582,29 @@ fn run_websocket_bridge(
                 if !is_active_writer.load(Ordering::SeqCst) { break; }
                 if !did_work {
                     if let Ok(msg_bytes) = ws_rx_vid.try_recv() {
+                        if let Some(&packet_type) = msg_bytes.first() {
+                            forwarded_video_count += u64::from(packet_type == 13 || packet_type == 15);
+                            if forwarded_video_count == 1 || forwarded_video_count % 60 == 0 || packet_type == 99 {
+                                trace_packet(
+                                    "RELAY->VIEWER",
+                                    &session_id_writer,
+                                    "RELAY",
+                                    "VIEWER",
+                                    packet_type,
+                                    msg_bytes.len(),
+                                );
+                            }
+                        }
+                        let is_type99 = msg_bytes.first() == Some(&99);
+                        if is_type99 {
+                            trace_type99(
+                                "SEND",
+                                &session_id_writer,
+                                &session_id_writer,
+                                "ws_writer_video_fallback",
+                                "queued_binary_type_99",
+                            );
+                        }
                         let mut lock = match ws_arc_writer.lock() {
                             Ok(lock) => lock,
                             Err(_) => { is_active_writer.store(false, Ordering::SeqCst); break; }
@@ -453,6 +614,15 @@ fn run_websocket_bridge(
                             eprintln!("[WS CLOSE] component=ws_writer reason=vid_send_failed error={:?} device={}", error, session_id_writer);
                             is_active_writer.store(false, Ordering::SeqCst);
                             break;
+                        }
+                        if is_type99 {
+                            trace_type99(
+                                "SEND_COMPLETE",
+                                &session_id_writer,
+                                &session_id_writer,
+                                "ws_writer_video_fallback",
+                                "binary_type_99_sent_to_viewer",
+                            );
                         }
                         did_work = true;
                         idle_ms = 0;
@@ -482,6 +652,7 @@ fn run_websocket_bridge(
     let host_to_ws_handle = thread::spawn(move || {
         println!("[WS LIFECYCLE] host_to_ws thread started for device={}", session_id_for_thread);
         let mut video_frame_count = 0u64;
+        let mut heartbeat_count = 0u64;
         while is_active_reader.load(Ordering::SeqCst) {
             let _ = host_reader.set_read_timeout(Some(Duration::from_millis(200)));
             let mut type_buf = [0u8; 1];
@@ -505,6 +676,16 @@ fn run_websocket_bridge(
                         }
                     };
                     video_frame_count += 1;
+                    if video_frame_count == 1 || video_frame_count % 60 == 0 {
+                        trace_packet(
+                            "HOST->RELAY",
+                            &session_id_for_thread,
+                            "HOST",
+                            "RELAY",
+                            pkt,
+                            msg.len(),
+                        );
+                    }
                     if video_frame_count == 1 || video_frame_count % 120 == 0 {
                         println!("[VIDEO RELAY RX] type={} bytes={} frames={}", pkt, msg.len(), video_frame_count);
                     }
@@ -544,6 +725,17 @@ fn run_websocket_bridge(
                         break;
                     }
                     println!("[HEARTBEAT] device_id={}", session_id_for_thread);
+                    heartbeat_count += 1;
+                    if heartbeat_count == 1 || heartbeat_count % 50 == 0 {
+                        trace_packet(
+                            "HOST->RELAY",
+                            &session_id_for_thread,
+                            "HOST",
+                            "RELAY",
+                            pkt,
+                            9,
+                        );
+                    }
                     let mut msg = Vec::with_capacity(9);
                     msg.push(14u8);
                     msg.extend_from_slice(&payload);
@@ -703,6 +895,28 @@ fn run_websocket_bridge(
                     }
                 }
                 99 => {
+                    trace_type99(
+                        "RECV",
+                        &session_id_for_thread,
+                        &session_id_for_thread,
+                        "host_to_ws",
+                        "host_tcp_type_99_consumed_not_forwarded_to_viewer",
+                    );
+                    trace_packet(
+                        "HOST->RELAY",
+                        &session_id_for_thread,
+                        "HOST",
+                        "RELAY",
+                        pkt,
+                        1,
+                    );
+                    trace_type99(
+                        "RECV_COMPLETE",
+                        &session_id_for_thread,
+                        &session_id_for_thread,
+                        "host_to_ws",
+                        "type_99_consumed_without_viewer_forward",
+                    );
                     println!("[WS CLOSE] component=host_to_ws reason=host_sent_99 device={}", session_id_for_thread);
                     break;
                 }
@@ -764,6 +978,34 @@ fn run_websocket_bridge(
 
         match msg_res {
             Ok(Message::Binary(data)) => {
+                let is_type99 = data.first() == Some(&99);
+                if let Some(&packet_type) = data.first() {
+                    trace_packet(
+                        "VIEWER->RELAY",
+                        session_id,
+                        "VIEWER",
+                        "RELAY",
+                        packet_type,
+                        data.len(),
+                    );
+                }
+                if is_type99 {
+                    trace_packet(
+                        "RELAY->HOST",
+                        session_id,
+                        "RELAY",
+                        "HOST",
+                        99,
+                        data.len(),
+                    );
+                    trace_type99(
+                        "RECV",
+                        session_id,
+                        session_id,
+                        "viewer_websocket_binary",
+                        "binary_type_99",
+                    );
+                }
                 let (type_name, log_control_packet) = if let Some(&packet_type) = data.first() {
                     let type_name = match packet_type {
                         0 => "MOUSE_MOVE", 1 | 3 | 7 => "MOUSE_DOWN", 2 | 4 | 8 => "MOUSE_UP",
@@ -790,6 +1032,15 @@ fn run_websocket_bridge(
                         type={} device={}", data.first().copied().unwrap_or(255), session_id);
                     // Non-fatal: video stream continues
                 } else {
+                    if is_type99 {
+                        trace_type99(
+                            "SEND",
+                            session_id,
+                            session_id,
+                            "ws_to_host",
+                            "viewer_binary_forwarded_to_host",
+                        );
+                    }
                     if log_control_packet {
                         println!("[CONTROL DEBUG][RELAY -> HOST]\ntype={}\nlength={}", type_name, data.len());
                     }
@@ -835,7 +1086,30 @@ fn run_websocket_bridge(
     drop(ws_tx_ctrl); // signal writer thread to exit
     drop(ws_tx_vid);
     println!("[REGISTRY] Viewer disconnected for Device ID: {}", session_id);
-    let _ = host_writer.write_all(&[99u8]);
+    trace_type99(
+        "SEND",
+        session_id,
+        session_id,
+        "bridge_cleanup",
+        "viewer_websocket_disconnected",
+    );
+    if let Err(error) = host_writer.write_all(&[99u8]) {
+        trace_type99(
+            "SEND_FAILED",
+            session_id,
+            session_id,
+            "bridge_cleanup",
+            &format!("viewer_disconnect_type_99_write_failed:{error}"),
+        );
+    } else {
+        trace_type99(
+            "SEND_COMPLETE",
+            session_id,
+            session_id,
+            "bridge_cleanup",
+            "viewer_disconnect_type_99_written_to_host",
+        );
+    }
     let _ = host_to_ws_handle.join();
     let _ = ws_writer_handle.join();
     true
@@ -1000,7 +1274,29 @@ fn handle_host(
 
     // Register active agent sender in hosts map
     if let Ok(mut map) = hosts.lock() {
-        map.insert(session_id.clone(), (conn_id, session_tx));
+        let replaced = map.insert(session_id.clone(), (conn_id, session_tx));
+        if let Some((previous_conn_id, _)) = replaced {
+            println!(
+                "[TRACE99][REGISTRY] timestamp={} device={} old_connection_id={} new_connection_id={} event=HOST_REGISTRATION_REPLACED",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+                session_id,
+                previous_conn_id,
+                conn_id
+            );
+        } else {
+            println!(
+                "[TRACE99][REGISTRY] timestamp={} device={} connection_id={} event=HOST_REGISTERED",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+                session_id,
+                conn_id
+            );
+        }
         println!("[RELAY] Agent registered: {}", session_id);
         println!("[RELAY] Active agents: {}", map.len());
     } else {
@@ -1029,6 +1325,7 @@ fn handle_host(
             auth_request.extend_from_slice(&req.auth_hash);
 
             println!("[PAIR] Sending AUTH_REQUEST to HOST");
+            trace_packet("RELAY->HOST", &session_id, "RELAY", "HOST", 3, auth_request.len());
             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             if !send_all_pair("HOST", &mut stream, &auth_request) {
                 eprintln!("[PAIR][ERROR] Failed to send authentication request: {}", session_id);
@@ -1047,15 +1344,18 @@ fn handle_host(
 
                 match response[0] {
                     0x01 => {
+                        trace_packet("HOST->RELAY", &session_id, "HOST", "RELAY", 1, 1);
                         println!("[PAIR] HOST authentication response byte=0x01");
                         break true;
                     }
                     0x00 => {
+                        trace_packet("HOST->RELAY", &session_id, "HOST", "RELAY", 0, 1);
                         println!("[PAIR] HOST authentication response byte=0x00");
                         println!("[APPROVAL] Host rejected: {}", session_id);
                         break false;
                     }
                     0x0E => {
+                        trace_packet("HOST->RELAY", &session_id, "HOST", "RELAY", 14, 9);
                         println!("[PAIR] Heartbeat received while waiting for authentication response");
                         let mut heartbeat = [0u8; 8];
                         if let Err(e) = stream.read_exact(&mut heartbeat) {
@@ -1069,6 +1369,7 @@ fn handle_host(
                             eprintln!("[PAIR][ERROR] Failed to acknowledge heartbeat during authentication: {}", e);
                             break false;
                         }
+                        trace_packet("RELAY->HOST", &session_id, "RELAY", "HOST", 14, ack.len());
                     }
                     other => {
                         eprintln!(
@@ -1157,6 +1458,29 @@ fn handle_host(
                     continue;
                 }
                 // Actual socket disconnect / error
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    println!(
+                        "[TRACE99][SOCKET] HOST EOF timestamp={} device={} connection_id={} error={:?}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                        session_id,
+                        conn_id,
+                        e
+                    );
+                } else {
+                    eprintln!(
+                        "[TRACE99][SOCKET] HOST ERROR timestamp={} device={} connection_id={} error={:?}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                        session_id,
+                        conn_id,
+                        e
+                    );
+                }
                 println!("[RELAY] Agent {} disconnected", session_id);
                 println!("[RELAY] Disconnect reason: {:?}", e);
                 println!("[RELAY][CLOSE] connection_type=agent device={} reason=remote_closed error={:?} peer_connected=false", session_id, e);
@@ -1170,6 +1494,26 @@ fn handle_host(
         if let Some((existing_id, _)) = map.get(&session_id) {
             if *existing_id == conn_id {
                 map.remove(&session_id);
+                println!(
+                    "[TRACE99][REGISTRY] timestamp={} device={} connection_id={} event=HOST_UNREGISTERED",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                    session_id,
+                    conn_id
+                );
+            } else {
+                println!(
+                    "[TRACE99][REGISTRY] timestamp={} device={} exiting_connection_id={} current_connection_id={} event=STALE_HOST_EXIT_PRESERVED",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                    session_id,
+                    conn_id,
+                    existing_id
+                );
             }
         }
     }
