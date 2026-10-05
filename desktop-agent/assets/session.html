@@ -795,6 +795,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const DEVICE_ID = SESSION_PARAMS.get('id');
         const REQUESTER_SYSTEM_ID = SESSION_PARAMS.get('requester_system_id') || '';
         const DIAGNOSTIC_SYSTEM_ID = REQUESTER_SYSTEM_ID;
+        const AUTH_TOKEN_PRESENT = SESSION_PARAMS.has('token');
 
         const WS_URL = "wss://admin.friendssoftwaresolutions.in";
 
@@ -875,8 +876,21 @@ window.addEventListener('DOMContentLoaded', () => {
             }));
         }
 
+        function authTrace(event, details = {}) {
+            const record = {
+                timestamp: new Date().toISOString(),
+                event,
+                target_id_present: String(Boolean(DEVICE_ID)),
+                token_present: String(AUTH_TOKEN_PRESENT),
+                ...details
+            };
+            console.info("[AUTH TRACE]", record);
+            sessionDebug(event, record);
+        }
+
         let webSocketGeneration = 0;
         let activeWebSocketGeneration = 0;
+        let authTimeoutId = null;
 
         function traceType99(direction, source, reason, generation = activeWebSocketGeneration) {
             const timestamp = new Date().toISOString();
@@ -903,6 +917,10 @@ window.addEventListener('DOMContentLoaded', () => {
             sessionDebug(event, details);
         }
 
+        authTrace('A_AUTH_PAGE_INITIALIZED', {
+            page: "session.html",
+            target_id_length: String(DEVICE_ID ? DEVICE_ID.length : 0)
+        });
         sessionDebug('A_START');
         sessionDebug('ROLE');
         sessionDebug('A_WS_CONFIG', { endpoint: WS_URL });
@@ -1125,6 +1143,31 @@ window.addEventListener('DOMContentLoaded', () => {
                 ws.readyState === WebSocket.OPEN
             );
 
+        }
+
+        function clearAuthenticationTimeout() {
+            if (authTimeoutId !== null) {
+                clearTimeout(authTimeoutId);
+                authTimeoutId = null;
+            }
+        }
+
+        function startAuthenticationTimeout(connectionGeneration) {
+            clearAuthenticationTimeout();
+            authTimeoutId = setTimeout(() => {
+                if (connectionGeneration !== activeWebSocketGeneration ||
+                    websocketAuthenticated ||
+                    !ws ||
+                    ws.readyState !== WebSocket.OPEN) {
+                    return;
+                }
+                authTrace('A_AUTH_TIMEOUT', {
+                    connection_id: String(connectionGeneration),
+                    timeout_ms: "20000",
+                    reason: "no_authentication_response"
+                });
+                setHud("AUTHENTICATION TIMEOUT");
+            }, 20000);
         }
 
 
@@ -3269,6 +3312,13 @@ window.addEventListener('DOMContentLoaded', () => {
                 first_32_bytes_hex: incomingHex,
                 previous_packet: lastViewerRxPacket
             });
+            if (!websocketAuthenticated) {
+                authTrace('A_AUTH_PACKET_RECEIVED', {
+                    connection_id: String(connectionGeneration),
+                    packet_type: String(incomingType),
+                    packet_length: String(chunk.length)
+                });
+            }
 
             const newBuf = new Uint8Array(wsRxBuffer.length + chunk.length);
             newBuf.set(wsRxBuffer);
@@ -3476,22 +3526,56 @@ window.addEventListener('DOMContentLoaded', () => {
                         lastViewerRxPacket = "type=99 bytes=1";
                         continue;
                     }
+                    else if (type === 3) {
+                        clearAuthenticationTimeout();
+                        authTrace('A_AUTH_FAILURE', {
+                            connection_id: String(connectionGeneration),
+                            packet_type: "3",
+                            packet_length: "1",
+                            reason: "relay_rejected_viewer_request"
+                        });
+                        setHud("AUTHENTICATION FAILED");
+                        wsRxBuffer = wsRxBuffer.subarray(1);
+                        continue;
+                    }
                     else if (type === 1) {
+                        clearAuthenticationTimeout();
                         websocketAuthenticated = true;
                         sessionWasEstablished = true;
+                        authTrace('A_AUTH_ACCEPTED', {
+                            connection_id: String(connectionGeneration),
+                            packet_type: "1",
+                            packet_length: "1"
+                        });
                         lastViewerRxPacket = `type=${type} bytes=1`;
                         sessionDebug('A_SESSION_APPROVED', { result: 'TYPE1' });
                         console.log("[WS] Session approved by host.");
                         setStreamState("STREAM_ACTIVE");
+                        authTrace('A_AUTH_CONNECTED_STATE', {
+                            connection_id: String(connectionGeneration),
+                            packet_type: "1",
+                            state: "STREAM_ACTIVE"
+                        });
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
                     else if (type === 2) {
+                        clearAuthenticationTimeout();
                         websocketAuthenticated = true;
                         sessionWasEstablished = true;
+                        authTrace('A_AUTH_ACCEPTED', {
+                            connection_id: String(connectionGeneration),
+                            packet_type: "2",
+                            packet_length: "1"
+                        });
                         lastViewerRxPacket = `type=${type} bytes=1`;
                         notifyParentSessionConnected();
                         setStreamState("STREAM_ACTIVE");
+                        authTrace('A_AUTH_CONNECTED_STATE', {
+                            connection_id: String(connectionGeneration),
+                            packet_type: "2",
+                            state: "STREAM_ACTIVE"
+                        });
                         wsRxBuffer = wsRxBuffer.slice(1);
                         continue;
                     }
@@ -3567,10 +3651,20 @@ window.addEventListener('DOMContentLoaded', () => {
 
         function sendInitializationPacket() {
             if (!isSocketOpen()) {
+                authTrace('A_AUTH_PACKET_NOT_SENT', {
+                    reason: "websocket_not_open"
+                });
                 return;
             }
 
             const cleanId = String(DEVICE_ID).replace(/[^0-9a-zA-Z_\-]/g, '');
+            if (!DEVICE_ID || !cleanId) {
+                authTrace('A_AUTH_FAILURE', {
+                    reason: "missing_or_invalid_target_id"
+                });
+                setHud("AUTHENTICATION FAILED");
+                return;
+            }
             const idBytes = new TextEncoder().encode(cleanId);
 
             // Protocol: [1 byte Type = 2] + [N bytes System ID] + [32 bytes Auth Hash]
@@ -3579,16 +3673,30 @@ window.addEventListener('DOMContentLoaded', () => {
             pkt.set(idBytes, 1);
             // [1 + idBytes.length .. end] is 32 bytes of zeros for default pin/auth
 
+            authTrace('A_AUTH_PACKET_SEND_START', {
+                packet_type: "2",
+                packet_length: String(pkt.length),
+                target_id_length: String(cleanId.length)
+            });
             ws.send(pkt);
+            authTrace('A_AUTH_PACKET_SENT', {
+                packet_type: "2",
+                packet_length: String(pkt.length)
+            });
             if (/^\d{9}$/.test(REQUESTER_SYSTEM_ID)) {
                 const identityPacket = new Uint8Array(10);
                 identityPacket[0] = 32;
                 identityPacket.set(new TextEncoder().encode(REQUESTER_SYSTEM_ID), 1);
                 ws.send(identityPacket);
+                authTrace('A_AUTH_IDENTITY_PACKET_SENT', {
+                    packet_type: "32",
+                    packet_length: String(identityPacket.length)
+                });
             } else {
                 console.warn("[SESSION] Reverse-control identity unavailable; this session cannot be reversed.");
             }
 
+            startAuthenticationTimeout(activeWebSocketGeneration);
             console.log(
                 "[WS] Viewer handshake sent for host:",
                 cleanId,
@@ -3598,6 +3706,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         function resetWebSocketState() {
+            clearAuthenticationTimeout();
             wsRxBuffer = new Uint8Array(0);
             websocketAuthenticated = false;
         }
@@ -3659,20 +3768,48 @@ window.addEventListener('DOMContentLoaded', () => {
             ws.binaryType = "arraybuffer";
 
             ws.onopen = function () {
+                authTrace('A_AUTH_WEBSOCKET_OPEN', {
+                    connection_id: String(connectionGeneration)
+                });
                 sessionDebug('A_WS_CONNECT_SUCCESS', { result: 'OPEN' });
                 sessionDebug('STATE_CHANGE', { old: 'CONNECTING', new: 'CONNECTED' });
                 console.log("[AUTH DEBUG] WebSocket OPEN");
                 console.log("[WS] OPEN");
                 setHud("AUTHENTICATING...");
                 console.log("[AUTH DEBUG] Sending auth");
-                sendInitializationPacket();
+                try {
+                    sendInitializationPacket();
+                } catch (error) {
+                    authTrace('A_AUTH_FAILURE', {
+                        connection_id: String(connectionGeneration),
+                        reason: "authentication_packet_send_failed",
+                        error: error && error.message ? error.message : String(error)
+                    });
+                    console.error("[AUTH TRACE] authentication packet send failed", error);
+                    setHud("CONNECTION ERROR");
+                    return;
+                }
                 console.log("[AUTH DEBUG] Auth sent");
                 console.log("[AUTH DEBUG] Waiting for authentication response");
             };
 
-            ws.onmessage = event => handleMessage(event, connectionGeneration);
+            ws.onmessage = event => {
+                handleMessage(event, connectionGeneration).catch(error => {
+                    authTrace('A_AUTH_MESSAGE_HANDLER_ERROR', {
+                        connection_id: String(connectionGeneration),
+                        error: error && error.message ? error.message : String(error),
+                        authenticated: String(websocketAuthenticated)
+                    });
+                    console.error("[AUTH TRACE] WebSocket message handler failed", error);
+                    if (!websocketAuthenticated) setHud("CONNECTION ERROR");
+                });
+            };
 
             ws.onerror = function (error) {
+                authTrace('A_AUTH_WEBSOCKET_ERROR', {
+                    connection_id: String(connectionGeneration),
+                    error: error && error.message ? error.message : "WebSocket error event"
+                });
                 sessionDebug('A_WS_CONNECT_FAILED', { result: 'error_event' });
                 console.error("[WS] Error event fired (point: ws.onerror handler)", error);
                 console.error(`[WS] state: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount}`);
@@ -3683,6 +3820,14 @@ window.addEventListener('DOMContentLoaded', () => {
             };
 
             ws.onclose = function (event) {
+                clearAuthenticationTimeout();
+                authTrace('A_AUTH_WEBSOCKET_CLOSED', {
+                    connection_id: String(connectionGeneration),
+                    code: String(event.code),
+                    reason: event.reason || "none",
+                    was_clean: String(event.wasClean),
+                    authenticated: String(websocketAuthenticated)
+                });
                 console.info("[WS CONNECTION]", {
                     event: "close",
                     connection_id: connectionGeneration,
@@ -3713,7 +3858,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 // this prevents the DISCONNECTED state from showing immediately on startup.
                 if (!sessionWasEstablished && !websocketAuthenticated) {
                     console.warn('[SESSION DEBUG] ws.onclose: session never established — skipping stopWebStream to avoid false disconnect UI');
-                    setHud("RECONNECTING...");
+                    setHud("AUTHENTICATION FAILED");
                     return;
                 }
                 stopWebStream();

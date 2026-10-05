@@ -192,6 +192,21 @@ fn current_time_millis() -> u64 {
         .as_millis() as u64
 }
 
+fn native_auth_trace(identity: &str, event: &str, detail: &str) {
+    let timestamp_ms = current_time_millis();
+    println!(
+        "[NATIVE AUTH TRACE] timestamp_ms={} device_id={} event={} detail={}",
+        timestamp_ms, identity, event, detail
+    );
+    crate::session_debug::log(
+        identity,
+        &format!(
+            "[NATIVE AUTH TRACE] timestamp_ms={} event={} detail={}",
+            timestamp_ms, event, detail
+        ),
+    );
+}
+
 struct SessionReadStream {
     inner: TcpStream,
     identity: String,
@@ -1260,6 +1275,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                         // Type 3: Incoming session request / Authentication
                         3 => {
+                            native_auth_trace(
+                                &system_id,
+                                "SESSION_REQUEST_RECEIVED",
+                                "relay_type_3_received",
+                            );
                             crate::session_debug::lifecycle(
                                 &system_id,
                                 "AUTH_REQUEST_RECEIVED",
@@ -1315,6 +1335,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 eprintln!("[Agent] Failed to read auth hash from relay.");
                                 break 'viewer_loop;
                             }
+                            native_auth_trace(
+                                &system_id,
+                                "AUTHENTICATION_DATA_RECEIVED",
+                                "received_32_auth_bytes; contents_not_logged",
+                            );
 
                             println!("[Host] Received connection request for Target ID: {}", id_str);
                             println!("[SESSION] ACCEPT received");
@@ -1335,6 +1360,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             // heartbeat handling and avoids a stray '1' being treated as an unexpected idle byte.
                             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                             if let Err(error) = stream.write_all(&[1u8]) {
+                                native_auth_trace(
+                                    &system_id,
+                                    "APPROVAL_SEND_FAILED",
+                                    &format!("approval_ack_write_failed: {:?}", error),
+                                );
                                 crate::session_debug::lifecycle(
                                     &system_id,
                                     "SOCKET_WRITE_ERROR",
@@ -1348,6 +1378,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 eprintln!("[Agent] Failed to send approval ACK to relay.");
                                 break 'viewer_loop;
                             }
+                            native_auth_trace(&system_id, "APPROVAL_SENT", "approval_ack_1_written");
                             crate::session_debug::log(
                                 &system_id,
                                 "B_SESSION_APPROVAL_SENT ack=1",
@@ -1398,6 +1429,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 Some(is_in_session.as_ref()),
                                 intentional_reconnect,
                                 "spawning session worker",
+                            );
+                            native_auth_trace(
+                                &system_id,
+                                "SESSION_WORKER_STARTED",
+                                "session_worker_spawned_after_approval",
                             );
                             
                             thread::spawn(move || {

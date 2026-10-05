@@ -23,6 +23,20 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         None => return true,
     };
     const ALLOWED_EVENTS: &[&str] = &[
+        "A_AUTH_PAGE_INITIALIZED",
+        "A_AUTH_PACKET_NOT_SENT",
+        "A_AUTH_PACKET_SEND_START",
+        "A_AUTH_PACKET_SENT",
+        "A_AUTH_IDENTITY_PACKET_SENT",
+        "A_AUTH_WEBSOCKET_OPEN",
+        "A_AUTH_PACKET_RECEIVED",
+        "A_AUTH_ACCEPTED",
+        "A_AUTH_CONNECTED_STATE",
+        "A_AUTH_FAILURE",
+        "A_AUTH_TIMEOUT",
+        "A_AUTH_MESSAGE_HANDLER_ERROR",
+        "A_AUTH_WEBSOCKET_ERROR",
+        "A_AUTH_WEBSOCKET_CLOSED",
         "A_START",
         "ROLE",
         "A_WS_CONFIG",
@@ -111,6 +125,14 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "timestamp",
         "connection_id",
         "socket_current",
+        "target_id_present",
+        "target_id_length",
+        "token_present",
+        "packet_length",
+        "timeout_ms",
+        "authenticated",
+        "was_clean",
+        "page",
     ] {
         let value = field(name);
         if !value.is_empty() {
