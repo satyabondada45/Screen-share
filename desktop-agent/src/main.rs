@@ -2299,13 +2299,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 break;
                                             }
                                             if !chat_packet_diagnostic_logged {
-                                                let prefix_hex = msg_bytes.iter().take(64)
-                                                    .map(|byte| format!("{:02x}", byte))
-                                                    .collect::<Vec<_>>()
-                                                    .join(" ");
                                                 println!(
-                                                    "[CHAT RX TRACE] type=16 declared_payload_len={} consumed_bytes={} payload_start=4 payload_end={} payload_bytes={} payload_prefix_hex=\"{}\"",
-                                                    len, 4 + len, 4 + len, msg_bytes.len(), prefix_hex
+                                                    "[B CHAT] receive type=16 payload_bytes={} packet_bytes={}",
+                                                    len,
+                                                    4 + len
                                                 );
                                                 chat_packet_diagnostic_logged = true;
                                             }

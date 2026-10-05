@@ -154,6 +154,13 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 crate::session_debug::log(
                     &system_id,
                     &format!(
+                        "[DISCONNECT ROUTE TRACE] endpoint=/desktop-api/session/disconnect source=HTTP_REQUEST timestamp_ms={}",
+                        crate::status::now_ms()
+                    ),
+                );
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
                         "[TYPE99 TRACE] component=HOST direction=SEND device_id={} session_id={} source=desktop_api_session_disconnect reason=explicit_local_disconnect",
                         system_id, system_id
                     ),
@@ -241,19 +248,14 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 let mut packet = Vec::with_capacity(4 + message_bytes.len());
                 packet.extend_from_slice(&[16, 0, (message_bytes.len() >> 8) as u8, message_bytes.len() as u8]);
                 packet.extend_from_slice(message_bytes);
-                let packet_hex = packet.iter()
-                    .map(|byte| format!("{:02x}", byte))
-                    .collect::<Vec<_>>()
-                    .join(" ");
                 match crate::status::send_session_packet(packet) {
                     Ok(()) => {
                         match crate::status::push_session_chat(message.to_string(), true) {
                             Ok(message) => {
                                 println!(
-                                    "[CHAT TX TRACE] direction=B->A type=16 payload_bytes={} packet_bytes={} bytes_hex=\"{}\"",
+                                    "[B CHAT] send type=16 payload_bytes={} packet_bytes={}",
                                     message_bytes.len(),
-                                    4 + message_bytes.len(),
-                                    packet_hex
+                                    4 + message_bytes.len()
                                 );
                                 let response = Response::from_string(json!({
                                     "success": true,

@@ -342,7 +342,9 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         let _ = _webview.evaluate_script("if(typeof requestBSessionReverse === 'function') requestBSessionReverse();");
                     },
                     "disconnect_b" => {
-                        let _ = _webview.evaluate_script("if(typeof disconnectBSession === 'function') disconnectBSession();");
+                        let _ = _webview.evaluate_script(
+                            "console.info('[DISCONNECT CALLER TRACE] source=END_SESSION_BUTTON timestamp=' + new Date().toISOString() + ' mode=B'); if(typeof disconnectBSession === 'function') disconnectBSession(null, 'END_SESSION_BUTTON');",
+                        );
                     },
                     _ => {}
                 }

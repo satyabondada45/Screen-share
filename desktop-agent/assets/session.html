@@ -3253,16 +3253,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 );
 
             if (!chatPacketDiagnosticLogged) {
-                const payloadPrefixHex = Array.from(msgBytes.slice(0, 64))
-                    .map(byte => byte.toString(16).padStart(2, "0"))
-                    .join(" ");
-                console.info(`[CHAT RX TRACE] type=16 declared_payload_len=${len} consumed_bytes=${payloadEnd} payload_start=4 payload_end=${payloadEnd} payload_bytes=${msgBytes.length} payload_prefix_hex="${payloadPrefixHex}"`);
+                console.info(`[A CHAT] receive type=16 packet_bytes=${buffer.byteLength} payload_bytes=${len}`);
                 chatPacketDiagnosticLogged = true;
             }
-            const packetHex = Array.from(new Uint8Array(buffer))
-                .map(byte => byte.toString(16).padStart(2, "0"))
-                .join(" ");
-            console.info(`[CHAT RX EXACT] type=16 packet_bytes=${buffer.byteLength} payload_bytes=${len} bytes_hex="${packetHex}"`);
             let text;
             try {
                 text = new TextDecoder("utf-8", { fatal: true }).decode(msgBytes);
@@ -3271,7 +3264,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            console.info(`[CHAT RX] direction=B->A type=16 payload_bytes=${len} characters=${text.length}`);
+            console.info(`[A CHAT] receive type=16 payload_bytes=${len} characters=${text.length}`);
             queueMicrotask(() => {
                 window.dispatchEvent(new CustomEvent("chat_message_received", {
                     detail: { text }
