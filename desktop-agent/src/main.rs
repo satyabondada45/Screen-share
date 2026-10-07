@@ -2252,6 +2252,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 }
                                             }
                                         }
+                                        11 => {
+                                            let mut payload = [0u8; 4];
+                                            if read_stream.read_exact(&mut payload).is_err() {
+                                                break;
+                                            }
+                                            let is_mobile = u32::from_be_bytes(payload) == 1;
+                                            println!("[SESSION] Viewer connected (is_mobile={})", is_mobile);
+                                        }
 
                                         12 => {
                                             let mut len_buf = [0u8; 4];

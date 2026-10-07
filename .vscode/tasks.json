@@ -276,6 +276,14 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "cargo-check desktop-agent",
+			"type": "shell",
+			"command": "cargo check --manifest-path \"desktop-agent/Cargo.toml\"",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
 		}
 	]
 }
