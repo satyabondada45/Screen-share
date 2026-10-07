@@ -1046,6 +1046,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
     let mut backoff_secs = 1;
     let mut intentional_reconnect = false;
+    let is_aws_relay = !relay_addr.starts_with("192.168.") && !relay_addr.starts_with("10.") && !relay_addr.starts_with("127.") && !relay_addr.starts_with("localhost") && !relay_addr.starts_with("172.");
 
     loop {
         let reconnect_was_requested = intentional_reconnect;
@@ -1670,6 +1671,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     video_trace_count, now, now - ts
                                                 );
                                             }
+                                            println!("[RELAY VIDEO SIZE]\ntype={}\nframe={}\nbytes={}", packet.first().copied().unwrap_or(0), video_trace_count, packet.len());
                                         }
 
                                         // --- Chunked write for large video packets ---
@@ -2301,17 +2303,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             if read_stream.read_exact(&mut meta).is_err() {
                                                 break;
                                             }
-                                            let len = u16::from_be_bytes([meta[1], meta[2]]) as usize;
-                                            let mut msg_bytes = vec![0u8; len];
+                                            let payload_size = u16::from_be_bytes([meta[1], meta[2]]) as usize;
+                                            let mut msg_bytes = vec![0u8; payload_size];
                                             if read_stream.read_exact(&mut msg_bytes).is_err() {
                                                 break;
                                             }
                                             if !chat_packet_diagnostic_logged {
-                                                println!(
-                                                    "[B CHAT] receive type=16 payload_bytes={} packet_bytes={}",
-                                                    len,
-                                                    4 + len
-                                                );
+                                                println!("[B CHAT] receive type=16 direction={} payload_size={} total_size={}", meta[0], payload_size, 4 + payload_size);
                                                 chat_packet_diagnostic_logged = true;
                                             }
                                             match String::from_utf8(msg_bytes) {
@@ -2981,8 +2979,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     ((prewarm_w as usize).saturating_mul(prewarm_h as usize)
                                         as f64
                                         * 16.0) as u32;
-                                let target_bitrate =
-                                    dynamic_bitrate.clamp(20_000_000, 75_000_000);
+                                let target_bitrate = if is_aws_relay {
+                                    dynamic_bitrate.clamp(1_500_000, 3_000_000)
+                                } else {
+                                    dynamic_bitrate.clamp(20_000_000, 75_000_000)
+                                };
                                 match HardwareH264Encoder::new(
                                     prewarm_w,
                                     prewarm_h,
@@ -3065,7 +3066,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                 if hw_encoder.is_none() || current_enc_width != src_width as u32 || current_enc_height != src_height as u32 {
                                     let dynamic_bitrate = ((src_width * src_height) as f64 * 16.0) as u32; 
-                                    let target_bitrate = dynamic_bitrate.clamp(20_000_000, 75_000_000); // 20 to 75 Mbps
+                                    let target_bitrate = if is_aws_relay {
+                                        dynamic_bitrate.clamp(1_500_000, 3_000_000)
+                                    } else {
+                                        dynamic_bitrate.clamp(20_000_000, 75_000_000)
+                                    };
 
                                     match HardwareH264Encoder::new(src_width as u32, src_height as u32, TARGET_FPS, target_bitrate) {
                                         Ok(enc) => {

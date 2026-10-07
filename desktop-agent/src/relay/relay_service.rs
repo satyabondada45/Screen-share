@@ -632,28 +632,103 @@ fn handle_websocket_viewer(
                     }
                 }
                 16 => {
-                    let mut header = [0u8; 2];
-                    if host_reader.read_exact(&mut header).is_err() {
-                        break;
-                    }
-                    let payload_size = u16::from_be_bytes(header) as usize;
+                    let mut header = [0u8; 3];
+                    if host_reader.read_exact(&mut header).is_err() { break; }
+                    let payload_size = u16::from_be_bytes([header[1], header[2]]) as usize;
                     let mut payload = vec![0u8; payload_size];
-                    if host_reader.read_exact(&mut payload).is_err() {
-                        break;
-                    }
-
-                    let mut msg = Vec::with_capacity(1 + 2 + payload_size);
+                    if host_reader.read_exact(&mut payload).is_err() { break; }
+                    
+                    let mut msg = Vec::with_capacity(1 + 3 + payload_size);
                     msg.push(16u8);
                     msg.extend_from_slice(&header);
                     msg.extend_from_slice(&payload);
-
-                    let mut lock = match ws_arc_clone.lock() {
-                        Ok(lock) => lock,
-                        Err(_) => break,
-                    };
-                    if lock.send(Message::Binary(msg)).is_err() {
-                        break;
-                    }
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                20 => {
+                    let mut hdr = [0u8; 18];
+                    if host_reader.read_exact(&mut hdr).is_err() { break; }
+                    let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
+                    let mut payload = vec![0u8; name_len];
+                    if host_reader.read_exact(&mut payload).is_err() { break; }
+                    
+                    let mut msg = Vec::with_capacity(1 + 18 + name_len);
+                    msg.push(20u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                21 => {
+                    let mut hdr = [0u8; 16];
+                    if host_reader.read_exact(&mut hdr).is_err() { break; }
+                    let chunk_len = u32::from_be_bytes(hdr[12..16].try_into().unwrap()) as usize;
+                    let mut payload = vec![0u8; chunk_len];
+                    if host_reader.read_exact(&mut payload).is_err() { break; }
+                    
+                    let mut msg = Vec::with_capacity(1 + 16 + chunk_len);
+                    msg.push(21u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                22 => {
+                    let mut hdr = [0u8; 48];
+                    if host_reader.read_exact(&mut hdr).is_err() { break; }
+                    let mut msg = Vec::with_capacity(1 + 48);
+                    msg.push(22u8);
+                    msg.extend_from_slice(&hdr);
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                23 => {
+                    let mut hdr = [0u8; 8];
+                    if host_reader.read_exact(&mut hdr).is_err() { break; }
+                    let mut msg = Vec::with_capacity(1 + 8);
+                    msg.push(23u8);
+                    msg.extend_from_slice(&hdr);
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                24 => {
+                    let mut hdr = [0u8; 12];
+                    if host_reader.read_exact(&mut hdr).is_err() { break; }
+                    let msg_len = u16::from_be_bytes([hdr[10], hdr[11]]) as usize;
+                    let mut payload = vec![0u8; msg_len];
+                    if host_reader.read_exact(&mut payload).is_err() { break; }
+                    
+                    let mut msg = Vec::with_capacity(1 + 12 + msg_len);
+                    msg.push(24u8);
+                    msg.extend_from_slice(&hdr);
+                    msg.extend_from_slice(&payload);
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                25 | 26 | 27 => {
+                    let mut hdr = [0u8; 8];
+                    if host_reader.read_exact(&mut hdr).is_err() { break; }
+                    let mut msg = Vec::with_capacity(1 + 8);
+                    msg.push(packet_type);
+                    msg.extend_from_slice(&hdr);
+                    
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                11 => {
+                    let mut payload = [0u8; 4];
+                    if host_reader.read_exact(&mut payload).is_err() { break; }
+                    let mut msg = Vec::with_capacity(5);
+                    msg.push(11u8);
+                    msg.extend_from_slice(&payload);
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
                 }
                 12 => {
                     let mut header = [0u8; 4];
@@ -681,6 +756,19 @@ fn handle_websocket_viewer(
                     if lock.send(Message::Binary(msg)).is_err() {
                         break;
                     }
+                }
+                18 | 31 => {
+                    let mut payload = [0u8; 1];
+                    if host_reader.read_exact(&mut payload).is_err() { break; }
+                    let mut msg = Vec::with_capacity(2);
+                    msg.push(packet_type);
+                    msg.extend_from_slice(&payload);
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(msg)).is_err() { break; }
+                }
+                30 => {
+                    let mut lock = match ws_arc_clone.lock() { Ok(lock) => lock, Err(_) => break };
+                    if lock.send(Message::Binary(vec![30u8])).is_err() { break; }
                 }
                 _ => break,
             }
