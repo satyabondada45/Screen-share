@@ -53,6 +53,39 @@ fn default_server_bind_addr() -> String {
     "0.0.0.0:9001".to_string()
 }
 
+const LEGACY_RELAY_ADDR: &str = "34.229.20.54:9001";
+const CURRENT_RELAY_ADDR: &str = "34.207.168.24:9001";
+
+fn resolve_relay_addr(
+    saved_relay: Option<&str>,
+    env_relay_addr: Option<&str>,
+    env_relay_url: Option<&str>,
+    default_relay: &str,
+) -> String {
+    if let Some(relay_addr) = env_relay_addr {
+        return relay_addr.to_string();
+    }
+    if let Some(relay_url) = env_relay_url {
+        return relay_url.to_string();
+    }
+
+    // A GUI/installer may pass relay_url as the default; migrate the known stale
+    // installer value without overriding explicit environment or saved settings.
+    let default_relay = if default_relay == LEGACY_RELAY_ADDR {
+        CURRENT_RELAY_ADDR
+    } else {
+        default_relay
+    };
+
+    match saved_relay {
+        Some(relay_addr) if relay_addr == LEGACY_RELAY_ADDR || relay_addr.is_empty() => {
+            default_relay.to_string()
+        }
+        Some(relay_addr) => relay_addr.to_string(),
+        None => default_relay.to_string(),
+    }
+}
+
 impl AgentConfig {
     pub fn is_server_mode(&self) -> bool {
         self.app_mode.to_lowercase() == "server"
@@ -75,11 +108,12 @@ impl AgentConfig {
         let env_backend_url = env::var("SCREENSHARE_BACKEND_URL").ok();
         let env_relay_addr = env::var("SCREENSHARE_RELAY_ADDR").ok();
 
-        // Determine relay address: env var > arg > default
-        let resolved_relay = env_relay_addr
-            .clone()
-            .or(env_relay_url.clone())
-            .unwrap_or_else(|| default_relay.to_string());
+        let resolved_relay = resolve_relay_addr(
+            None,
+            env_relay_addr.as_deref(),
+            env_relay_url.as_deref(),
+            default_relay,
+        );
 
         // Support forced identity reset via environment variable
         let force_reset = env::var("AGENT_RESET_IDENTITY").map(|v| v == "1").unwrap_or(false);
@@ -108,19 +142,15 @@ impl AgentConfig {
                         dirty = true;
                     }
 
-                    // Apply env overrides for relay/backend
-                    if let Some(env_val) = &env_relay_addr {
-                        if cfg.relay_addr != *env_val {
-                            cfg.relay_addr = env_val.clone();
-                            dirty = true;
-                        }
-                    } else if let Some(env_val) = &env_relay_url {
-                        if cfg.relay_addr != *env_val {
-                            cfg.relay_addr = env_val.clone();
-                            dirty = true;
-                        }
-                    } else if cfg.relay_addr.is_empty() {
-                        cfg.relay_addr = resolved_relay.clone();
+                    // Apply overrides and migrate only the known obsolete production relay.
+                    let configured_relay = resolve_relay_addr(
+                        Some(&cfg.relay_addr),
+                        env_relay_addr.as_deref(),
+                        env_relay_url.as_deref(),
+                        default_relay,
+                    );
+                    if cfg.relay_addr != configured_relay {
+                        cfg.relay_addr = configured_relay;
                         dirty = true;
                     }
 
@@ -176,10 +206,7 @@ impl AgentConfig {
         }
 
         // Resolve relay address for new config
-        let config_relay = env_relay_addr
-            .clone()
-            .or(env_relay_url.clone())
-            .unwrap_or_else(|| default_relay.to_string());
+        let config_relay = resolved_relay;
 
         // Resolve backend URL for new config
         let config_backend = env_backend_url.clone().unwrap_or_else(|| {
@@ -361,4 +388,115 @@ pub fn generate_deterministic_system_id(device_uuid: &str) -> String {
         | u32::from(hash[3]);
     let id_9digit = (num % 900_000_000) + 100_000_000;
     id_9digit.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_relay_addr, CURRENT_RELAY_ADDR, LEGACY_RELAY_ADDR};
+
+    #[test]
+    fn new_install_uses_source_default() {
+        assert_eq!(
+            resolve_relay_addr(None, None, None, CURRENT_RELAY_ADDR),
+            CURRENT_RELAY_ADDR
+        );
+    }
+
+    #[test]
+    fn command_line_relay_is_used_as_the_default() {
+        let command_line_relay = "relay.example.com:9001";
+        assert_eq!(
+            resolve_relay_addr(None, None, None, command_line_relay),
+            command_line_relay
+        );
+    }
+
+    #[test]
+    fn known_legacy_saved_relay_is_migrated() {
+        assert_eq!(
+            resolve_relay_addr(
+                Some("34.229.20.54:9001"),
+                None,
+                None,
+                CURRENT_RELAY_ADDR
+            ),
+            CURRENT_RELAY_ADDR
+        );
+    }
+
+    #[test]
+    fn stale_installer_relay_default_is_migrated() {
+        assert_eq!(
+            resolve_relay_addr(None, None, None, LEGACY_RELAY_ADDR),
+            CURRENT_RELAY_ADDR
+        );
+    }
+
+    #[test]
+    fn stale_installer_default_does_not_restore_legacy_over_saved_current_relay() {
+        assert_eq!(
+            resolve_relay_addr(
+                Some(CURRENT_RELAY_ADDR),
+                None,
+                None,
+                LEGACY_RELAY_ADDR
+            ),
+            CURRENT_RELAY_ADDR
+        );
+    }
+
+    #[test]
+    fn explicit_environment_override_is_preserved_even_if_it_is_legacy() {
+        assert_eq!(
+            resolve_relay_addr(
+                None,
+                Some(LEGACY_RELAY_ADDR),
+                None,
+                CURRENT_RELAY_ADDR
+            ),
+            LEGACY_RELAY_ADDR
+        );
+    }
+
+    #[test]
+    fn explicitly_saved_nonlegacy_relay_is_preserved() {
+        let custom_relay = "relay.example.com:9001";
+        assert_eq!(
+            resolve_relay_addr(
+                Some(custom_relay),
+                None,
+                None,
+                CURRENT_RELAY_ADDR
+            ),
+            custom_relay
+        );
+    }
+
+    #[test]
+    fn environment_relay_addr_overrides_saved_relay() {
+        let configured_relay = "relay.example.com:9001";
+        assert_eq!(
+            resolve_relay_addr(
+                Some("34.229.20.54:9001"),
+                Some(configured_relay),
+                None,
+                CURRENT_RELAY_ADDR
+            ),
+            configured_relay
+        );
+    }
+
+    #[test]
+    fn environment_relay_url_overrides_saved_relay_when_addr_is_absent() {
+        let configured_relay = "relay.example.com:9001";
+        assert_eq!(
+            resolve_relay_addr(
+                Some("34.229.20.54:9001"),
+                None,
+                Some(configured_relay),
+                CURRENT_RELAY_ADDR
+            ),
+            configured_relay
+        );
+    }
 }

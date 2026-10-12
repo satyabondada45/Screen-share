@@ -60,6 +60,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['email'] = $user['email'];
             $_SESSION['unique_user_id'] = $uniqueUserId;
 
+            // Authoritative subscription and entitlement resolution
+            require_once __DIR__ . '/../../services/SubscriptionService.php';
+            $userEntitlements = SubscriptionService::getUserEntitlements((int)$user['id']);
+            $_SESSION['subscription'] = $userEntitlements;
+
             // Fetch user's registered system if already registered by the Rust desktop agent
             $sysStmt = $db->prepare("
                 SELECT *, 
@@ -83,6 +88,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         "username" => $user['username'],
                         "email" => $user['email'],
                         "unique_user_id" => $uniqueUserId
+                    ],
+                    "subscription" => [
+                        "plan_id" => $userEntitlements['plan_id'],
+                        "plan_name" => $userEntitlements['plan_name'],
+                        "plan_slug" => $userEntitlements['plan_slug'],
+                        "can_record" => $userEntitlements['can_record'],
+                        "can_reverse_control" => $userEntitlements['can_reverse_control'],
+                        "max_quality" => $userEntitlements['max_quality'],
+                        "max_concurrent_sessions" => $userEntitlements['max_concurrent_sessions'],
+                        "expires_at" => $userEntitlements['expires_at']
                     ],
                     "system" => $userSystem ? [
                         "system_id" => (string)($userSystem['system_id'] ?: $userSystem['device_uid']),

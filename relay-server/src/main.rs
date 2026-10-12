@@ -20,7 +20,6 @@ macro_rules! relay_log {
     ($($arg:tt)*) => {
         {
             let msg = format!($($arg)*);
-            use std::io::Write;
             let _ = writeln!(std::io::stdout(), "{}", msg);
             let log_dir = if cfg!(windows) {
                 std::env::var("PROGRAMDATA")
@@ -111,13 +110,19 @@ fn chat_typing_packet(state: u8) -> Option<Vec<u8>> {
     (state <= 1).then(|| vec![CHAT_TYPING_PACKET_TYPE, state])
 }
 
-// TYPE 30 is one byte; TYPE 31 carries one decision byte (0 reject, 1 accept).
 fn reverse_ack_packet(state: u8) -> Option<Vec<u8>> {
     (state <= 1).then(|| vec![REVERSE_ACK_PACKET_TYPE, state])
 }
 
 fn reverse_request_packet() -> Vec<u8> {
     vec![REVERSE_REQUEST_PACKET_TYPE]
+}
+
+fn initial_packet_type(bytes_peeked: usize, peek: &[u8]) -> Option<u8> {
+    if bytes_peeked == 0 {
+        return None;
+    }
+    peek.first().copied()
 }
 
 // ============================================================
@@ -176,12 +181,8 @@ fn send_all(stream: &mut TcpStream, data: &[u8]) -> bool {
 
     while offset < data.len() {
         match stream.write(&data[offset..]) {
-            Ok(0) => {
-                return false;
-            }
-            Ok(n) => {
-                offset += n;
-            }
+            Ok(0) => return false,
+            Ok(n) => offset += n,
             Err(e) => {
                 eprintln!("[Relay] Write error: {:?}", e);
                 return false;
@@ -203,9 +204,7 @@ fn send_all_pair(target_name: &str, stream: &mut TcpStream, data: &[u8]) -> bool
                 eprintln!("[PAIR][ERROR] Write failed: target={} peer={} error=ZeroBytesWritten", target_name, peer);
                 return false;
             }
-            Ok(n) => {
-                offset += n;
-            }
+            Ok(n) => offset += n,
             Err(e) => {
                 eprintln!("[PAIR][ERROR] Write failed: target={} peer={} error={:?}", target_name, peer, e);
                 return false;
@@ -221,11 +220,7 @@ fn send_all_pair(target_name: &str, stream: &mut TcpStream, data: &[u8]) -> bool
 // READ EXACT WITH LOGGING
 // ============================================================
 
-fn read_exact_logged(
-    stream: &mut TcpStream,
-    buffer: &mut [u8],
-    name: &str,
-) -> bool {
+fn read_exact_logged(stream: &mut TcpStream, buffer: &mut [u8], name: &str) -> bool {
     match stream.read_exact(buffer) {
         Ok(_) => true,
         Err(e) => {
@@ -239,32 +234,58 @@ fn read_exact_logged(
 // TCP FORWARDING: HOST <-> VIEWER
 // ============================================================
 
+struct TcpBridgeState {
+    active: AtomicBool,
+    viewer_disconnected: AtomicBool,
+    host_failed: AtomicBool,
+}
+
+struct TcpBridgeWorkerGuard(Arc<TcpBridgeState>);
+
+impl Drop for TcpBridgeWorkerGuard {
+    fn drop(&mut self) {
+        self.0.active.store(false, Ordering::SeqCst);
+    }
+}
+
+struct WebSocketBridgeWorkerGuard(Arc<AtomicBool>);
+
+impl Drop for WebSocketBridgeWorkerGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn mark_viewer_disconnected(state: &TcpBridgeState, viewer: &TcpStream) {
+    if state.active.swap(false, Ordering::SeqCst) {
+        state.viewer_disconnected.store(true, Ordering::SeqCst);
+    }
+    let _ = viewer.shutdown(Shutdown::Both);
+}
+
 fn host_to_viewer_tcp(
     mut host: TcpStream,
     mut viewer: TcpStream,
-    host_control: TcpStream,
-    viewer_control: TcpStream,
+    state: Arc<TcpBridgeState>,
 ) {
     println!("[Relay] HOST -> VIEWER forwarding started");
     let _ = host.set_nodelay(true);
     let _ = viewer.set_nodelay(true);
+    let _ = host.set_read_timeout(Some(Duration::from_millis(200)));
 
     let mut buffer = [0u8; 128 * 1024];
-    loop {
+    while state.active.load(Ordering::SeqCst) {
         match host.read(&mut buffer) {
             Ok(0) => {
                 println!("[Relay] Host -> Viewer TCP connection closed.");
+                state.host_failed.store(true, Ordering::SeqCst);
+                state.active.store(false, Ordering::SeqCst);
                 let _ = viewer.shutdown(Shutdown::Both);
-                let _ = host_control.shutdown(Shutdown::Both);
-                let _ = viewer_control.shutdown(Shutdown::Both);
                 break;
             }
             Ok(n) => {
                 if !send_all(&mut viewer, &buffer[..n]) {
-                    let _ = host.shutdown(Shutdown::Both);
-                    let _ = viewer.shutdown(Shutdown::Both);
-                    let _ = host_control.shutdown(Shutdown::Both);
-                    let _ = viewer_control.shutdown(Shutdown::Both);
+                    mark_viewer_disconnected(&state, &viewer);
                     break;
                 }
             }
@@ -273,9 +294,9 @@ fn host_to_viewer_tcp(
                     continue;
                 }
                 eprintln!("[Relay] HOST -> VIEWER read error: {:?}", e);
+                state.host_failed.store(true, Ordering::SeqCst);
+                state.active.store(false, Ordering::SeqCst);
                 let _ = viewer.shutdown(Shutdown::Both);
-                let _ = host_control.shutdown(Shutdown::Both);
-                let _ = viewer_control.shutdown(Shutdown::Both);
                 break;
             }
         }
@@ -285,30 +306,26 @@ fn host_to_viewer_tcp(
 fn viewer_to_host_tcp(
     mut viewer: TcpStream,
     mut host: TcpStream,
-    host_control: TcpStream,
-    viewer_control: TcpStream,
+    state: Arc<TcpBridgeState>,
 ) {
     println!("[Relay] VIEWER -> HOST forwarding started");
     let _ = viewer.set_nodelay(true);
     let _ = host.set_nodelay(true);
+    let _ = viewer.set_read_timeout(Some(Duration::from_millis(200)));
 
     let mut buffer = [0u8; 64 * 1024];
-    loop {
+    while state.active.load(Ordering::SeqCst) {
         match viewer.read(&mut buffer) {
             Ok(0) => {
                 println!("[Relay] Viewer -> Host TCP connection closed.");
-                let _ = host.shutdown(Shutdown::Both);
-                let _ = viewer.shutdown(Shutdown::Both);
-                let _ = host_control.shutdown(Shutdown::Both);
-                let _ = viewer_control.shutdown(Shutdown::Both);
+                mark_viewer_disconnected(&state, &viewer);
                 break;
             }
             Ok(n) => {
                 if !send_all(&mut host, &buffer[..n]) {
+                    state.host_failed.store(true, Ordering::SeqCst);
+                    state.active.store(false, Ordering::SeqCst);
                     let _ = viewer.shutdown(Shutdown::Both);
-                    let _ = host.shutdown(Shutdown::Both);
-                    let _ = host_control.shutdown(Shutdown::Both);
-                    let _ = viewer_control.shutdown(Shutdown::Both);
                     break;
                 }
             }
@@ -317,14 +334,85 @@ fn viewer_to_host_tcp(
                     continue;
                 }
                 eprintln!("[Relay] VIEWER -> HOST read error: {:?}", e);
-                let _ = host.shutdown(Shutdown::Both);
-                let _ = viewer.shutdown(Shutdown::Both);
-                let _ = host_control.shutdown(Shutdown::Both);
-                let _ = viewer_control.shutdown(Shutdown::Both);
+                mark_viewer_disconnected(&state, &viewer);
                 break;
             }
         }
     }
+
+    if state.viewer_disconnected.load(Ordering::SeqCst)
+        && !state.host_failed.load(Ordering::SeqCst)
+    {
+        if let Err(error) = host.write_all(&[99u8]) {
+            eprintln!("[Relay] Viewer disconnect notification to host failed: {:?}", error);
+        }
+    }
+}
+
+fn bridge_tcp_session(host: &TcpStream, viewer: TcpStream) -> bool {
+    let host_reader = match host.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("[Relay] Failed to clone host read socket: {:?}", error);
+            let _ = viewer.shutdown(Shutdown::Both);
+            return true;
+        }
+    };
+    let mut host_writer = match host.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("[Relay] Failed to clone host write socket: {:?}", error);
+            let _ = viewer.shutdown(Shutdown::Both);
+            return true;
+        }
+    };
+    let viewer_reader = match viewer.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("[Relay] Failed to clone viewer read socket: {:?}", error);
+            let _ = host_writer.write_all(&[99u8]);
+            let _ = viewer.shutdown(Shutdown::Both);
+            return false;
+        }
+    };
+    let viewer_writer = match viewer.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("[Relay] Failed to clone viewer write socket: {:?}", error);
+            let _ = host_writer.write_all(&[99u8]);
+            let _ = viewer.shutdown(Shutdown::Both);
+            return false;
+        }
+    };
+
+    let state = Arc::new(TcpBridgeState {
+        active: AtomicBool::new(true),
+        viewer_disconnected: AtomicBool::new(false),
+        host_failed: AtomicBool::new(false),
+    });
+    let host_to_viewer_state = Arc::clone(&state);
+    let viewer_to_host_state = Arc::clone(&state);
+    let host_to_viewer_guard_state = Arc::clone(&state);
+    let viewer_to_host_guard_state = Arc::clone(&state);
+
+    let host_to_viewer = thread::spawn(move || {
+        let _active_guard = TcpBridgeWorkerGuard(host_to_viewer_guard_state);
+        host_to_viewer_tcp(host_reader, viewer_writer, host_to_viewer_state);
+    });
+    let viewer_to_host = thread::spawn(move || {
+        let _active_guard = TcpBridgeWorkerGuard(viewer_to_host_guard_state);
+        viewer_to_host_tcp(viewer_reader, host_writer, viewer_to_host_state);
+    });
+
+    let host_to_viewer_panicked = host_to_viewer.join().is_err();
+    let viewer_to_host_panicked = viewer_to_host.join().is_err();
+    let host_failed = state.host_failed.load(Ordering::SeqCst)
+        || host_to_viewer_panicked
+        || viewer_to_host_panicked;
+    if host_to_viewer_panicked || viewer_to_host_panicked {
+        let _ = host.shutdown(Shutdown::Both);
+    }
+    host_failed
 }
 
 // ============================================================
@@ -385,6 +473,41 @@ fn read_host_chat_packet<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
     Ok(packet)
 }
 
+fn notify_host_viewer_disconnect(
+    session_id: &str,
+    host_writer: &mut TcpStream,
+    host_ended_session: bool,
+) {
+    if host_ended_session {
+        trace_type99(
+            "SKIPPED",
+            session_id,
+            session_id,
+            "bridge_cleanup",
+            "host_ended_session_no_viewer_disconnect_echo",
+        );
+        return;
+    }
+
+    if let Err(error) = host_writer.write_all(&[99u8]) {
+        trace_type99(
+            "SEND_FAILED",
+            session_id,
+            session_id,
+            "bridge_cleanup",
+            &format!("viewer_disconnect_type_99_write_failed:{error}"),
+        );
+    } else {
+        trace_type99(
+            "SEND_COMPLETE",
+            session_id,
+            session_id,
+            "bridge_cleanup",
+            "viewer_disconnect_type_99_written_to_host",
+        );
+    }
+}
+
 fn run_websocket_bridge(
     session_id: &str,
     stream: &mut TcpStream,
@@ -401,12 +524,13 @@ fn run_websocket_bridge(
 
     let is_active = Arc::new(AtomicBool::new(true));
     let is_active_reader = Arc::clone(&is_active);
+    let host_ended_session = Arc::new(AtomicBool::new(false));
+    let host_ended_session_reader = Arc::clone(&host_ended_session);
     let session_id_for_thread = session_id.to_string();
 
-    // Dedicated WS-writer channels: Priority queueing to ensure video can apply backpressure
-    // WITHOUT starving control packets or file-transfer packets.
-    let (ws_tx_ctrl, ws_rx_ctrl) = std::sync::mpsc::channel::<Vec<u8>>(); // Unbounded for control/file
-    let (ws_tx_vid, ws_rx_vid) = std::sync::mpsc::sync_channel::<Vec<u8>>(2); // Bounded (size 2) for video
+    // Dedicated WS-writer channels
+    let (ws_tx_ctrl, ws_rx_ctrl) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (ws_tx_vid, ws_rx_vid) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
 
     let ws_tx_ctrl_fwd = ws_tx_ctrl.clone();
     let ws_tx_vid_fwd = ws_tx_vid.clone();
@@ -414,11 +538,12 @@ fn run_websocket_bridge(
     let ws_arc_writer = Arc::clone(&ws_arc);
     let ws_arc_closer = Arc::clone(&ws_arc);
     let is_active_writer = Arc::clone(&is_active);
+    let is_active_writer_guard = Arc::clone(&is_active);
     let session_id_writer = session_id.to_string();
 
-    // WS writer thread
+    // WS writer thread (guarantees Approval + Active first)
     let ws_writer_handle = thread::spawn(move || {
-        // Guarantee that the Viewer receives the Approval packet (Type 1) AND Stream Active (Type 2) FIRST
+        let _active_guard = WebSocketBridgeWorkerGuard(is_active_writer_guard);
         if let Ok(mut ws) = ws_arc_writer.lock() {
             trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", 1, 1);
             let _ = ws.send(Message::Binary(vec![1u8]));
@@ -431,26 +556,14 @@ fn run_websocket_bridge(
         let mut forwarded_heartbeat_count = 0u64;
         while is_active_writer.load(Ordering::SeqCst) {
             let mut did_work = false;
+
             for msg_bytes in take_control_burst(&ws_rx_ctrl) {
                 if let Some(&packet_type) = msg_bytes.first() {
-                    trace_packet(
-                        "RELAY->VIEWER",
-                        &session_id_writer,
-                        "RELAY",
-                        "VIEWER",
-                        packet_type,
-                        msg_bytes.len(),
-                    );
+                    trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", packet_type, msg_bytes.len());
                 }
                 let is_type99 = msg_bytes.first() == Some(&99);
                 if is_type99 {
-                    trace_type99(
-                        "SEND",
-                        &session_id_writer,
-                        &session_id_writer,
-                        "ws_writer_control_queue",
-                        "queued_binary_type_99",
-                    );
+                    trace_type99("SEND", &session_id_writer, &session_id_writer, "ws_writer_control_queue", "queued_binary_type_99");
                 }
                 let mut lock = match ws_arc_writer.lock() {
                     Ok(lock) => lock,
@@ -463,13 +576,7 @@ fn run_websocket_bridge(
                     break;
                 }
                 if is_type99 {
-                    trace_type99(
-                        "SEND_COMPLETE",
-                        &session_id_writer,
-                        &session_id_writer,
-                        "ws_writer_control_queue",
-                        "binary_type_99_sent_to_viewer",
-                    );
+                    trace_type99("SEND_COMPLETE", &session_id_writer, &session_id_writer, "ws_writer_control_queue", "binary_type_99_sent_to_viewer");
                 }
                 did_work = true;
                 idle_ms = 0;
@@ -481,25 +588,12 @@ fn run_websocket_bridge(
                     if let Some(&packet_type) = msg_bytes.first() {
                         forwarded_video_count += u64::from(packet_type == 13 || packet_type == 15);
                         if forwarded_video_count == 1 || forwarded_video_count % 60 == 0 || packet_type == 99 {
-                            trace_packet(
-                                "RELAY->VIEWER",
-                                &session_id_writer,
-                                "RELAY",
-                                "VIEWER",
-                                packet_type,
-                                msg_bytes.len(),
-                            );
+                            trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", packet_type, msg_bytes.len());
                         }
                     }
                     let is_type99 = msg_bytes.first() == Some(&99);
                     if is_type99 {
-                        trace_type99(
-                            "SEND",
-                            &session_id_writer,
-                            &session_id_writer,
-                            "ws_writer_video_queue",
-                            "queued_binary_type_99",
-                        );
+                        trace_type99("SEND", &session_id_writer, &session_id_writer, "ws_writer_video_queue", "queued_binary_type_99");
                     }
                     let mut lock = match ws_arc_writer.lock() {
                         Ok(lock) => lock,
@@ -512,13 +606,7 @@ fn run_websocket_bridge(
                         break;
                     }
                     if is_type99 {
-                        trace_type99(
-                            "SEND_COMPLETE",
-                            &session_id_writer,
-                            &session_id_writer,
-                            "ws_writer_video_queue",
-                            "binary_type_99_sent_to_viewer",
-                        );
+                        trace_type99("SEND_COMPLETE", &session_id_writer, &session_id_writer, "ws_writer_video_queue", "binary_type_99_sent_to_viewer");
                     }
                     did_work = true;
                     idle_ms = 0;
@@ -535,25 +623,12 @@ fn run_websocket_bridge(
                                 forwarded_heartbeat_count += 1;
                             }
                             if packet_type != 14 || forwarded_heartbeat_count == 1 || forwarded_heartbeat_count % 50 == 0 {
-                                trace_packet(
-                                    "RELAY->VIEWER",
-                                    &session_id_writer,
-                                    "RELAY",
-                                    "VIEWER",
-                                    packet_type,
-                                    msg_bytes.len(),
-                                );
+                                trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", packet_type, msg_bytes.len());
                             }
                         }
                         let is_type99 = msg_bytes.first() == Some(&99);
                         if is_type99 {
-                            trace_type99(
-                                "SEND",
-                                &session_id_writer,
-                                &session_id_writer,
-                                "ws_writer_control_recv_timeout",
-                                "queued_binary_type_99",
-                            );
+                            trace_type99("SEND", &session_id_writer, &session_id_writer, "ws_writer_control_recv_timeout", "queued_binary_type_99");
                         }
                         let mut lock = match ws_arc_writer.lock() {
                             Ok(lock) => lock,
@@ -566,13 +641,7 @@ fn run_websocket_bridge(
                             break;
                         }
                         if is_type99 {
-                            trace_type99(
-                                "SEND_COMPLETE",
-                                &session_id_writer,
-                                &session_id_writer,
-                                "ws_writer_control_recv_timeout",
-                                "binary_type_99_sent_to_viewer",
-                            );
+                            trace_type99("SEND_COMPLETE", &session_id_writer, &session_id_writer, "ws_writer_control_recv_timeout", "binary_type_99_sent_to_viewer");
                         }
                         did_work = true;
                         idle_ms = 0;
@@ -585,25 +654,12 @@ fn run_websocket_bridge(
                         if let Some(&packet_type) = msg_bytes.first() {
                             forwarded_video_count += u64::from(packet_type == 13 || packet_type == 15);
                             if forwarded_video_count == 1 || forwarded_video_count % 60 == 0 || packet_type == 99 {
-                                trace_packet(
-                                    "RELAY->VIEWER",
-                                    &session_id_writer,
-                                    "RELAY",
-                                    "VIEWER",
-                                    packet_type,
-                                    msg_bytes.len(),
-                                );
+                                trace_packet("RELAY->VIEWER", &session_id_writer, "RELAY", "VIEWER", packet_type, msg_bytes.len());
                             }
                         }
                         let is_type99 = msg_bytes.first() == Some(&99);
                         if is_type99 {
-                            trace_type99(
-                                "SEND",
-                                &session_id_writer,
-                                &session_id_writer,
-                                "ws_writer_video_fallback",
-                                "queued_binary_type_99",
-                            );
+                            trace_type99("SEND", &session_id_writer, &session_id_writer, "ws_writer_video_fallback", "queued_binary_type_99");
                         }
                         let mut lock = match ws_arc_writer.lock() {
                             Ok(lock) => lock,
@@ -616,13 +672,7 @@ fn run_websocket_bridge(
                             break;
                         }
                         if is_type99 {
-                            trace_type99(
-                                "SEND_COMPLETE",
-                                &session_id_writer,
-                                &session_id_writer,
-                                "ws_writer_video_fallback",
-                                "binary_type_99_sent_to_viewer",
-                            );
+                            trace_type99("SEND_COMPLETE", &session_id_writer, &session_id_writer, "ws_writer_video_fallback", "binary_type_99_sent_to_viewer");
                         }
                         did_work = true;
                         idle_ms = 0;
@@ -650,6 +700,7 @@ fn run_websocket_bridge(
 
     // Host -> WS forwarder thread
     let host_to_ws_handle = thread::spawn(move || {
+        let _active_guard = WebSocketBridgeWorkerGuard(Arc::clone(&is_active_reader));
         println!("[WS LIFECYCLE] host_to_ws thread started for device={}", session_id_for_thread);
         let mut video_frame_count = 0u64;
         let mut heartbeat_count = 0u64;
@@ -661,6 +712,7 @@ fn run_websocket_bridge(
                     continue;
                 }
                 eprintln!("[WS CLOSE] component=host_to_ws reason=host_read_failed error={:?} device={}", e, session_id_for_thread);
+                host_ended_session_reader.store(true, Ordering::SeqCst);
                 break;
             }
             let pkt = type_buf[0];
@@ -672,19 +724,13 @@ fn run_websocket_bridge(
                         Ok(msg) => msg,
                         Err(e) => {
                             eprintln!("[WS CLOSE] component=host_to_ws reason=video_packet_read_failed error={:?} device={}", e, session_id_for_thread);
+                            host_ended_session_reader.store(true, Ordering::SeqCst);
                             break;
                         }
                     };
                     video_frame_count += 1;
                     if video_frame_count == 1 || video_frame_count % 60 == 0 {
-                        trace_packet(
-                            "HOST->RELAY",
-                            &session_id_for_thread,
-                            "HOST",
-                            "RELAY",
-                            pkt,
-                            msg.len(),
-                        );
+                        trace_packet("HOST->RELAY", &session_id_for_thread, "HOST", "RELAY", pkt, msg.len());
                     }
                     if video_frame_count == 1 || video_frame_count % 120 == 0 {
                         println!("[VIDEO RELAY RX] type={} bytes={} frames={}", pkt, msg.len(), video_frame_count);
@@ -702,6 +748,7 @@ fn run_websocket_bridge(
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
                     if let Err(e) = host_reader.read_exact(&mut header) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=audio_header_failed error={:?} device={}", e, session_id_for_thread);
+                        host_ended_session_reader.store(true, Ordering::SeqCst);
                         break;
                     }
                     let psize = u32::from_be_bytes(header[0..4].try_into().unwrap()) as usize;
@@ -709,6 +756,7 @@ fn run_websocket_bridge(
                     let mut payload = vec![0u8; psize];
                     if let Err(e) = host_reader.read_exact(&mut payload) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=audio_payload_failed error={:?} device={}", e, session_id_for_thread);
+                        host_ended_session_reader.store(true, Ordering::SeqCst);
                         break;
                     }
                     let mut msg = Vec::with_capacity(1 + 10 + psize);
@@ -722,19 +770,13 @@ fn run_websocket_bridge(
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
                     if let Err(e) = host_reader.read_exact(&mut payload) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=heartbeat_failed error={:?} device={}", e, session_id_for_thread);
+                        host_ended_session_reader.store(true, Ordering::SeqCst);
                         break;
                     }
                     println!("[HEARTBEAT] device_id={}", session_id_for_thread);
                     heartbeat_count += 1;
                     if heartbeat_count == 1 || heartbeat_count % 50 == 0 {
-                        trace_packet(
-                            "HOST->RELAY",
-                            &session_id_for_thread,
-                            "HOST",
-                            "RELAY",
-                            pkt,
-                            9,
-                        );
+                        trace_packet("HOST->RELAY", &session_id_for_thread, "HOST", "RELAY", pkt, 9);
                     }
                     let mut msg = Vec::with_capacity(9);
                     msg.push(14u8);
@@ -746,6 +788,7 @@ fn run_websocket_bridge(
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
                     if let Err(e) = host_reader.read_exact(&mut hdr) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=clipboard_header_failed error={:?} device={}", e, session_id_for_thread);
+                        host_ended_session_reader.store(true, Ordering::SeqCst);
                         break;
                     }
                     let psize = u32::from_be_bytes(hdr) as usize;
@@ -753,6 +796,7 @@ fn run_websocket_bridge(
                     let mut payload = vec![0u8; psize];
                     if let Err(e) = host_reader.read_exact(&mut payload) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=clipboard_payload_failed error={:?} device={}", e, session_id_for_thread);
+                        host_ended_session_reader.store(true, Ordering::SeqCst);
                         break;
                     }
                     let mut msg = Vec::with_capacity(5 + psize);
@@ -767,31 +811,25 @@ fn run_websocket_bridge(
                         Ok(msg) => msg,
                         Err(error) => {
                             eprintln!("[WS CLOSE] component=host_to_ws reason=chat_packet_read_failed error={:?} device={}", error, session_id_for_thread);
+                            host_ended_session_reader.store(true, Ordering::SeqCst);
                             break;
                         }
                     };
                     let psize = msg.len() - 4;
-                    let packet_hex = msg.iter()
-                        .map(|byte| format!("{:02x}", byte))
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let packet_hex = msg.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<_>>().join(" ");
                     if ws_tx_ctrl_fwd.send(msg).is_err() {
                         eprintln!("[WS ERROR] component=host_to_ws reason=chat_channel_closed device={}", session_id_for_thread);
                         break;
                     }
-                    println!(
-                        "[CHAT RELAY TRACE] direction=B->A type=16 payload_bytes={} packet_bytes={} bytes_hex=\"{}\"",
-                        psize,
-                        4 + psize,
-                        packet_hex
-                    );
+                    println!("[CHAT RELAY TRACE] direction=B->A type=16 payload_bytes={} packet_bytes={} bytes_hex=\"{}\"",
+                        psize, 4 + psize, packet_hex);
                 }
-                // Type 18 is an isolated START/STOP signal; it never contains chat text.
                 CHAT_TYPING_PACKET_TYPE => {
                     let mut state = [0u8; 1];
                     let _ = host_reader.set_read_timeout(Some(Duration::from_secs(5)));
                     if let Err(error) = host_reader.read_exact(&mut state) {
                         eprintln!("[WS CLOSE] component=host_to_ws reason=typing_state_failed error={:?} device={}", error, session_id_for_thread);
+                        host_ended_session_reader.store(true, Ordering::SeqCst);
                         break;
                     }
                     let Some(message) = chat_typing_packet(state[0]) else {
@@ -895,47 +933,21 @@ fn run_websocket_bridge(
                     }
                 }
                 99 => {
-                    trace_type99(
-                        "RECV",
-                        &session_id_for_thread,
-                        &session_id_for_thread,
-                        "host_to_ws",
-                        "host_tcp_type_99_consumed_not_forwarded_to_viewer",
-                    );
-                    trace_packet(
-                        "HOST->RELAY",
-                        &session_id_for_thread,
-                        "HOST",
-                        "RELAY",
-                        pkt,
-                        1,
-                    );
-                    trace_type99(
-                        "RECV_COMPLETE",
-                        &session_id_for_thread,
-                        &session_id_for_thread,
-                        "host_to_ws",
-                        "type_99_consumed_without_viewer_forward",
-                    );
+                    trace_type99("RECV", &session_id_for_thread, &session_id_for_thread, "host_to_ws", "host_tcp_type_99_consumed_not_forwarded_to_viewer");
+                    trace_packet("HOST->RELAY", &session_id_for_thread, "HOST", "RELAY", pkt, 1);
+                    trace_type99("RECV_COMPLETE", &session_id_for_thread, &session_id_for_thread, "host_to_ws", "type_99_consumed_without_viewer_forward");
                     println!("[WS CLOSE] component=host_to_ws reason=host_sent_99 device={}", session_id_for_thread);
+                    host_ended_session_reader.store(true, Ordering::SeqCst);
                     break;
                 }
                 _ => {
-                    // Unknown type: log and continue (1 byte already consumed, stream in sync)
                     eprintln!("[WS ERROR] component=host_to_ws reason=unknown_type type={} device={}", pkt, session_id_for_thread);
                 }
             }
         }
         println!("[WS CLOSE] component=host_to_ws reason=thread_exit device={}", session_id_for_thread);
 
-        // Determine WHO actually ended the session BEFORE we clear the flag.
-        // - is_active still true here  => the loop exited on a HOST-side read error / type 99,
-        //   i.e. the agent really disconnected. Report it honestly as "Host disconnected" (1011).
-        // - is_active already false     => the viewer (browser) side ended the session (ws_to_host
-        //   broke first). Do NOT masquerade this as a host disconnect. The agent TCP stays alive
-        //   and is re-registered by handle_host; a viewer-side decode error can therefore never
-        //   cause the relay to kill the host-agent connection.
-        let host_ended_session = is_active_reader.load(Ordering::SeqCst);
+        let host_ended_session = host_ended_session_reader.load(Ordering::SeqCst);
         is_active_reader.store(false, Ordering::SeqCst);
 
         if let Ok(mut ws) = ws_arc_closer.lock() {
@@ -946,7 +958,7 @@ fn run_websocket_bridge(
                     reason: "Host disconnected".into(),
                 }));
             } else {
-                println!("[WS CLOSE] device={} -> VIEWER side ended session. Host agent connection is preserved (not a host disconnect).", session_id_for_thread);
+                println!("[WS CLOSE] device={} -> VIEWER side ended session. Host agent connection is preserved.", session_id_for_thread);
                 let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
                     code: tungstenite::protocol::frame::coding::CloseCode::Normal,
                     reason: "Viewer disconnected".into(),
@@ -980,31 +992,11 @@ fn run_websocket_bridge(
             Ok(Message::Binary(data)) => {
                 let is_type99 = data.first() == Some(&99);
                 if let Some(&packet_type) = data.first() {
-                    trace_packet(
-                        "VIEWER->RELAY",
-                        session_id,
-                        "VIEWER",
-                        "RELAY",
-                        packet_type,
-                        data.len(),
-                    );
+                    trace_packet("VIEWER->RELAY", session_id, "VIEWER", "RELAY", packet_type, data.len());
                 }
                 if is_type99 {
-                    trace_packet(
-                        "RELAY->HOST",
-                        session_id,
-                        "RELAY",
-                        "HOST",
-                        99,
-                        data.len(),
-                    );
-                    trace_type99(
-                        "RECV",
-                        session_id,
-                        session_id,
-                        "viewer_websocket_binary",
-                        "binary_type_99",
-                    );
+                    trace_packet("RELAY->HOST", session_id, "RELAY", "HOST", 99, data.len());
+                    trace_type99("RECV", session_id, session_id, "viewer_websocket_binary", "binary_type_99");
                 }
                 let (type_name, log_control_packet) = if let Some(&packet_type) = data.first() {
                     let type_name = match packet_type {
@@ -1026,20 +1018,15 @@ fn run_websocket_bridge(
                 } else {
                     ("CONTROL", false)
                 };
-                // CRITICAL: control write failure is NON-FATAL
                 if !send_all(&mut host_writer, &data) {
-                    eprintln!("[WS ERROR] component=ws_to_host reason=control_write_failed \
-                        type={} device={}", data.first().copied().unwrap_or(255), session_id);
-                    // Non-fatal: video stream continues
+                    eprintln!("[WS ERROR] component=ws_to_host reason=control_write_failed type={} device={}",
+                        data.first().copied().unwrap_or(255), session_id);
+                    host_ended_session.store(true, Ordering::SeqCst);
+                    let _ = host_writer.shutdown(Shutdown::Both);
+                    break;
                 } else {
                     if is_type99 {
-                        trace_type99(
-                            "SEND",
-                            session_id,
-                            session_id,
-                            "ws_to_host",
-                            "viewer_binary_forwarded_to_host",
-                        );
+                        trace_type99("SEND", session_id, session_id, "ws_to_host", "viewer_binary_forwarded_to_host");
                     }
                     if log_control_packet {
                         println!("[CONTROL DEBUG][RELAY -> HOST]\ntype={}\nlength={}", type_name, data.len());
@@ -1063,8 +1050,7 @@ fn run_websocket_bridge(
                 break;
             }
             Err(tungstenite::error::Error::Io(ref e))
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 thread::sleep(Duration::from_millis(1));
                 continue;
@@ -1083,35 +1069,24 @@ fn run_websocket_bridge(
     println!("[RELAY] Session ended: main_loop_exited");
     println!("[WS CLOSE] component=bridge reason=main_loop_exited device={}", session_id);
     is_active.store(false, Ordering::SeqCst);
-    drop(ws_tx_ctrl); // signal writer thread to exit
-    drop(ws_tx_vid);
-    println!("[REGISTRY] Viewer disconnected for Device ID: {}", session_id);
-    trace_type99(
-        "SEND",
+
+    let host_to_ws_panicked = host_to_ws_handle.join().is_err();
+    notify_host_viewer_disconnect(
         session_id,
-        session_id,
-        "bridge_cleanup",
-        "viewer_websocket_disconnected",
+        &mut host_writer,
+        host_ended_session.load(Ordering::SeqCst),
     );
-    if let Err(error) = host_writer.write_all(&[99u8]) {
-        trace_type99(
-            "SEND_FAILED",
-            session_id,
-            session_id,
-            "bridge_cleanup",
-            &format!("viewer_disconnect_type_99_write_failed:{error}"),
-        );
-    } else {
-        trace_type99(
-            "SEND_COMPLETE",
-            session_id,
-            session_id,
-            "bridge_cleanup",
-            "viewer_disconnect_type_99_written_to_host",
+
+    drop(ws_tx_ctrl);
+    drop(ws_tx_vid);
+
+    let ws_writer_panicked = ws_writer_handle.join().is_err();
+    if host_to_ws_panicked || ws_writer_panicked {
+        eprintln!(
+            "[WS ERROR] component=bridge reason=worker_panicked host_to_ws_panicked={} ws_writer_panicked={} device={}",
+            host_to_ws_panicked, ws_writer_panicked, session_id
         );
     }
-    let _ = host_to_ws_handle.join();
-    let _ = ws_writer_handle.join();
     true
 }
 
@@ -1127,7 +1102,6 @@ fn read_server_config() -> Option<String> {
         std::path::PathBuf::from("/etc/deskstream/server-config.json")
     };
     let contents = std::fs::read_to_string(&path).ok()?;
-    // Simple manual parse for backend_url field (avoid serde_json dependency)
     let key = "\"backend_url\":";
     if let Some(pos) = contents.find(key) {
         let after = &contents[pos + key.len()..];
@@ -1161,24 +1135,13 @@ fn resolve_backend_config() -> (String, String, String) {
 }
 
 fn update_backend_presence(session_id: &str, _is_register: bool) {
-    // The relay ONLY sends heartbeats. Registration is exclusively performed by the
-    // agent's BackendClient (which uses machine_identifier for idempotent upserts).
-    // This prevents the relay from creating new/duplicate device rows with the
-    // relay-level session_id, which would diverge from the persisted system_id.
     let sid = session_id.to_string();
-
-    // Backend URL is configurable via environment variable.
-    // Defaults to localhost only for local development.
-    // In production, falls back to /Program Files/Screen Share/server-config.json
     let (backend_url, backend_host, backend_port) = resolve_backend_config();
 
     thread::spawn(move || {
         println!("[SYNC] RELAY REGISTERED SYSTEM ID = {}", sid);
-        let _path = "/devices/heartbeat.php";
-
         let json_payload = format!("{{\"system_id\":\"{}\"}}", sid);
 
-        // Try the configurable backend first, then fall back to raw TCP to the backend host
         let urls = vec![
             format!("{}/devices/heartbeat.php", backend_url.trim_end_matches('/')),
         ];
@@ -1197,40 +1160,26 @@ fn update_backend_presence(session_id: &str, _is_register: bool) {
     });
 }
 
-
 // ============================================================
 // HOST CONNECTION & LIFECYCLE (PERSISTENT AGENT THREAD)
 // ============================================================
 
-fn handle_host(
-    mut stream: TcpStream,
-    hosts: ClientMap,
-) {
+fn handle_host(mut stream: TcpStream, hosts: ClientMap) {
     let conn_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
     let mut type_byte = [0u8; 1];
 
-    if !read_exact_logged(
-        &mut stream,
-        &mut type_byte,
-        "Host packet type",
-    ) {
+    if !read_exact_logged(&mut stream, &mut type_byte, "Host packet type") {
         return;
     }
 
     let packet_type = type_byte[0];
 
     if packet_type != 1 {
-        eprintln!(
-            "[Relay] Invalid host registration packet type: {}",
-            packet_type
-        );
+        eprintln!("[Relay] Invalid host registration packet type: {}", packet_type);
         return;
     }
 
-    // System IDs are strictly 9 digits long.
-    // DO NOT use peek() because TCP may fragment the payload, leading to truncated IDs.
     let id_len = 9;
-
     let mut actual_id_buf = vec![0u8; id_len];
     if !read_exact_logged(&mut stream, &mut actual_id_buf, "Host session ID") {
         return;
@@ -1243,8 +1192,6 @@ fn handle_host(
             return;
         }
     };
-
-    println!("[DEBUG TRACE] [RELAY AGENT REGISTRATION] calculated id_len = {}. parsed session_id = '{}'", id_len, session_id);
 
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
     let _ = stream.set_nodelay(true);
@@ -1263,7 +1210,6 @@ fn handle_host(
     println!("[RELAY] activeAgents[{}] = ONLINE", session_id);
     println!("[REGISTRY] Register device");
 
-    // PROXY REGISTRATION TO BACKEND
     update_backend_presence(&session_id, true);
     println!("[REGISTRY] Device ID: {}", session_id);
     println!("[REGISTRY] Connection ID: {}", peer);
@@ -1272,29 +1218,19 @@ fn handle_host(
 
     let (session_tx, session_rx): (Sender<ViewerSessionRequest>, Receiver<ViewerSessionRequest>) = channel();
 
-    // Register active agent sender in hosts map
     if let Ok(mut map) = hosts.lock() {
         let replaced = map.insert(session_id.clone(), (conn_id, session_tx));
         if let Some((previous_conn_id, _)) = replaced {
             println!(
                 "[TRACE99][REGISTRY] timestamp={} device={} old_connection_id={} new_connection_id={} event=HOST_REGISTRATION_REPLACED",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis(),
-                session_id,
-                previous_conn_id,
-                conn_id
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                session_id, previous_conn_id, conn_id
             );
         } else {
             println!(
                 "[TRACE99][REGISTRY] timestamp={} device={} connection_id={} event=HOST_REGISTERED",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis(),
-                session_id,
-                conn_id
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                session_id, conn_id
             );
         }
         println!("[RELAY] Agent registered: {}", session_id);
@@ -1316,10 +1252,6 @@ fn handle_host(
         if let Ok(req) = session_rx.try_recv() {
             println!("[ROUTING] Forwarding request to agent: {}", session_id);
             println!("[PAIR] Preparing pairing message");
-            println!("[PAIR] Target socket: HOST ({})", host_peer);
-            println!("[PAIR] Message type: AUTH_REQUEST (3)");
-            println!("[PAIR] Message size: 33 bytes");
-
             let mut auth_request = Vec::with_capacity(33);
             auth_request.push(3u8);
             auth_request.extend_from_slice(&req.auth_hash);
@@ -1372,10 +1304,7 @@ fn handle_host(
                         trace_packet("RELAY->HOST", &session_id, "RELAY", "HOST", 14, ack.len());
                     }
                     other => {
-                        eprintln!(
-                            "[PAIR][ERROR] Unexpected byte 0x{:02X} while waiting for HOST authentication response",
-                            other
-                        );
+                        eprintln!("[PAIR][ERROR] Unexpected byte 0x{:02X} while waiting for HOST authentication response", other);
                         break false;
                     }
                 }
@@ -1400,20 +1329,9 @@ fn handle_host(
                     println!("[PAIR] Starting TCP bridge for {}", session_id);
                     let _ = send_all_pair("VIEWER", &mut viewer_tcp, &[2u8]);
 
-                    let host_r = match stream.try_clone() { Ok(s) => s, Err(_) => break };
-                    let host_w = match stream.try_clone() { Ok(s) => s, Err(_) => break };
-                    let host_c1 = match stream.try_clone() { Ok(s) => s, Err(_) => break };
-                    let host_c2 = match stream.try_clone() { Ok(s) => s, Err(_) => break };
-
-                    let viewer_r = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
-                    let viewer_w = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
-                    let viewer_c1 = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
-                    let viewer_c2 = match viewer_tcp.try_clone() { Ok(s) => s, Err(_) => break };
-
-                    let t1 = thread::spawn(move || host_to_viewer_tcp(host_r, viewer_w, host_c1, viewer_c1));
-                    let t2 = thread::spawn(move || viewer_to_host_tcp(viewer_r, host_w, host_c2, viewer_c2));
-                    let _ = t1.join();
-                    let _ = t2.join();
+                    if bridge_tcp_session(&stream, viewer_tcp) {
+                        break;
+                    }
                 }
             }
 
@@ -1430,7 +1348,6 @@ fn handle_host(
         match stream.read_exact(&mut idle_buf) {
             Ok(_) => {
                 match idle_buf[0] {
-                    // Type 14: Heartbeat / Keepalive from host
                     14 => {
                         let mut time_buf = [0u8; 8];
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -1443,7 +1360,6 @@ fn handle_host(
                             let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                             let _ = stream.write_all(&ack);
 
-                            // PROXY HEARTBEAT TO BACKEND
                             update_backend_presence(&session_id, false);
                         }
                     }
@@ -1454,35 +1370,18 @@ fn handle_host(
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut {
-                    // Normal idle wait timeout, loop back to check viewer requests and heartbeats
                     continue;
                 }
-                // Actual socket disconnect / error
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    println!(
-                        "[TRACE99][SOCKET] HOST EOF timestamp={} device={} connection_id={} error={:?}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis(),
-                        session_id,
-                        conn_id,
-                        e
-                    );
+                    println!("[TRACE99][SOCKET] HOST EOF timestamp={} device={} connection_id={} error={:?}",
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                        session_id, conn_id, e);
                 } else {
-                    eprintln!(
-                        "[TRACE99][SOCKET] HOST ERROR timestamp={} device={} connection_id={} error={:?}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis(),
-                        session_id,
-                        conn_id,
-                        e
-                    );
+                    eprintln!("[TRACE99][SOCKET] HOST ERROR timestamp={} device={} connection_id={} error={:?}",
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                        session_id, conn_id, e);
                 }
                 println!("[RELAY] Agent {} disconnected", session_id);
-                println!("[RELAY] Disconnect reason: {:?}", e);
                 println!("[RELAY][CLOSE] connection_type=agent device={} reason=remote_closed error={:?} peer_connected=false", session_id, e);
                 break;
             }
@@ -1496,23 +1395,14 @@ fn handle_host(
                 map.remove(&session_id);
                 println!(
                     "[TRACE99][REGISTRY] timestamp={} device={} connection_id={} event=HOST_UNREGISTERED",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis(),
-                    session_id,
-                    conn_id
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                    session_id, conn_id
                 );
             } else {
                 println!(
                     "[TRACE99][REGISTRY] timestamp={} device={} exiting_connection_id={} current_connection_id={} event=STALE_HOST_EXIT_PRESERVED",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis(),
-                    session_id,
-                    conn_id,
-                    existing_id
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+                    session_id, conn_id, existing_id
                 );
             }
         }
@@ -1524,27 +1414,17 @@ fn handle_host(
 // NORMAL TCP VIEWER CONNECTION
 // ============================================================
 
-fn handle_viewer(
-    mut viewer: TcpStream,
-    hosts: ClientMap,
-) {
+fn handle_viewer(mut viewer: TcpStream, hosts: ClientMap) {
     let mut type_byte = [0u8; 1];
 
-    if !read_exact_logged(
-        &mut viewer,
-        &mut type_byte,
-        "Viewer packet type",
-    ) {
+    if !read_exact_logged(&mut viewer, &mut type_byte, "Viewer packet type") {
         return;
     }
 
     println!("[Relay] Viewer connected");
 
     if type_byte[0] != 2 {
-        eprintln!(
-            "[Relay] Invalid viewer packet type: {}",
-            type_byte[0]
-        );
+        eprintln!("[Relay] Invalid viewer packet type: {}", type_byte[0]);
         let _ = viewer.write_all(&[3u8]);
         return;
     }
@@ -1571,11 +1451,7 @@ fn handle_viewer(
     };
 
     let mut auth_hash = [0u8; 32];
-    if !read_exact_logged(
-        &mut viewer,
-        &mut auth_hash,
-        "Viewer authentication",
-    ) {
+    if !read_exact_logged(&mut viewer, &mut auth_hash, "Viewer authentication") {
         return;
     }
 
@@ -1623,14 +1499,11 @@ fn handle_viewer(
 // WEBSOCKET VIEWER
 // ============================================================
 
-fn handle_websocket_viewer(
-    stream: TcpStream,
-    hosts: ClientMap,
-) {
+fn handle_websocket_viewer(stream: TcpStream, hosts: ClientMap) {
     println!("[RELAY][WS] Viewer connected");
     println!("[RELAY DEBUG] TCP/WebSocket connection accepted from {}", stream.peer_addr().unwrap());
     println!("[RELAY DEBUG] HTTP Upgrade request received");
-    
+
     let mut ws = match tungstenite::accept(stream) {
         Ok(ws) => {
             println!("[RELAY DEBUG] WebSocket handshake success");
@@ -1644,10 +1517,7 @@ fn handle_websocket_viewer(
     };
 
     let msg = match ws.read() {
-        Ok(Message::Binary(data)) => {
-            println!("[RELAY DEBUG] viewer authentication packet received");
-            data
-        }
+        Ok(Message::Binary(data)) => data,
         Ok(other) => {
             eprintln!("[Relay] Unexpected WS handshake message: {:?}", other);
             return;
@@ -1671,7 +1541,6 @@ fn handle_websocket_viewer(
         let clean_id = match std::str::from_utf8(id_slice) {
             Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
             Err(_) => {
-                eprintln!("[AUTH] REJECTED: Invalid WS session ID format");
                 println!("[WS] Closing connection\ncode = 1008\nreason = Invalid WS session ID");
                 let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
                     code: tungstenite::protocol::frame::coding::CloseCode::Policy,
@@ -1689,7 +1558,6 @@ fn handle_websocket_viewer(
         let clean_id = match std::str::from_utf8(payload) {
             Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
             Err(_) => {
-                eprintln!("[AUTH] REJECTED: Invalid WS session ID");
                 println!("[WS] Closing connection\ncode = 1008\nreason = Invalid WS session ID");
                 let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
                     code: tungstenite::protocol::frame::coding::CloseCode::Policy,
@@ -1712,13 +1580,13 @@ fn handle_websocket_viewer(
     println!("[RELAY][LOOKUP] device = {}", session_id);
     println!("[SYNC] VIEWER REQUESTED SYSTEM ID = {}", session_id);
 
-    // Look up agent sender (poll up to 2 seconds if reconnecting)
     let mut host_tx_opt = None;
     for _ in 0..20 {
         {
             if let Ok(map) = hosts.lock() {
                 let raw_clean = session_id.replace(' ', "");
-                host_tx_opt = map.get(&session_id).map(|(_, tx)| tx.clone()).or_else(|| map.get(&raw_clean).map(|(_, tx)| tx.clone()));
+                host_tx_opt = map.get(&session_id).map(|(_, tx)| tx.clone())
+                    .or_else(|| map.get(&raw_clean).map(|(_, tx)| tx.clone()));
             }
         }
         if host_tx_opt.is_some() {
@@ -1727,16 +1595,9 @@ fn handle_websocket_viewer(
         thread::sleep(Duration::from_millis(100));
     }
 
-    let target_found = host_tx_opt.is_some();
-    println!("[ROUTING] Target connection found: {}", target_found);
-
     let host_tx = match host_tx_opt {
-        Some(tx) => {
-            println!("[RELAY][LOOKUP] FOUND");
-            tx
-        }
+        Some(tx) => tx,
         None => {
-            println!("[RELAY][LOOKUP] NOT FOUND");
             println!("[RELAY][CLOSE] connection_type=viewer device={} reason=agent_not_found error=none peer_connected=false", session_id);
             let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
                 code: tungstenite::protocol::frame::coding::CloseCode::Policy,
@@ -1758,7 +1619,7 @@ fn handle_websocket_viewer(
     println!("[RELAY][AUTH] Viewer authentication received");
 
     if host_tx.send(req).is_err() {
-        eprintln!("[PAIR][ERROR] Agent connection dropped before pairing: {}", session_id);
+        eprintln!("[PAIR][ERROR] Failed to forward request to host: {}", session_id);
         println!("[RELAY][CLOSE] connection_type=viewer device={} reason=agent_dropped error=send_failed peer_connected=false", session_id);
         if let Ok(mut lock) = ws_arc.lock() {
             let _ = lock.close(Some(tungstenite::protocol::CloseFrame {
@@ -1783,66 +1644,14 @@ fn handle_websocket_viewer(
         }
         return;
     }
-    
+
     println!("[RELAY][AUTH] Authentication accepted");
-
-    // ============================================================
-    // CRITICAL: Must call run_websocket_bridge() to keep the
-    // WebSocket alive for the full session. NOT calling it caused
-    // the function to return immediately, dropping the TcpStream
-    // and producing a browser-side 1006 Abnormal Closure.
-    // The [2u8] "session active" packet is sent INSIDE the bridge
-    // writer thread as its first action, so we do NOT send it here.
-    // ============================================================
-
-    println!("[RELAY][AUTH] Viewer authentication accepted for device={}", session_id);
     println!("[RELAY][PAIR] Viewer paired with agent device={}", session_id);
     println!("[RELAY][STREAM] Entering persistent WebSocket bridge for device={}", session_id);
 
-    // The ws_arc Mutex<WebSocket> and the host TcpStream both move into run_websocket_bridge.
-    // That function blocks until the session ends (viewer disconnects or agent disconnects).
-    // We need the underlying TcpStream from the ws_arc to pair with the host.
-    // The ViewerSessionRequest already transported ws_arc to handle_host via the channel,
-    // and handle_host called req.response_tx.send(true), so at this point ws_arc is ours.
-    //
-    // We must obtain the underlying TcpStream from inside the WebSocket to give it to
-    // run_websocket_bridge as the host-facing channel. But ws_arc already holds the viewer's
-    // WebSocket — and run_websocket_bridge takes `stream` (the HOST tcp stream) + `ws_arc`.
-    //
-    // The host stream is NOT available here — it lives in handle_host. This is why the design
-    // routes the entire ViewerSession to handle_host via the channel, and handle_host calls
-    // run_websocket_bridge from its side with its own `stream` reference.
-    //
-    // The response_tx.send(true) already unblocked handle_host, which then called
-    // run_websocket_bridge() directly (line 715). The bridge is now running in handle_host's
-    // thread. We must NOT return here — we must BLOCK until the bridge finishes, otherwise
-    // this thread will drop ws_arc (the viewer socket) while the bridge is still using it.
-    //
-    // Solution: wait on a signal from handle_host that the bridge is done.
-    // We do this by recving on a second "done" channel sent back via resp_tx.
-    // But the current design has no done-channel. The simplest correct fix:
-    // Block here until ws_arc's underlying socket is closed (bridge dropped it).
-    // We detect closure by trying to read from the Arc<Mutex<WebSocket>>.
-
-    // Block this thread while the bridge (running in handle_host's thread) is alive.
-    // The bridge holds a clone of ws_arc. When it finishes it drops ws_arc clone.
-    // We detect completion by waiting until the Arc strong_count drops to 1 (only us hold it).
-    // This avoids any changes to the bridge or channel protocol.
-    loop {
-        // If only this thread holds ws_arc, the bridge has exited and released its clone.
-        if Arc::strong_count(&ws_arc) <= 1 {
-            println!("[RELAY][CLOSE] Bridge exited for device={} viewer_thread_releasing", session_id);
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    println!("[RELAY][CLOSE] Viewer connection lifecycle complete for device={}", session_id);
     println!("[PAIR] Pairing successful");
-    println!("[STREAM] Session ended");
-    println!("[RELAY] Host/viewer session complete for device={}", session_id);
+    println!("[STREAM] Bridge is running in the host session owner for device={}", session_id);
 }
-
 
 // ============================================================
 // MAIN
@@ -1857,16 +1666,15 @@ fn main() {
         r.store(false, Ordering::SeqCst);
     }).expect("Error setting Ctrl-C handler");
     println!("       REMOTE DESKTOP RELAY SERVER");
-     println!("  BUILD VERSION: 1.1.1 (Cloud-Ready Relay)");
+    println!("  BUILD VERSION: 1.1.1 (Cloud-Ready Relay)");
     println!("========================================");
-    
-    // Read port from environment (Render/Railway use PORT, we also check RELAY_PORT)
+
     let port = env::var("RELAY_PORT")
         .or_else(|_| env::var("PORT"))
         .unwrap_or_else(|_| "9001".to_string());
-        
+
     let relay_addr = format!("0.0.0.0:{}", port);
-    
+
     println!("[RELAY] Starting relay server...");
     println!("[RELAY] Binding to {}...", relay_addr);
 
@@ -1889,7 +1697,7 @@ fn main() {
         let (stream, _addr) = match listener.accept() {
             Ok(res) => res,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(100));
                 continue;
             }
             Err(e) => {
@@ -1905,10 +1713,22 @@ fn main() {
 
         let _ = stream.set_nodelay(true);
         let mut peek = [0u8; 14];
-        if stream.peek(&mut peek).is_err() {
-            eprintln!("[Relay] Failed to inspect connection from {}", peer);
-            continue;
-        }
+        let bytes_peeked = match stream.peek(&mut peek) {
+            Ok(bytes_peeked) => bytes_peeked,
+            Err(e) => {
+                eprintln!("[Relay] Failed to inspect connection from {}: {:?}", peer, e);
+                let _ = stream.shutdown(Shutdown::Both);
+                continue;
+            }
+        };
+        let connection_type = match initial_packet_type(bytes_peeked, &peek) {
+            None => {
+                println!("[Relay] Client closed before sending an initial packet: {}", peer);
+                let _ = stream.shutdown(Shutdown::Both);
+                continue;
+            }
+            Some(connection_type) => connection_type,
+        };
 
         if &peek[0..11] == b"GET /health" {
             println!("[Relay] Health check from {}", peer);
@@ -1918,11 +1738,9 @@ fn main() {
             continue;
         }
 
-        let connection_type = peek[0];
         let hosts_clone = Arc::clone(&hosts);
 
         match connection_type {
-            // LOCAL SHUTDOWN (Type 99)
             99 => {
                 let is_local = stream.peer_addr().map(|addr| addr.ip().is_loopback()).unwrap_or(false);
                 if is_local {
@@ -1934,46 +1752,32 @@ fn main() {
                 let _ = stream.shutdown(Shutdown::Both);
             }
 
-            // HOST REGISTRATION (Type 1)
             1 => {
                 println!("[Relay] Connection identified as HOST");
-                thread::spawn(move || {
-                    handle_host(stream, hosts_clone);
-                });
+                thread::spawn(move || handle_host(stream, hosts_clone));
             }
 
-            // NORMAL TCP VIEWER (Type 2)
             2 => {
                 println!("[Relay] Connection identified as TCP VIEWER");
-                thread::spawn(move || {
-                    handle_viewer(stream, hosts_clone);
-                });
+                thread::spawn(move || handle_viewer(stream, hosts_clone));
             }
 
-            // WEBSOCKET VIEWER (HTTP GET)
             71 => {
                 println!("[Relay] Connection identified as WEBSOCKET");
-                thread::spawn(move || {
-                    handle_websocket_viewer(stream, hosts_clone);
-                });
+                thread::spawn(move || handle_websocket_viewer(stream, hosts_clone));
             }
 
             _ => {
                 eprintln!("[Relay] Unknown initial connection type: {}", connection_type);
-                let stream = stream;
                 let _ = stream.shutdown(Shutdown::Both);
             }
         }
-
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        chat_typing_packet, read_host_chat_packet, read_host_video_packet, reverse_ack_packet,
-        reverse_request_packet, take_control_burst, CONTROL_BYTES_PER_TURN,
-    };
+    use super::*;
     use std::io::{self, Read};
     use std::sync::mpsc;
 
@@ -2034,6 +1838,21 @@ mod tests {
     }
 
     #[test]
+    fn eof_before_initial_packet_is_not_classified_as_type_zero() {
+        assert_eq!(initial_packet_type(0, &[0]), None);
+    }
+
+    #[test]
+    fn actual_zero_initial_byte_remains_an_invalid_packet_type() {
+        assert_eq!(initial_packet_type(1, &[0]), Some(0));
+    }
+
+    #[test]
+    fn host_initial_packet_type_is_preserved() {
+        assert_eq!(initial_packet_type(1, &[1]), Some(1));
+    }
+
+    #[test]
     fn video_chat_video_packets_preserve_order_with_coalesced_and_partial_reads() {
         let (stream, expected) = mixed_stream(b"frame-a", "hello from B".as_bytes(), b"frame-b");
 
@@ -2088,5 +1907,551 @@ mod tests {
     #[test]
     fn reverse_request_keeps_the_existing_one_byte_type_30_frame() {
         assert_eq!(reverse_request_packet(), vec![30]);
+    }
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (server, client)
+    }
+
+    #[test]
+    fn unexpected_bridge_worker_exit_clears_owner_visible_active_state() {
+        let tcp_state = Arc::new(TcpBridgeState {
+            active: AtomicBool::new(true),
+            viewer_disconnected: AtomicBool::new(false),
+            host_failed: AtomicBool::new(false),
+        });
+        let tcp_worker_state = Arc::clone(&tcp_state);
+        let tcp_worker = thread::spawn(move || {
+            let _active_guard = TcpBridgeWorkerGuard(tcp_worker_state);
+            panic!("simulated TCP bridge worker panic");
+        });
+        assert!(tcp_worker.join().is_err());
+        assert!(!tcp_state.active.load(Ordering::SeqCst));
+
+        let websocket_active = Arc::new(AtomicBool::new(true));
+        let websocket_worker_active = Arc::clone(&websocket_active);
+        let websocket_worker = thread::spawn(move || {
+            let _active_guard = WebSocketBridgeWorkerGuard(websocket_worker_active);
+            panic!("simulated WebSocket bridge worker panic");
+        });
+        assert!(websocket_worker.join().is_err());
+        assert!(!websocket_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn repeated_tcp_cleanup_is_idempotent_and_notifies_host_once() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let host_writer = relay_host.try_clone().unwrap();
+        let (relay_viewer, viewer_peer) = tcp_pair();
+        let viewer_reader = relay_viewer.try_clone().unwrap();
+        let state = Arc::new(TcpBridgeState {
+            active: AtomicBool::new(true),
+            viewer_disconnected: AtomicBool::new(false),
+            host_failed: AtomicBool::new(false),
+        });
+        mark_viewer_disconnected(&state, &relay_viewer);
+        mark_viewer_disconnected(&state, &relay_viewer);
+        mark_viewer_disconnected(&state, &relay_viewer);
+
+        let forwarder = thread::spawn(move || {
+            viewer_to_host_tcp(viewer_reader, host_writer, state.clone());
+            state
+        });
+        let state = forwarder.join().unwrap();
+        assert!(!state.active.load(Ordering::SeqCst));
+        assert!(state.viewer_disconnected.load(Ordering::SeqCst));
+        assert!(!state.host_failed.load(Ordering::SeqCst));
+
+        let mut notification = [0u8; 1];
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        host_peer
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert!(matches!(
+            host_peer.read(&mut notification),
+            Err(ref error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut
+        ));
+        drop(viewer_peer);
+    }
+
+    fn start_websocket_bridge(host: &TcpStream) -> (String, thread::JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = host.try_clone().unwrap();
+        let bridge = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let websocket = tungstenite::accept(stream).unwrap();
+            run_websocket_bridge(
+                "test-session",
+                &mut host,
+                Arc::new(Mutex::new(websocket)),
+            )
+        });
+        (format!("ws://{address}"), bridge)
+    }
+
+    fn connect_websocket_bridge(
+        address: &str,
+    ) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+        let (mut websocket, _) = tungstenite::connect(address).unwrap();
+        for expected in [vec![1u8], vec![2u8]] {
+            match websocket.read().unwrap() {
+                Message::Binary(data) => assert_eq!(data, expected),
+                message => panic!("unexpected WebSocket bridge startup message: {message:?}"),
+            }
+        }
+        websocket
+    }
+
+    #[test]
+    fn websocket_viewer_disconnect_notifies_host_once_and_preserves_host_stream() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (address, bridge) = start_websocket_bridge(&relay_host);
+        let mut websocket = connect_websocket_bridge(&address);
+        websocket.close(None).unwrap();
+
+        let mut notification = [0u8; 1];
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(bridge.join().unwrap());
+        host_peer
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert!(matches!(
+            host_peer.read(&mut notification),
+            Err(ref error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut
+        ));
+        host_peer.write_all(&[42]).unwrap();
+    }
+
+    #[test]
+    fn websocket_session_can_restart_immediately_after_viewer_disconnect() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let (first_address, first_bridge) = start_websocket_bridge(&relay_host);
+        let mut first_viewer = connect_websocket_bridge(&first_address);
+        first_viewer.close(None).unwrap();
+
+        let mut notification = [0u8; 1];
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(first_bridge.join().unwrap());
+
+        let (second_address, second_bridge) = start_websocket_bridge(&relay_host);
+        let mut second_viewer = connect_websocket_bridge(&second_address);
+        let mut host_message = vec![26u8];
+        host_message.extend_from_slice(&123u64.to_be_bytes());
+        host_peer.write_all(&host_message).unwrap();
+        loop {
+            match second_viewer.read().unwrap() {
+                Message::Binary(message) => {
+                    assert_eq!(message, host_message);
+                    break;
+                }
+                Message::Ping(data) => second_viewer.send(Message::Pong(data)).unwrap(),
+                Message::Pong(_) => {}
+                message => panic!("unexpected WebSocket message: {message:?}"),
+            }
+        }
+
+        let mut viewer_message = vec![26u8];
+        viewer_message.extend_from_slice(&456u64.to_be_bytes());
+        second_viewer
+            .send(Message::Binary(viewer_message.clone()))
+            .unwrap();
+        let mut received = vec![0u8; viewer_message.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(received, viewer_message);
+
+        second_viewer.close(None).unwrap();
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(second_bridge.join().unwrap());
+    }
+
+    #[test]
+    fn simultaneous_websocket_viewer_and_host_disconnects_do_not_echo_type99() {
+        for _ in 0..20 {
+            let (relay_host, mut host_peer) = tcp_pair();
+            host_peer
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (address, bridge) = start_websocket_bridge(&relay_host);
+            let mut websocket = connect_websocket_bridge(&address);
+
+            host_peer.write_all(&[99]).unwrap();
+            websocket.close(None).unwrap();
+            assert!(bridge.join().unwrap());
+
+            host_peer
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            let mut unexpected = [0u8; 1];
+            assert!(matches!(
+                host_peer.read(&mut unexpected),
+                Err(ref error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.kind() == io::ErrorKind::TimedOut
+            ));
+        }
+    }
+
+    #[test]
+    fn websocket_host_disconnect_does_not_echo_type99() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let (address, bridge) = start_websocket_bridge(&relay_host);
+        let _websocket = connect_websocket_bridge(&address);
+
+        host_peer.write_all(&[99]).unwrap();
+        assert!(bridge.join().unwrap());
+        let mut unexpected = [0u8; 1];
+        assert!(matches!(
+            host_peer.read(&mut unexpected),
+            Err(ref error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::TimedOut
+        ));
+        host_peer.write_all(&[42]).unwrap();
+    }
+
+    #[test]
+    fn websocket_bridge_forwards_file_transfer_packets_in_both_directions() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (address, bridge) = start_websocket_bridge(&relay_host);
+        let mut websocket = connect_websocket_bridge(&address);
+        let transfer_id = 123456789u64;
+        let filename = b"test.bin";
+
+        let mut offer = vec![20];
+        offer.extend_from_slice(&transfer_id.to_be_bytes());
+        offer.extend_from_slice(&4u64.to_be_bytes());
+        offer.extend_from_slice(&(filename.len() as u16).to_be_bytes());
+        offer.extend_from_slice(filename);
+        websocket.send(Message::Binary(offer.clone())).unwrap();
+        let mut received = vec![0; offer.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(received, offer);
+
+        let payload = b"data";
+        let mut chunk = vec![21];
+        chunk.extend_from_slice(&transfer_id.to_be_bytes());
+        chunk.extend_from_slice(&0u32.to_be_bytes());
+        chunk.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(payload);
+        websocket.send(Message::Binary(chunk.clone())).unwrap();
+        let mut received = vec![0; chunk.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(received, chunk);
+
+        let mut completion = vec![22];
+        completion.extend_from_slice(&transfer_id.to_be_bytes());
+        completion.extend_from_slice(&4u64.to_be_bytes());
+        completion.extend_from_slice(&[0xab; 32]);
+        websocket
+            .send(Message::Binary(completion.clone()))
+            .unwrap();
+        let mut received = vec![0; completion.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(received, completion);
+
+        let mut approval = vec![26];
+        approval.extend_from_slice(&transfer_id.to_be_bytes());
+        host_peer.write_all(&approval).unwrap();
+        assert_eq!(
+            websocket.read().unwrap(),
+            Message::Binary(approval.clone())
+        );
+
+        let mut completion_ack = vec![27];
+        completion_ack.extend_from_slice(&transfer_id.to_be_bytes());
+        host_peer.write_all(&completion_ack).unwrap();
+        assert_eq!(
+            websocket.read().unwrap(),
+            Message::Binary(completion_ack)
+        );
+
+        let reverse_transfer_id = 987654321u64;
+        let mut reverse_offer = vec![20];
+        reverse_offer.extend_from_slice(&reverse_transfer_id.to_be_bytes());
+        reverse_offer.extend_from_slice(&4u64.to_be_bytes());
+        reverse_offer.extend_from_slice(&(filename.len() as u16).to_be_bytes());
+        reverse_offer.extend_from_slice(filename);
+        host_peer.write_all(&reverse_offer).unwrap();
+        assert_eq!(
+            websocket.read().unwrap(),
+            Message::Binary(reverse_offer.clone())
+        );
+
+        let mut reverse_chunk = vec![21];
+        reverse_chunk.extend_from_slice(&reverse_transfer_id.to_be_bytes());
+        reverse_chunk.extend_from_slice(&0u32.to_be_bytes());
+        reverse_chunk.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        reverse_chunk.extend_from_slice(payload);
+        host_peer.write_all(&reverse_chunk).unwrap();
+        assert_eq!(
+            websocket.read().unwrap(),
+            Message::Binary(reverse_chunk)
+        );
+
+        let mut reverse_completion = vec![22];
+        reverse_completion.extend_from_slice(&reverse_transfer_id.to_be_bytes());
+        reverse_completion.extend_from_slice(&4u64.to_be_bytes());
+        reverse_completion.extend_from_slice(&[0xcd; 32]);
+        host_peer.write_all(&reverse_completion).unwrap();
+        assert_eq!(
+            websocket.read().unwrap(),
+            Message::Binary(reverse_completion)
+        );
+
+        let mut reverse_approval = vec![26];
+        reverse_approval.extend_from_slice(&reverse_transfer_id.to_be_bytes());
+        websocket
+            .send(Message::Binary(reverse_approval.clone()))
+            .unwrap();
+        let mut received = vec![0; reverse_approval.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(received, reverse_approval);
+
+        let mut reverse_completion_ack = vec![27];
+        reverse_completion_ack.extend_from_slice(&reverse_transfer_id.to_be_bytes());
+        websocket
+            .send(Message::Binary(reverse_completion_ack.clone()))
+            .unwrap();
+        let mut received = vec![0; reverse_completion_ack.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(received, reverse_completion_ack);
+
+        websocket.close(None).unwrap();
+        let mut disconnect = [0u8; 1];
+        host_peer.read_exact(&mut disconnect).unwrap();
+        assert_eq!(disconnect, [99]);
+        assert!(bridge.join().unwrap());
+    }
+
+    #[test]
+    fn host_ended_session_does_not_echo_type99_and_keeps_stream_usable() {
+        let (mut relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        notify_host_viewer_disconnect("test-session", &mut relay_host, true);
+        let mut unexpected = [0u8; 1];
+        let read_result = host_peer.read(&mut unexpected);
+        assert!(matches!(
+            read_result,
+            Err(ref error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+        ));
+
+        host_peer.write_all(&[42u8]).unwrap();
+        relay_host.read_exact(&mut unexpected).unwrap();
+        assert_eq!(unexpected, [42]);
+    }
+
+    #[test]
+    fn viewer_ended_session_sends_exactly_one_type99() {
+        let (mut relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        notify_host_viewer_disconnect("test-session", &mut relay_host, false);
+        let mut notification = [0u8; 1];
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        let read_result = host_peer.read(&mut notification);
+        assert!(matches!(
+            read_result,
+            Err(ref error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    #[test]
+    fn tcp_viewer_disconnect_notifies_host_once_and_allows_next_session() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let (relay_viewer, viewer_peer) = tcp_pair();
+        let first_host = relay_host.try_clone().unwrap();
+        let first_session = thread::spawn(move || bridge_tcp_session(&first_host, relay_viewer));
+        drop(viewer_peer);
+
+        let mut notification = [0u8; 1];
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(!first_session.join().unwrap());
+        host_peer
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut duplicate = [0u8; 1];
+        assert!(matches!(
+            host_peer.read(&mut duplicate),
+            Err(ref error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+        ));
+
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (relay_viewer, mut viewer_peer) = tcp_pair();
+        let second_host = relay_host.try_clone().unwrap();
+        let second_session = thread::spawn(move || bridge_tcp_session(&second_host, relay_viewer));
+        let file_chunk = b"file-chunk-during-close";
+        viewer_peer.write_all(file_chunk).unwrap();
+        drop(viewer_peer);
+        let mut received = vec![0u8; file_chunk.len()];
+        host_peer.read_exact(&mut received).unwrap();
+        assert_eq!(&received, file_chunk);
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(!second_session.join().unwrap());
+    }
+
+    #[test]
+    fn tcp_host_disconnect_closes_viewer_without_host_reuse() {
+        let (relay_host, host_peer) = tcp_pair();
+        let (relay_viewer, mut viewer_peer) = tcp_pair();
+        viewer_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let session = thread::spawn(move || bridge_tcp_session(&relay_host, relay_viewer));
+
+        drop(host_peer);
+        let mut buffer = [0u8; 1];
+        let viewer_read = viewer_peer.read(&mut buffer);
+        assert!(match viewer_read {
+            Ok(0) => true,
+            Err(error) => {
+                error.kind() == std::io::ErrorKind::ConnectionReset
+                    || error.kind() == std::io::ErrorKind::ConnectionAborted
+            }
+            Ok(_) => false,
+        });
+        assert!(session.join().unwrap());
+    }
+
+    #[test]
+    fn host_write_failure_ends_tcp_session_and_closes_viewer() {
+        let (relay_host, host_peer) = tcp_pair();
+        let (relay_viewer, mut viewer_peer) = tcp_pair();
+        viewer_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        viewer_peer
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let session = thread::spawn(move || bridge_tcp_session(&relay_host, relay_viewer));
+
+        host_peer.shutdown(Shutdown::Both).unwrap();
+        let payload = vec![7u8; 64 * 1024];
+        let _ = viewer_peer.write_all(&payload);
+        assert!(session.join().unwrap());
+        let mut byte = [0u8; 1];
+        assert_eq!(viewer_peer.read(&mut byte).unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn viewer_write_failure_notifies_host_and_keeps_session_owner_usable() {
+        let (relay_host, mut host_peer) = tcp_pair();
+        host_peer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        host_peer
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (relay_viewer, viewer_peer) = tcp_pair();
+        viewer_peer.shutdown(Shutdown::Read).unwrap();
+        let session = thread::spawn(move || bridge_tcp_session(&relay_host, relay_viewer));
+
+        let payload = vec![9u8; 64 * 1024];
+        let _ = host_peer.write_all(&payload);
+        let mut notification = [0u8; 1];
+        host_peer.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(!session.join().unwrap());
+    }
+
+    #[test]
+    fn simultaneous_tcp_disconnects_terminate_without_panicking() {
+        let (relay_host, host_peer) = tcp_pair();
+        let (relay_viewer, viewer_peer) = tcp_pair();
+        let session = thread::spawn(move || bridge_tcp_session(&relay_host, relay_viewer));
+
+        let host_close = thread::spawn(move || drop(host_peer));
+        let viewer_close = thread::spawn(move || drop(viewer_peer));
+        host_close.join().unwrap();
+        viewer_close.join().unwrap();
+        let _host_failed = session.join().unwrap();
+    }
+
+    #[test]
+    fn closing_one_tcp_session_does_not_interrupt_another_session() {
+        let (host_one, mut host_peer_one) = tcp_pair();
+        let (viewer_one, mut viewer_peer_one) = tcp_pair();
+        host_peer_one
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let session_one = thread::spawn(move || bridge_tcp_session(&host_one, viewer_one));
+
+        let (host_two, mut host_peer_two) = tcp_pair();
+        let (viewer_two, mut viewer_peer_two) = tcp_pair();
+        host_peer_two
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let session_two = thread::spawn(move || bridge_tcp_session(&host_two, viewer_two));
+
+        viewer_peer_one.write_all(b"session-one").unwrap();
+        viewer_peer_two.write_all(b"session-two").unwrap();
+        let mut received_one = [0u8; 11];
+        let mut received_two = [0u8; 11];
+        host_peer_one.read_exact(&mut received_one).unwrap();
+        host_peer_two.read_exact(&mut received_two).unwrap();
+        assert_eq!(&received_one, b"session-one");
+        assert_eq!(&received_two, b"session-two");
+
+        drop(viewer_peer_one);
+        let mut notification = [0u8; 1];
+        host_peer_one.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(!session_one.join().unwrap());
+
+        viewer_peer_two.write_all(b"still-alive").unwrap();
+        let mut received_after_close = [0u8; 11];
+        host_peer_two.read_exact(&mut received_after_close).unwrap();
+        assert_eq!(&received_after_close, b"still-alive");
+        drop(viewer_peer_two);
+        host_peer_two.read_exact(&mut notification).unwrap();
+        assert_eq!(notification, [99]);
+        assert!(!session_two.join().unwrap());
     }
 }

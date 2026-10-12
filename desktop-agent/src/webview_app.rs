@@ -44,6 +44,28 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "A_WS_CONNECT_START",
         "A_WS_CONNECT_SUCCESS",
         "A_WS_CONNECT_FAILED",
+        "A_WS_ERROR_EVENT",
+        "A_WS_CLOSE_CALL",
+        "A_WS_CLOSE_FAILED",
+        "A_WS_CLOSE_EVENT",
+        "A_PAGE_HIDE",
+        "A_PING_SCHEDULED",
+        "A_PING_SENT",
+        "A_PING_TIMEOUT",
+        "A_PING_STATE_CHANGED",
+        "A_PING_RTT_CALCULATED",
+        "A_PING_ECHO_SENT",
+        "A_PING_ECHO_FAILED",
+        "A_PING_SEND_FAILED",
+        "A_RECONNECT_STARTED",
+        "A_TYPE16_SEND",
+        "A_TYPE16_RECEIVE",
+        "A_TYPE16_RECEIVE_INVALID",
+        "A_TYPE16_PARTIAL",
+        "A_TYPE12_RECEIVE",
+        "A_PACKET_LENGTH_REJECTED",
+        "A_SESSION_TRACE",
+        "B_SESSION_TRACE",
         "A_TYPE2_SENT",
         "A_SESSION_APPROVED",
         "A_STREAM_STATE",
@@ -60,6 +82,7 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "A_DISCONNECT",
         "STATE_CHANGE",
         "A_CHAT_SEND_START",
+        "A_CHAT_SOCKET_NOT_READY",
         "A_CHAT_SEND_TEXT_CREATED",
         "A_CHAT_WS_SEND_SUCCESS",
         "A_CHAT_WS_SEND_FAILED",
@@ -73,21 +96,11 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         return true;
     }
 
-    let field = |name: &str| -> String {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(|value| {
-                value
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .take(256)
-                    .collect::<String>()
-            })
-            .unwrap_or_default()
-    };
+    let field = |name: &str| diagnostic_field(&value, name);
     let system_id = field("system_id");
-    let identity = if system_id.len() == 9 && system_id.chars().all(|ch| ch.is_ascii_digit()) {
+    let identity = if matches!(system_id.len(), 6 | 9)
+        && system_id.chars().all(|ch| ch.is_ascii_digit())
+    {
         system_id
     } else {
         "unknown".to_string()
@@ -95,6 +108,7 @@ fn handle_session_debug_ipc(message: &str) -> bool {
     let mut details = Vec::new();
     for name in [
         "component",
+        "trace_id",
         "role",
         "video_direction",
         "target_system_id",
@@ -111,6 +125,10 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "sender",
         "message_length",
         "packet_type",
+        "ping_ms",
+        "last_success_ms",
+        "missed_count",
+        "retry_attempt",
         "state_count_before",
         "state_count_after",
         "dom_count_before",
@@ -123,6 +141,7 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "source",
         "reason",
         "timestamp",
+        "client_timestamp_ms",
         "connection_id",
         "socket_current",
         "target_id_present",
@@ -133,14 +152,116 @@ fn handle_session_debug_ipc(message: &str) -> bool {
         "authenticated",
         "was_clean",
         "page",
+        "packet_bytes",
+        "payload_bytes",
+        "buffer_bytes",
+        "ready_state",
+        "session_active",
+        "generation",
+        "close_reason",
     ] {
         let value = field(name);
         if !value.is_empty() {
             details.push(format!("{name}={value}"));
         }
     }
-    crate::session_debug::log(&identity, &format!("{} {}", event, details.join(" ")));
+    let trace_id = field("trace_id");
+    let trace_id = if trace_id.is_empty() {
+        crate::session_debug::trace_id_for_session(&field("target_system_id"))
+    } else {
+        trace_id
+    };
+    crate::session_debug::log_with_trace(
+        &identity,
+        &trace_id,
+        "WEBVIEW",
+        &format!("{} {}", event, details.join(" ")),
+    );
     true
+}
+
+fn diagnostic_field(value: &serde_json::Value, name: &str) -> String {
+    let Some(value) = value.get(name).and_then(serde_json::Value::as_str) else {
+        return String::new();
+    };
+    let sanitized = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(256)
+        .collect::<String>();
+
+    if name == "endpoint" {
+        let Some((scheme, remainder)) = sanitized.split_once("://") else {
+            return "invalid_endpoint".to_string();
+        };
+        if !["ws", "wss", "http", "https"].contains(&scheme) {
+            return "invalid_endpoint".to_string();
+        }
+        let authority = remainder
+            .split(|character| character == '/' || character == '?' || character == '#')
+            .next()
+            .unwrap_or_default();
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        return if host.is_empty() {
+            "invalid_endpoint".to_string()
+        } else {
+            format!("{scheme}://{host}")
+        };
+    }
+
+    let lowercase = sanitized.to_ascii_lowercase();
+    if [
+        "token",
+        "password",
+        "passwd",
+        "secret",
+        "authorization",
+        "bearer",
+        "pin",
+    ]
+    .iter()
+    .any(|keyword| lowercase.contains(keyword))
+    {
+        return "redacted".to_string();
+    }
+    if name == "error" {
+        let mut characters = sanitized.chars();
+        let valid_name = characters
+            .next()
+            .map(|character| character.is_ascii_alphabetic())
+            .unwrap_or(false)
+            && characters.all(|character| {
+                character.is_ascii_alphanumeric()
+                    || character == '_'
+                    || character == '-'
+                    || character == '.'
+            });
+        if !valid_name {
+            return "ERROR".to_string();
+        }
+    }
+    sanitized
+}
+
+#[cfg(test)]
+mod diagnostic_field_tests {
+    use super::diagnostic_field;
+    use serde_json::json;
+
+    #[test]
+    fn redacts_credentials_and_reduces_endpoints_to_authority() {
+        let value = json!({
+            "endpoint": "wss://user:password@relay.example/path?token=secret",
+            "error": "password=secret",
+            "reason": "authorization: Bearer secret"
+        });
+        assert_eq!(
+            diagnostic_field(&value, "endpoint"),
+            "wss://relay.example"
+        );
+        assert_eq!(diagnostic_field(&value, "error"), "redacted");
+        assert_eq!(diagnostic_field(&value, "reason"), "redacted");
+    }
 }
 
 use tao::{

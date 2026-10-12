@@ -23,6 +23,7 @@ use enigo::{Axis, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use encoder::HardwareH264Encoder;
 use screenshots::Screen;
 use sha2::{Digest, Sha256};
+use rand::Rng;
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -43,6 +44,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TARGET_FPS: u32 = 60;
 const TARGET_BITRATE: u32 = 8_000_000;
 const FRAME_INTERVAL_MICROS: u64 = 16667; // 60 FPS ~ 16.667 ms per frame
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+const MAX_CLIPBOARD_PACKET_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RECOVERABLE_PACKET_DISCARD_BYTES: usize = 32 * 1024 * 1024;
 
 // ============================================================
 // DPI
@@ -192,6 +198,73 @@ fn current_time_millis() -> u64 {
         .as_millis() as u64
 }
 
+fn next_heartbeat_id(previous: &mut u64) -> u64 {
+    *previous = current_time_millis().max(previous.saturating_add(1));
+    *previous
+}
+
+fn log_health_transition(identity: &str, channel: &str, transition: Option<(String, String)>) {
+    if let Some((old_state, new_state)) = transition {
+        crate::session_debug::log(
+            identity,
+            &format!(
+                "[HEALTH TRACE] timestamp_ms={} channel={} stage=STATE_CHANGED old={} new={}",
+                crate::status::now_ms(),
+                channel,
+                old_state,
+                new_state
+            ),
+        );
+    }
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(3);
+    let base_ms = 1_000u64 << exponent;
+    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 4);
+    Duration::from_millis(base_ms + jitter_ms)
+}
+
+fn next_reconnect_attempt(attempt: &mut u32) -> u32 {
+    *attempt = attempt.saturating_add(1);
+    *attempt
+}
+
+fn record_reconnect_failure(identity: &str, attempt: u32, stage: &str, reason: &str) {
+    crate::status::set_relay_state(false);
+    let disconnect_reason = if stage == "registration_rejected" {
+        "authorization_rejected"
+    } else {
+        "unexpected_socket_loss"
+    };
+    if crate::status::set_disconnect_reason_if_unknown(disconnect_reason) {
+        crate::session_debug::log(
+            identity,
+            &format!(
+                "[DISCONNECT TRACE] timestamp_ms={} stage=FIRST_FAILURE source={} reason={}",
+                crate::status::now_ms(), stage, disconnect_reason
+            ),
+        );
+    }
+    crate::session_debug::log(
+        identity,
+        &format!(
+            "[RECONNECT TRACE] timestamp_ms={} stage=ATTEMPT_FAILED attempt={} retry_limit=unbounded source={} reason={}",
+            crate::status::now_ms(), attempt, stage, reason
+        ),
+    );
+    crate::status::set_reconnect_state("Reconnecting", attempt, 0);
+    let delay = reconnect_delay(attempt);
+    crate::session_debug::log(
+        identity,
+        &format!(
+            "[RECONNECT TRACE] timestamp_ms={} stage=RETRY_SCHEDULED attempt={} retry_limit=unbounded delay_ms={}",
+            crate::status::now_ms(), attempt, delay.as_millis()
+        ),
+    );
+    thread::sleep(delay);
+}
+
 fn native_auth_trace(identity: &str, event: &str, detail: &str) {
     let timestamp_ms = current_time_millis();
     println!(
@@ -339,6 +412,33 @@ fn mark_session_disconnected(
     intentional_reconnect: bool,
     detail: &str,
 ) {
+    let lower_detail = detail.to_ascii_lowercase();
+    let (disconnect_reason, transport_lost) = if detail.contains("Type 99 from relay") {
+        ("remote_disconnect_ambiguous", false)
+    } else if ["read", "write", "socket", "eof"]
+        .iter()
+        .any(|needle| lower_detail.contains(needle))
+    {
+        ("unexpected_socket_loss", true)
+    } else {
+        ("unknown_termination", false)
+    };
+    if crate::status::set_disconnect_reason_if_unknown(disconnect_reason) {
+        crate::session_debug::log(
+            identity,
+            &format!(
+                "[DISCONNECT TRACE] timestamp_ms={} stage=FIRST_FAILURE source={} reason={} detail={}",
+                crate::status::now_ms(), function, disconnect_reason, detail
+            ),
+        );
+    }
+    if transport_lost {
+        log_health_transition(
+            identity,
+            "SESSION_END_TO_END",
+            crate::status::mark_heartbeat_lost(true, "native_socket_failure"),
+        );
+    }
     crate::session_debug::lifecycle(
         identity,
         "SESSION_END_REQUESTED",
@@ -361,6 +461,39 @@ fn mark_session_disconnected(
             detail,
         );
     }
+}
+
+fn mark_session_packet_read_failed(
+    identity: &str,
+    packet_type: u8,
+    stage: &str,
+    error: &std::io::Error,
+    is_connected: &AtomicBool,
+    is_in_session: &AtomicBool,
+) {
+    let detail = format!(
+        "packet_type={} stage={} read_exact failed: {:?}",
+        packet_type, stage, error
+    );
+    crate::session_debug::lifecycle(
+        identity,
+        "PACKET_READ_FAILED",
+        "session_input_reader",
+        "cloned_session_reader_stream",
+        Some(is_connected),
+        Some(is_in_session),
+        false,
+        &detail,
+    );
+    mark_session_disconnected(
+        identity,
+        "session_input_reader",
+        "cloned_session_reader_stream",
+        is_connected,
+        is_in_session,
+        false,
+        &detail,
+    );
 }
 
 // ============================================================
@@ -698,6 +831,22 @@ fn read_next_file_chunk<R: Read>(reader: &mut R, buffer: &mut [u8]) -> std::io::
     }
 }
 
+fn read_packet_payload<R: Read>(reader: &mut R, payload_len: usize) -> std::io::Result<Vec<u8>> {
+    let mut payload = vec![0u8; payload_len];
+    reader.read_exact(&mut payload)?;
+    Ok(payload)
+}
+
+fn discard_packet_bytes<R: Read>(reader: &mut R, mut remaining: usize) -> std::io::Result<()> {
+    let mut buffer = [0u8; 8192];
+    while remaining > 0 {
+        let chunk_len = remaining.min(buffer.len());
+        reader.read_exact(&mut buffer[..chunk_len])?;
+        remaining -= chunk_len;
+    }
+    Ok(())
+}
+
 fn validate_relative_transfer_path(path: &str) -> Result<PathBuf, String> {
     let normalized = path.replace('\\', "/");
     if normalized.is_empty()
@@ -775,43 +924,56 @@ fn create_session_transfer_file(
 }
 
 
-fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
-    let root_folder_name = root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "folder".to_string());
+fn is_transfer_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x400 != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 
-    fn visit(
-        root: &Path,
-        root_folder_name: &str,
-        current: &Path,
-        files: &mut Vec<(PathBuf, String)>,
-    ) -> std::io::Result<()> {
+fn should_create_empty_transfer_file(
+    current_transfer_matches: bool,
+    accepted: bool,
+    final_size: u64,
+    file_is_open: bool,
+) -> bool {
+    current_transfer_matches && accepted && final_size == 0 && !file_is_open
+}
+
+fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
+    fn visit(root: &Path, current: &Path, files: &mut Vec<(PathBuf, String)>) -> std::io::Result<()> {
         let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)?;
-            if metadata.file_type().is_symlink() {
+            if is_transfer_reparse_point(&metadata) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "Folder transfer does not follow symbolic links: {}",
+                        "Folder transfer does not follow symbolic links or reparse points: {}",
                         path.display()
                     ),
                 ));
             }
             if metadata.is_dir() {
-                visit(root, root_folder_name, &path, files)?;
+                visit(root, &path, files)?;
             } else if metadata.is_file() {
                 let relative = path.strip_prefix(root).map_err(|error| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
                 })?;
                 let relative_str = relative.to_string_lossy().replace('\\', "/");
-                let relative_prefixed = format!("{}/{}", root_folder_name, relative_str);
-                validate_relative_transfer_path(&relative_prefixed)
+                validate_relative_transfer_path(&relative_str)
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-                files.push((path, relative_prefixed));
+                files.push((path, relative_str));
             } else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -826,7 +988,7 @@ fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>
     }
 
     let mut files = Vec::new();
-    visit(root, &root_folder_name, root, &mut files)?;
+    visit(root, root, &mut files)?;
     let folder_name = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -842,6 +1004,7 @@ fn collect_transfer_files(root: &Path) -> std::io::Result<Vec<(PathBuf, String)>
 
 fn send_session_file(
     writer: &SyncSender<Vec<u8>>,
+    session_id: &str,
     source_path: &Path,
     relative_filename: &str,
 ) -> Result<(), String> {
@@ -852,13 +1015,27 @@ fn send_session_file(
         return Err("Transfer path is too long".to_string());
     }
 
-    let mut file =
-        File::open(source_path).map_err(|error| format!("Failed to open source file: {error}"))?;
-    let file_size = file
-        .metadata()
-        .map_err(|error| format!("Failed to read source file metadata: {error}"))?
-        .len();
     let transfer_id: u64 = rand::random();
+    let mut file = File::open(source_path).map_err(|error| {
+        crate::session_debug::log(
+            session_id,
+            &format!(
+                "[FILE SOURCE READ FAILED] session_id={} transfer_id={} side=B operation=File::open filename={} requested_bytes=0 actual_bytes=0 error_kind={:?} os_error={:?} error_message={}",
+                session_id, transfer_id, filename, error.kind(), error.raw_os_error(), error
+            ),
+        );
+        format!("Transfer {transfer_id}: failed to open source file: {error}")
+    })?;
+    let file_size = file.metadata().map_err(|error| {
+        crate::session_debug::log(
+            session_id,
+            &format!(
+                "[FILE SOURCE READ FAILED] session_id={} transfer_id={} side=B operation=File::metadata filename={} requested_bytes=0 actual_bytes=0 error_kind={:?} os_error={:?} error_message={}",
+                session_id, transfer_id, filename, error.kind(), error.raw_os_error(), error
+            ),
+        );
+        format!("Transfer {transfer_id}: failed to read source metadata: {error}")
+    })?.len();
     let mut offer = vec![20u8];
     offer.extend_from_slice(&transfer_id.to_be_bytes());
     offer.extend_from_slice(&file_size.to_be_bytes());
@@ -866,18 +1043,54 @@ fn send_session_file(
     offer.extend_from_slice(name_bytes);
 
     let response = crate::status::register_session_file_response(transfer_id);
+    crate::session_debug::log(
+        session_id,
+        &format!(
+            "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=OFFER_CREATED filename={} file_bytes={}",
+            session_id, transfer_id, filename, file_size
+        ),
+    );
     if writer.send(offer).is_err() {
         crate::status::clear_session_file_response(transfer_id);
+        crate::session_debug::log(
+            session_id,
+            &format!(
+                "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=OFFER_SEND_FAILED",
+                session_id, transfer_id
+            ),
+        );
         return Err(format!("Transfer {transfer_id}: offer send failed"));
     }
     println!(
         "[FILE TX START] direction=B->A transfer_id={} filename={} total_bytes={}",
         transfer_id, filename, file_size
     );
+    crate::session_debug::log(
+        session_id,
+        &format!(
+            "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=WAITING_FOR_APPROVAL timeout_ms=60000",
+            session_id, transfer_id
+        ),
+    );
 
     match response.recv_timeout(Duration::from_secs(60)) {
-        Ok(26) => {}
+        Ok(26) => {
+            crate::session_debug::log(
+                session_id,
+                &format!(
+                    "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=APPROVAL_RECEIVED decision=ALLOW",
+                    session_id, transfer_id
+                ),
+            );
+        }
         Ok(25) => {
+            crate::session_debug::log(
+                session_id,
+                &format!(
+                    "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=APPROVAL_RECEIVED decision=REJECT",
+                    session_id, transfer_id
+                ),
+            );
             crate::status::clear_session_file_response(transfer_id);
             return Err(format!("Transfer {transfer_id} was rejected"));
         }
@@ -888,6 +1101,13 @@ fn send_session_file(
             ));
         }
         Err(error) => {
+            crate::session_debug::log(
+                session_id,
+                &format!(
+                    "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=APPROVAL_WAIT_FAILED reason={}",
+                    session_id, transfer_id, error
+                ),
+            );
             crate::status::clear_session_file_response(transfer_id);
             return Err(format!(
                 "Transfer {transfer_id}: no acceptance response: {error}"
@@ -905,6 +1125,21 @@ fn send_session_file(
             Ok(Some(bytes_read)) => bytes_read,
             Err(error) => {
                 let message = format!("Failed to read source file: {error}");
+                crate::session_debug::log(
+                    session_id,
+                    &format!(
+                        "[FILE SOURCE READ FAILED] session_id={} transfer_id={} side=B operation=Read::read filename={} offset={} requested_bytes={} actual_bytes=0 file_size={} error_kind={:?} os_error={:?} error_message={}",
+                        session_id,
+                        transfer_id,
+                        filename,
+                        bytes_sent,
+                        buffer.len(),
+                        file_size,
+                        error.kind(),
+                        error.raw_os_error(),
+                        error
+                    ),
+                );
                 let _ = writer.send(make_file_error_packet(transfer_id, &message));
                 crate::status::clear_session_file_response(transfer_id);
                 return Err(format!("Transfer {transfer_id}: {message}"));
@@ -922,6 +1157,15 @@ fn send_session_file(
         }
         bytes_sent += bytes_read as u64;
         chunk_idx += 1;
+        if chunk_idx == 1 || chunk_idx % 32 == 0 {
+            crate::session_debug::log(
+                session_id,
+                &format!(
+                    "[FILE TRACE] session_id={} transfer_id={} side=B direction=B_TO_A stage=CHUNK_SENT chunk_index={} chunks_sent={} cumulative_bytes={}",
+                    session_id, transfer_id, chunk_idx - 1, chunk_idx, bytes_sent
+                ),
+            );
+        }
         thread::sleep(Duration::from_millis(10));
     }
 
@@ -939,6 +1183,17 @@ fn send_session_file(
     end_packet.extend_from_slice(&transfer_id.to_be_bytes());
     end_packet.extend_from_slice(&file_size.to_be_bytes());
     end_packet.extend_from_slice(&hash);
+    crate::session_debug::log(
+        session_id,
+        &format!(
+            "[FILE TRACE] session_id={} transfer_id={} side=B direction=B_TO_A stage=END_SENT chunks={} total_bytes={} sha256={}",
+            session_id,
+            transfer_id,
+            chunk_idx,
+            bytes_sent,
+            hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        ),
+    );
     if writer.send(end_packet).is_err() {
         crate::status::clear_session_file_response(transfer_id);
         return Err(format!(
@@ -1044,17 +1299,62 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
     let global_status = Arc::new(Mutex::new(crate::status::AgentStatus::new(&system_id, "Windows Device")));
     backend.start_heartbeat_thread(global_status.clone());
 
-    let mut backoff_secs = 1;
+    let mut reconnect_attempt = 0u32;
+    let mut authorization_required = false;
     let mut intentional_reconnect = false;
     let is_aws_relay = !relay_addr.starts_with("192.168.") && !relay_addr.starts_with("10.") && !relay_addr.starts_with("127.") && !relay_addr.starts_with("localhost") && !relay_addr.starts_with("172.");
 
     loop {
+        if authorization_required {
+            crate::status::set_reconnect_state(
+                "Disconnected",
+                reconnect_attempt,
+                MAX_RECONNECT_ATTEMPTS,
+            );
+            crate::session_debug::log(
+                &system_id,
+                &format!(
+                    "[RECONNECT TRACE] timestamp_ms={} stage=WAITING_FOR_MANUAL_REAUTH attempt={}/{}",
+                    crate::status::now_ms(), reconnect_attempt, MAX_RECONNECT_ATTEMPTS
+                ),
+            );
+            while !crate::status::take_manual_reconnect_request() {
+                thread::sleep(Duration::from_millis(250));
+            }
+            crate::session_debug::log(
+                &system_id,
+                &format!(
+                    "[RECONNECT TRACE] timestamp_ms={} stage=MANUAL_REAUTH_REQUESTED",
+                    crate::status::now_ms()
+                ),
+            );
+            authorization_required = false;
+            reconnect_attempt = 0;
+            crate::status::set_reconnect_state(
+                "Reconnecting",
+                reconnect_attempt,
+                MAX_RECONNECT_ATTEMPTS,
+            );
+        }
+
         let reconnect_was_requested = intentional_reconnect;
         if intentional_reconnect {
             intentional_reconnect = false;
-        } else {
-            // sleep happens at the end of the loop
         }
+        crate::status::set_reconnect_state(
+            "Reconnecting",
+            reconnect_attempt.saturating_add(1),
+            0,
+        );
+        crate::session_debug::log(
+            &system_id,
+            &format!(
+                "[RECONNECT TRACE] timestamp_ms={} stage=ATTEMPT_STARTED attempt={} retry_limit=unbounded intentional={}",
+                crate::status::now_ms(),
+                reconnect_attempt.saturating_add(1),
+                reconnect_was_requested
+            ),
+        );
 
         agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
         crate::session_debug::lifecycle(
@@ -1112,8 +1412,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                 println!("[RELAY][DISCONNECT] system_id={}", system_id);
                 println!("[RELAY][DISCONNECT] socket_error={:?}", e);
                 println!("[RELAY][DISCONNECT] remote_closed=false");
-                thread::sleep(Duration::from_secs(backoff_secs));
-                backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+                next_reconnect_attempt(&mut reconnect_attempt);
+                record_reconnect_failure(
+                    &system_id,
+                    reconnect_attempt,
+                    "tcp_connect",
+                    &format!("error_kind={:?}", e.kind()),
+                );
                 continue;
             }
         };
@@ -1140,12 +1445,17 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         register_pkt.push(1u8);
         register_pkt.extend_from_slice(system_id.as_bytes());
 
-        if stream.write_all(&register_pkt).is_err() {
+        if let Err(error) = stream.write_all(&register_pkt) {
             crate::session_debug::log(&system_id, "B_REGISTER_SEND_FAILED");
             eprintln!("[RELAY] Failed to send registration packet");
             println!("[SESSION STATE] OFFLINE");
-            thread::sleep(Duration::from_secs(backoff_secs));
-            backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+            next_reconnect_attempt(&mut reconnect_attempt);
+            record_reconnect_failure(
+                &system_id,
+                reconnect_attempt,
+                "registration_write",
+                &format!("error_kind={:?}", error.kind()),
+            );
             continue;
         }
         crate::session_debug::log(
@@ -1154,12 +1464,17 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         );
 
         let mut ack = [0u8; 1];
-        if stream.read_exact(&mut ack).is_err() {
+        if let Err(error) = stream.read_exact(&mut ack) {
             crate::session_debug::log(&system_id, "B_REGISTER_ACK_READ_FAILED");
             eprintln!("[RELAY] Registration failed or unacknowledged by relay");
             println!("[SESSION STATE] OFFLINE");
-            thread::sleep(Duration::from_secs(backoff_secs));
-            backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+            next_reconnect_attempt(&mut reconnect_attempt);
+            record_reconnect_failure(
+                &system_id,
+                reconnect_attempt,
+                "registration_ack_read",
+                &format!("error_kind={:?}", error.kind()),
+            );
             continue;
         }
         crate::session_debug::log(
@@ -1169,12 +1484,36 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         if ack[0] != 1 {
             eprintln!("[RELAY] Registration failed or unacknowledged by relay");
             println!("[SESSION STATE] OFFLINE");
-            thread::sleep(Duration::from_secs(backoff_secs));
-            backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+            reconnect_attempt = MAX_RECONNECT_ATTEMPTS;
+            authorization_required = true;
+            crate::status::set_disconnect_reason_if_unknown("authorization_rejected");
+            crate::status::set_relay_state(false);
+            crate::status::set_reconnect_state(
+                "Disconnected",
+                MAX_RECONNECT_ATTEMPTS,
+                MAX_RECONNECT_ATTEMPTS,
+            );
+            crate::session_debug::log(
+                &system_id,
+                &format!(
+                    "[RECONNECT TRACE] timestamp_ms={} stage=ATTEMPT_FAILED source=registration_rejected reason=authorization_rejected",
+                    crate::status::now_ms()
+                ),
+            );
+            crate::session_debug::log(
+                &system_id,
+                &format!(
+                    "[RECONNECT TRACE] timestamp_ms={} stage=RETRY_CANCELLED reason=authorization_rejected manual_retry_required=true",
+                    crate::status::now_ms()
+                ),
+            );
             continue;
         }
 
         println!("[RELAY] Registration ACK received");
+        crate::status::set_relay_state(true);
+        crate::status::set_reconnect_state("Healthy", 0, MAX_RECONNECT_ATTEMPTS);
+        reconnect_attempt = 0;
         crate::session_debug::log(
             &system_id,
             "STATE_CHANGE old=CONNECTING new=CONNECTED",
@@ -1184,12 +1523,18 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         agent_log!("[AGENT] ACTUAL DEVICE ID = {}", id_str);
 
         println!("[SESSION STATE] ONLINE");
-        backoff_secs = 1;
 
         let idle_write_stream = match stream.try_clone() {
             Ok(s) => Arc::new(Mutex::new(s)),
             Err(e) => {
                 eprintln!("[Agent] Failed to clone stream for writer: {:?}", e);
+                next_reconnect_attempt(&mut reconnect_attempt);
+                record_reconnect_failure(
+                    &system_id,
+                    reconnect_attempt,
+                    "relay_stream_clone",
+                    &format!("error_kind={:?}", e.kind()),
+                );
                 continue;
             }
         };
@@ -1198,36 +1543,128 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         let is_in_session = Arc::new(AtomicBool::new(false));
         stream.is_in_session = Some(Arc::clone(&is_in_session));
 
-        // Heartbeat thread: Sends Type 14 to relay every 5s during idle state
+        // Idle Type 14 probes measure this agent's TCP path to the relay.
         let hb_write = Arc::clone(&idle_write_stream);
         let hb_running = Arc::clone(&is_running_conn);
         let hb_in_session = Arc::clone(&is_in_session);
         let heartbeat_identity = system_id.clone();
+        let idle_heartbeat = Arc::new(Mutex::new(crate::status::HeartbeatTracker::default()));
+        let idle_heartbeat_sender = Arc::clone(&idle_heartbeat);
 
         let heartbeat_handle = thread::spawn(move || {
+            let mut previous_id = 0u64;
+            let mut next_ping = Instant::now();
             while hb_running.load(Ordering::SeqCst) {
                 if !hb_in_session.load(Ordering::SeqCst) {
-                    let mut ping_pkt = Vec::with_capacity(9);
-                    ping_pkt.push(14u8);
-                    ping_pkt.extend_from_slice(&current_time_millis().to_be_bytes());
+                    let now = Instant::now();
+                    let timed_out = idle_heartbeat_sender
+                        .lock()
+                        .ok()
+                        .and_then(|mut tracker| tracker.timeout(now, HEARTBEAT_TIMEOUT));
+                    if let Some(probe_id) = timed_out {
+                        crate::session_debug::log(
+                            &heartbeat_identity,
+                            &format!(
+                                "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=TIMEOUT reason=response_timeout",
+                                crate::status::now_ms(), probe_id
+                            ),
+                        );
+                        log_health_transition(
+                            &heartbeat_identity,
+                            "ENDPOINT_TO_RELAY",
+                            crate::status::record_heartbeat_missed(false, "response_timeout"),
+                        );
+                    }
 
-                    if let Ok(mut writer) = hb_write.lock() {
-                        let _ = writer.set_write_timeout(Some(Duration::from_secs(2)));
-                        if let Err(error) = writer.write_all(&ping_pkt) {
-                            crate::session_debug::lifecycle(
+                    if now >= next_ping {
+                        let probe_id = next_heartbeat_id(&mut previous_id);
+                        let scheduled = idle_heartbeat_sender
+                            .lock()
+                            .map(|mut tracker| tracker.schedule(probe_id))
+                            .unwrap_or(false);
+                        if scheduled {
+                            crate::session_debug::log(
                                 &heartbeat_identity,
-                                "SOCKET_WRITE_ERROR",
-                                "relay_heartbeat",
-                                "cloned_idle_heartbeat_stream",
-                                None,
-                                Some(hb_in_session.as_ref()),
-                                false,
-                                &format!("Type 14 heartbeat write_all failed: {:?}", error),
+                                &format!(
+                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=SCHEDULED type=14 interval_ms={}",
+                                    crate::status::now_ms(), probe_id, HEARTBEAT_INTERVAL.as_millis()
+                                ),
                             );
+                            let mut ping_pkt = Vec::with_capacity(9);
+                            ping_pkt.push(14u8);
+                            ping_pkt.extend_from_slice(&probe_id.to_be_bytes());
+
+                            let mut writer = match hb_write.lock() {
+                                Ok(writer) => writer,
+                                Err(_) => {
+                                    if let Ok(mut tracker) = idle_heartbeat_sender.lock() {
+                                        tracker.cancel(probe_id);
+                                    }
+                                    continue;
+                                }
+                            };
+                            if hb_in_session.load(Ordering::SeqCst) {
+                                if let Ok(mut tracker) = idle_heartbeat_sender.lock() {
+                                    tracker.cancel(probe_id);
+                                }
+                                crate::session_debug::log(
+                                    &heartbeat_identity,
+                                    &format!(
+                                        "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=CANCELLED reason=session_started",
+                                        crate::status::now_ms(), probe_id
+                                    ),
+                                );
+                                continue;
+                            }
+                            let _ = writer.set_write_timeout(Some(Duration::from_secs(2)));
+                            let write_result = writer.write_all(&ping_pkt);
+                            drop(writer);
+                            match write_result {
+                                Ok(()) => {
+                                    if let Ok(mut tracker) = idle_heartbeat_sender.lock() {
+                                        tracker.mark_sent(probe_id, Instant::now());
+                                    }
+                                    crate::session_debug::log(
+                                        &heartbeat_identity,
+                                        &format!(
+                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=SENT type=14 packet_bytes=9",
+                                            crate::status::now_ms(), probe_id
+                                        ),
+                                    );
+                                }
+                                Err(error) => {
+                                    if let Ok(mut tracker) = idle_heartbeat_sender.lock() {
+                                        tracker.cancel(probe_id);
+                                    }
+                                    crate::session_debug::log(
+                                        &heartbeat_identity,
+                                        &format!(
+                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=WRITE_ERROR error_kind={:?}",
+                                            crate::status::now_ms(), probe_id, error.kind()
+                                        ),
+                                    );
+                                    log_health_transition(
+                                        &heartbeat_identity,
+                                        "ENDPOINT_TO_RELAY",
+                                        crate::status::record_heartbeat_missed(false, "socket_write_error"),
+                                    );
+                                    crate::session_debug::lifecycle(
+                                        &heartbeat_identity,
+                                        "SOCKET_WRITE_ERROR",
+                                        "relay_heartbeat",
+                                        "cloned_idle_heartbeat_stream",
+                                        None,
+                                        Some(hb_in_session.as_ref()),
+                                        false,
+                                        &format!("Type 14 write_all failed: {:?}", error.kind()),
+                                    );
+                                }
+                            }
+                            next_ping = Instant::now() + HEARTBEAT_INTERVAL;
                         }
                     }
                 }
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_millis(100));
             }
         });
 
@@ -1244,8 +1681,54 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                             match stream.read_exact(&mut time_buf) {
                                 Ok(()) => {
-                                    println!("[HEARTBEAT] -> {}", system_id);
-                                    println!("[HEARTBEAT] <- ACK");
+                                    let probe_id = u64::from_be_bytes(time_buf);
+                                    let received_at = Instant::now();
+                                    let outcome = idle_heartbeat
+                                        .lock()
+                                        .map(|mut tracker| tracker.receive(probe_id, received_at))
+                                        .unwrap_or(crate::status::HeartbeatReceive::Stale);
+                                    match outcome {
+                                        crate::status::HeartbeatReceive::Matched { rtt_ms } => {
+                                            crate::session_debug::log(
+                                                &system_id,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=RESPONSE_RECEIVED packet_type=14",
+                                                    crate::status::now_ms(), probe_id
+                                                ),
+                                            );
+                                            crate::session_debug::log(
+                                                &system_id,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=RTT_CALCULATED rtt_ms={}",
+                                                    crate::status::now_ms(), probe_id, rtt_ms
+                                                ),
+                                            );
+                                            log_health_transition(
+                                                &system_id,
+                                                "ENDPOINT_TO_RELAY",
+                                                crate::status::record_heartbeat_success(false, rtt_ms),
+                                            );
+                                            println!("[HEARTBEAT] endpoint_to_relay_rtt_ms={}", rtt_ms);
+                                        }
+                                        crate::status::HeartbeatReceive::Stale => {
+                                            crate::session_debug::log(
+                                                &system_id,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=STALE_OR_UNMATCHED_RESPONSE",
+                                                    crate::status::now_ms(), probe_id
+                                                ),
+                                            );
+                                        }
+                                        crate::status::HeartbeatReceive::PeerRequest => {
+                                            crate::session_debug::log(
+                                                &system_id,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=UNEXPECTED_PEER_PROBE",
+                                                    crate::status::now_ms(), probe_id
+                                                ),
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(error) => {
                                     if error.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -1354,6 +1837,22 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             println!("[STREAM] Starting H.264 encoder");
 
                             is_in_session.store(true, Ordering::SeqCst);
+                            let retired_idle_probe_id = idle_heartbeat
+                                .lock()
+                                .ok()
+                                .and_then(|mut tracker| tracker.cancel_pending());
+                            if let Some(probe_id) = retired_idle_probe_id {
+                                crate::session_debug::log(
+                                    &system_id,
+                                    &format!(
+                                        "[PING TRACE] timestamp_ms={} trace_id={} channel=ENDPOINT_TO_RELAY stage=CANCELLED reason=session_handoff",
+                                        crate::status::now_ms(), probe_id
+                                    ),
+                                );
+                            }
+                            if let Ok(writer_guard) = idle_write_stream.lock() {
+                                drop(writer_guard);
+                            }
 
                             // The approval byte is a one-byte ACK in the type-3 auth flow and must be
                             // written on the active control socket, not via the idle heartbeat writer.
@@ -1469,6 +1968,19 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 if let Err(e) = stream.set_nodelay(true) {
                                     eprintln!("[Agent] Warning: Could not set TCP_NODELAY: {}", e);
                                 }
+                                let heartbeat_shutdown_stream = match stream.try_clone() {
+                                    Ok(stream) => Some(stream),
+                                    Err(error) => {
+                                        crate::session_debug::log(
+                                            &system_id,
+                                            &format!(
+                                                "[PING TRACE] timestamp_ms={} channel=SESSION_END_TO_END stage=SHUTDOWN_CLONE_FAILED error_kind={:?}",
+                                                crate::status::now_ms(), error.kind()
+                                            ),
+                                        );
+                                        None
+                                    }
+                                };
 
                                 // TCP INPUT
                                 let read_stream = match stream.try_clone() {
@@ -1540,7 +2052,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let video_recovery_needed = Arc::new(AtomicBool::new(false));
                             let video_recovery_capture = Arc::clone(&video_recovery_needed);
                             
-                            let (out_tx, out_rx) = sync_channel::<Vec<u8>>(512);
+                            let (out_tx, out_rx) = sync_channel::<Vec<u8>>(4);
                             let write_stream = out_tx.clone();
                             let write_tcp = match stream.try_clone() {
                                 Ok(s) => {
@@ -1612,6 +2124,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let diagnostic_system_id = system_id.clone();
                             let diagnostic_connected = Arc::clone(&is_connected);
                             let diagnostic_in_session = Arc::clone(&is_in_session);
+                            let mut session_heartbeat_tracker = crate::status::HeartbeatTracker::default();
+                            if let Some(probe_id) = retired_idle_probe_id {
+                                session_heartbeat_tracker.remember_stale(probe_id);
+                            }
+                            let session_heartbeat = Arc::new(Mutex::new(session_heartbeat_tracker));
+                            let session_heartbeat_writer = Arc::clone(&session_heartbeat);
+                            let session_heartbeat_input = Arc::clone(&session_heartbeat);
+                            let session_heartbeat_ping = Arc::clone(&session_heartbeat);
 
                             let writer_handle = thread::spawn(move || {
                                 crate::session_debug::lifecycle(
@@ -1649,6 +2169,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 // Counters captured by the closure below.
                                 let mut video_trace_count = 0u64;
                                 let mut diagnostic_video_count = 0u64;
+                                let mut outbound_chat_message_id = 0u64;
 
                                 let mut write_packet = |packet: Vec<u8>| -> bool {
                                     if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
@@ -1842,9 +2363,185 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         // Non-video packets (control, audio, clipboard, file, ping):
                                         // use the original single write_all — they are small and
                                         // latency-sensitive; chunking adds no benefit.
+                                        let packet_type = packet.first().copied().unwrap_or(255);
+                                        let direction_byte = packet.get(1).copied().unwrap_or(255);
+                                        let payload_bytes = if packet_type == 16 && packet.len() >= 4 {
+                                            u16::from_be_bytes([packet[2], packet[3]]) as usize
+                                        } else {
+                                            0
+                                        };
+                                        let chat_message_id = if packet_type == 16 {
+                                            outbound_chat_message_id = outbound_chat_message_id.saturating_add(1);
+                                            Some(format!("CHAT-B-TO-A-{outbound_chat_message_id:08}"))
+                                        } else {
+                                            None
+                                        };
+                                        let packet_trace_id = matches!(packet_type, 16 | 20..=27)
+                                            .then(|| crate::session_debug::next_packet_trace_id(packet_type));
+                                        let heartbeat_id = if packet_type == 14 && packet.len() == 9 {
+                                            Some(u64::from_be_bytes(packet[1..9].try_into().unwrap()))
+                                        } else {
+                                            None
+                                        };
+                                        let transfer_id = if (20..=27).contains(&packet_type) && packet.len() >= 9 {
+                                            u64::from_be_bytes(packet[1..9].try_into().unwrap()).to_string()
+                                        } else {
+                                            "n/a".to_string()
+                                        };
+                                        let write_started = Instant::now();
+                                        if let Some(probe_id) = heartbeat_id {
+                                            crate::session_debug::log(
+                                                &diagnostic_system_id,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=SOCKET_WRITE_BEGIN type=14 direction=B_TO_A packet_bytes=9",
+                                                    crate::status::now_ms(), probe_id
+                                                ),
+                                            );
+                                            if let Ok(mut tracker) = session_heartbeat_writer.lock() {
+                                                tracker.mark_sent(probe_id, write_started);
+                                            }
+                                        }
+                                        if let Some(trace_id) = packet_trace_id.as_deref() {
+                                            crate::session_debug::log(
+                                                &diagnostic_system_id,
+                                                &format!(
+                                                    "[{} TRACE] trace_id={} side=B direction=B_TO_A stage=SOCKET_WRITE_BEGIN type={} transfer_id={} length={}",
+                                                    if packet_type == 16 { "CHAT" } else { "FILE" },
+                                                    trace_id,
+                                                    packet_type,
+                                                    transfer_id,
+                                                    packet.len()
+                                                ),
+                                            );
+                                        }
+                                        if packet_type == 16 || packet_type == 99 {
+                                            crate::session_debug::log(
+                                                &diagnostic_system_id,
+                                                &format!(
+                                                    "[TYPE{} TRACE] component=HOST direction=SEND source=session_writer direction_byte={} payload_bytes={} packet_bytes={} message_id={}",
+                                                    packet_type,
+                                                    direction_byte,
+                                                    payload_bytes,
+                                                    packet.len(),
+                                                    chat_message_id.as_deref().unwrap_or("n/a")
+                                                ),
+                                            );
+                                        }
+                                        if let Some(message_id) = chat_message_id.as_deref() {
+                                            crate::session_debug::log(
+                                                &diagnostic_system_id,
+                                                &format!(
+                                                    "[CHAT TRACE] message_id={} session_id={} side=B direction=B_TO_A stage=SOCKET_WRITE_BEGIN type=16 payload_bytes={} packet_bytes={}",
+                                                    message_id, diagnostic_system_id, payload_bytes, packet.len()
+                                                ),
+                                            );
+                                        }
                                         match write_tcp.write_all(&packet) {
-                                            Ok(_) => true,
+                                            Ok(_) => {
+                                                if let Some(message_id) = chat_message_id.as_deref() {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[CHAT TRACE] message_id={} session_id={} side=B direction=B_TO_A stage=SOCKET_WRITE_COMPLETE type=16 payload_bytes={} packet_bytes={} write_ms={}",
+                                                            message_id,
+                                                            diagnostic_system_id,
+                                                            payload_bytes,
+                                                            packet.len(),
+                                                            write_started.elapsed().as_millis()
+                                                        ),
+                                                    );
+                                                }
+                                                if let Some(probe_id) = heartbeat_id {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=SOCKET_WRITE_COMPLETE type=14 direction=B_TO_A write_ms={}",
+                                                            crate::status::now_ms(),
+                                                            probe_id,
+                                                            write_started.elapsed().as_millis()
+                                                        ),
+                                                    );
+                                                }
+                                                if let Some(trace_id) = packet_trace_id.as_deref() {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[{} TRACE] trace_id={} side=B direction=B_TO_A stage=SOCKET_WRITE_COMPLETE type={} transfer_id={} bytes_written={}",
+                                                            if packet_type == 16 { "CHAT" } else { "FILE" },
+                                                            trace_id,
+                                                            packet_type,
+                                                            transfer_id,
+                                                            packet.len()
+                                                        ),
+                                                    );
+                                                }
+                                                if packet_type == 16 || packet_type == 99 {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[TYPE{} TRACE] component=HOST direction=SEND_COMPLETE source=session_writer direction_byte={} payload_bytes={} packet_bytes={}",
+                                                            packet_type,
+                                                            direction_byte,
+                                                            payload_bytes,
+                                                            packet.len()
+                                                        ),
+                                                    );
+                                                }
+                                                true
+                                            }
                                             Err(e) => {
+                                                if let Some(message_id) = chat_message_id.as_deref() {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[CHAT TRACE] message_id={} session_id={} side=B direction=B_TO_A stage=SOCKET_WRITE_ERROR type=16 payload_bytes={} packet_bytes={} error_kind={:?}",
+                                                            message_id,
+                                                            diagnostic_system_id,
+                                                            payload_bytes,
+                                                            packet.len(),
+                                                            e.kind()
+                                                        ),
+                                                    );
+                                                }
+                                                if let Some(probe_id) = heartbeat_id {
+                                                    if let Ok(mut tracker) = session_heartbeat_writer.lock() {
+                                                        tracker.cancel(probe_id);
+                                                    }
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=SOCKET_WRITE_ERROR error_kind={:?}",
+                                                            crate::status::now_ms(), probe_id, e.kind()
+                                                        ),
+                                                    );
+                                                }
+                                                if let Some(trace_id) = packet_trace_id.as_deref() {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[{} TRACE] trace_id={} side=B direction=B_TO_A stage=SOCKET_WRITE_ERROR type={} transfer_id={} length={} os_error={:?}",
+                                                            if packet_type == 16 { "CHAT" } else { "FILE" },
+                                                            trace_id,
+                                                            packet_type,
+                                                            transfer_id,
+                                                            packet.len(),
+                                                            e
+                                                        ),
+                                                    );
+                                                }
+                                                if packet_type == 16 || packet_type == 99 {
+                                                    crate::session_debug::log(
+                                                        &diagnostic_system_id,
+                                                        &format!(
+                                                            "[TYPE{} TRACE] component=HOST direction=SEND_FAILED source=session_writer direction_byte={} payload_bytes={} packet_bytes={} reason={:?}",
+                                                            packet_type,
+                                                            direction_byte,
+                                                            payload_bytes,
+                                                            packet.len(),
+                                                            e
+                                                        ),
+                                                    );
+                                                }
                                                 crate::session_debug::lifecycle(
                                                     &diagnostic_system_id,
                                                     "SOCKET_WRITE_ERROR",
@@ -1902,12 +2599,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     let mut sent_control = false;
                                     let mut error = false;
 
-                                    // Drain all available control/audio packets first (high priority)
-                                    while let Ok(packet) = out_rx.try_recv() {
+                                    // Keep control traffic responsive without letting a sustained
+                                    // file transfer starve the live video queue.
+                                    if let Ok(packet) = out_rx.try_recv() {
                                         sent_control = true;
                                         if !write_packet(packet) {
                                             error = true;
-                                            break;
                                         }
                                     }
                                     if error { break; }
@@ -1960,6 +2657,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let write_stream_audio = write_stream.clone();
                             let write_stream_ping = write_stream.clone();
                             let write_stream_file = write_stream.clone();
+                            let file_session_id = system_id.clone();
 
                             let is_conn_file = Arc::clone(&is_connected);
                             thread::spawn(move || {
@@ -1991,6 +2689,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         for (source_path, relative_name) in transfers {
                                                             if let Err(error) = send_session_file(
                                                                 &write_stream_file,
+                                                                &file_session_id,
                                                                 &source_path,
                                                                 &relative_name,
                                                             ) {
@@ -2042,6 +2741,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let input_identity = system_id.clone();
                             let input_connected = Arc::clone(&is_connected);
                             let input_in_session = Arc::clone(&is_in_session);
+                            let input_heartbeat = session_heartbeat_input;
 
                             // INPUT THREAD
                             let input_handle = thread::spawn(move || {
@@ -2067,7 +2767,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let mut total_file_size: u64 = 0;
                                 let mut received_bytes: u64 = 0;
                                 let mut file_hasher = Sha256::new();
-                                let mut chat_packet_diagnostic_logged = false;
+                                let mut inbound_chat_message_id = 0u64;
                                 let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
                                 let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
                                 let canonical_drop_dir = fs::create_dir_all(&drop_dir)
@@ -2101,6 +2801,21 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         );
                                         break;
                                     }
+                                    let packet_trace_id = if matches!(pkt_type_buf[0], 16 | 20..=27) {
+                                        let trace_id = crate::session_debug::next_packet_trace_id(pkt_type_buf[0]);
+                                        crate::session_debug::log(
+                                            &input_identity,
+                                            &format!(
+                                                "[{} TRACE] trace_id={} side=B direction=A_TO_B stage=SOCKET_READ_BEGIN type={}",
+                                                if pkt_type_buf[0] == 16 { "CHAT" } else { "FILE" },
+                                                trace_id,
+                                                pkt_type_buf[0]
+                                            ),
+                                        );
+                                        Some(trace_id)
+                                    } else {
+                                        None
+                                    };
 
                                     match pkt_type_buf[0] {
                                         0..=10 => {
@@ -2265,15 +2980,64 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         12 => {
                                             let mut len_buf = [0u8; 4];
-                                            if read_stream.read_exact(&mut len_buf).is_err() {
+                                            if let Err(error) = read_stream.read_exact(&mut len_buf) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    12,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
                                                 break;
                                             }
                                             let len = u32::from_be_bytes(len_buf) as usize;
-                                            if len > 10 * 1024 * 1024 {
+                                            if len > MAX_CLIPBOARD_PACKET_BYTES {
+                                                if len <= MAX_RECOVERABLE_PACKET_DISCARD_BYTES {
+                                                    if let Err(error) = discard_packet_bytes(&mut read_stream, len) {
+                                                        mark_session_packet_read_failed(
+                                                            &input_identity,
+                                                            12,
+                                                            "oversized_payload",
+                                                            &error,
+                                                            input_connected.as_ref(),
+                                                            input_in_session.as_ref(),
+                                                        );
+                                                        break;
+                                                    }
+                                                    crate::session_debug::log(
+                                                        &input_identity,
+                                                        &format!(
+                                                            "[CLIPBOARD RX TRACE] packet_type=12 payload_bytes={} max_payload_bytes={} result=discarded reason=oversized",
+                                                            len, MAX_CLIPBOARD_PACKET_BYTES
+                                                        ),
+                                                    );
+                                                    continue;
+                                                }
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    &format!(
+                                                        "TYPE12 clipboard length {} exceeds the safe discard limit {}",
+                                                        len, MAX_RECOVERABLE_PACKET_DISCARD_BYTES
+                                                    ),
+                                                );
                                                 break;
                                             }
                                             let mut text_buf = vec![0u8; len];
-                                            if read_stream.read_exact(&mut text_buf).is_err() {
+                                            if let Err(error) = read_stream.read_exact(&mut text_buf) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    12,
+                                                    "payload",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
                                                 break;
                                             }
                                             if let Ok(text) = String::from_utf8(text_buf) {
@@ -2288,41 +3052,186 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         14 => {
                                             let mut time_buf = [0u8; 8];
-                                            if read_stream.read_exact(&mut time_buf).is_err() {
+                                            if let Err(error) = read_stream.read_exact(&mut time_buf) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    14,
+                                                    "heartbeat_timestamp",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
                                                 break;
                                             }
-                                            let sent_time = u64::from_be_bytes(time_buf);
-                                            let now = current_time_millis();
-                                            if now >= sent_time {
-                                                current_rtt_in.store(now - sent_time, Ordering::SeqCst);
+                                            let probe_id = u64::from_be_bytes(time_buf);
+                                            let received_at = Instant::now();
+                                            let outcome = input_heartbeat
+                                                .lock()
+                                                .map(|mut tracker| tracker.receive(probe_id, received_at))
+                                                .unwrap_or(crate::status::HeartbeatReceive::Stale);
+                                            match outcome {
+                                                crate::status::HeartbeatReceive::Matched { rtt_ms } => {
+                                                    current_rtt_in.store(rtt_ms, Ordering::SeqCst);
+                                                    crate::session_debug::log(
+                                                        &input_identity,
+                                                        &format!(
+                                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=RESPONSE_RECEIVED type=14 direction=A_TO_B",
+                                                            crate::status::now_ms(), probe_id
+                                                        ),
+                                                    );
+                                                    crate::session_debug::log(
+                                                        &input_identity,
+                                                        &format!(
+                                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=RTT_CALCULATED rtt_ms={}",
+                                                            crate::status::now_ms(), probe_id, rtt_ms
+                                                        ),
+                                                    );
+                                                    log_health_transition(
+                                                        &input_identity,
+                                                        "SESSION_END_TO_END",
+                                                        crate::status::record_heartbeat_success(true, rtt_ms),
+                                                    );
+                                                }
+                                                crate::status::HeartbeatReceive::Stale => {
+                                                    crate::session_debug::log(
+                                                        &input_identity,
+                                                        &format!(
+                                                            "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=STALE_RESPONSE",
+                                                            crate::status::now_ms(), probe_id
+                                                        ),
+                                                    );
+                                                }
+                                                crate::status::HeartbeatReceive::PeerRequest => {
+                                                    let mut echo = Vec::with_capacity(9);
+                                                    echo.push(14);
+                                                    echo.extend_from_slice(&time_buf);
+                                                    if write_stream_input.send(echo).is_ok() {
+                                                        crate::session_debug::log(
+                                                            &input_identity,
+                                                            &format!(
+                                                                "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=ECHO_QUEUED type=14 direction=A_TO_B packet_bytes=9",
+                                                                crate::status::now_ms(), probe_id
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        crate::session_debug::log(
+                                                            &input_identity,
+                                                            &format!(
+                                                                "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=ECHO_QUEUE_ERROR",
+                                                                crate::status::now_ms(), probe_id
+                                                            ),
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
 
                                         16 => {
                                             let mut meta = [0u8; 3];
-                                            if read_stream.read_exact(&mut meta).is_err() {
+                                            if let Err(error) = read_stream.read_exact(&mut meta) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    16,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
                                                 break;
                                             }
                                             let payload_size = u16::from_be_bytes([meta[1], meta[2]]) as usize;
-                                            let mut msg_bytes = vec![0u8; payload_size];
-                                            if read_stream.read_exact(&mut msg_bytes).is_err() {
-                                                break;
+                                            let msg_bytes = match read_packet_payload(&mut read_stream, payload_size) {
+                                                Ok(payload) => payload,
+                                                Err(error) => {
+                                                    mark_session_packet_read_failed(
+                                                        &input_identity,
+                                                        16,
+                                                        "payload",
+                                                        &error,
+                                                        input_connected.as_ref(),
+                                                        input_in_session.as_ref(),
+                                                    );
+                                                    break;
+                                                }
+                                            };
+                                            inbound_chat_message_id = inbound_chat_message_id.saturating_add(1);
+                                            let message_id = format!("CHAT-A-TO-B-{inbound_chat_message_id:08}");
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[CHAT TRACE] trace_id={} message_id={} session_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type=16 component=HOST direction_byte={} payload_bytes={} packet_bytes={} result=framing_valid",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    message_id,
+                                                    input_identity,
+                                                    meta[0],
+                                                    payload_size,
+                                                    4 + payload_size
+                                                ),
+                                            );
+                                            if meta[0] != 0 {
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[TYPE16 TRACE] component=HOST direction=RECV_REJECTED source=session_input_reader direction_byte={} expected_direction_byte=0 payload_bytes={} reason=unexpected_direction",
+                                                        meta[0], payload_size
+                                                    ),
+                                                );
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[CHAT TRACE] message_id={} session_id={} side=B direction=A_TO_B stage=RECEIVE_REJECTED type=16 reason=unexpected_direction",
+                                                        message_id, input_identity
+                                                    ),
+                                                );
+                                                continue;
                                             }
-                                            if !chat_packet_diagnostic_logged {
-                                                println!("[B CHAT] receive type=16 direction={} payload_size={} total_size={}", meta[0], payload_size, 4 + payload_size);
-                                                chat_packet_diagnostic_logged = true;
+                                            if payload_size == 0 {
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    "[TYPE16 TRACE] component=HOST direction=RECV_REJECTED source=session_input_reader payload_bytes=0 reason=empty_message",
+                                                );
+                                                continue;
                                             }
+                                            println!("[B CHAT] session_id={} message_id={} receive type=16 direction={} payload_size={} total_size={}", input_identity, message_id, meta[0], payload_size, 4 + payload_size);
                                             match String::from_utf8(msg_bytes) {
                                                 Ok(text) => {
-                                                    println!("\n[Chat from Remote Viewer]: {}", text);
-                                                    if let Err(error) = crate::status::push_session_chat(text, false) {
-                                                        eprintln!("[CHAT UI] Failed to retain received message: {}", error);
+                                                    match crate::status::push_session_chat(text, false) {
+                                                        Ok(message) => {
+                                                            crate::session_debug::log(
+                                                                &input_identity,
+                                                                &format!(
+                                                                    "[CHAT TRACE] message_id={} session_id={} side=B direction=A_TO_B stage=UI_PUBLISHED type=16 native_message_id={} payload_bytes={} result=success",
+                                                                    message_id, input_identity, message.id, payload_size
+                                                                ),
+                                                            );
+                                                        }
+                                                        Err(error) => {
+                                                            crate::session_debug::log(
+                                                                &input_identity,
+                                                                &format!(
+                                                                    "[CHAT TRACE] message_id={} session_id={} side=B direction=A_TO_B stage=UI_PUBLISH_FAILED type=16 payload_bytes={} error={}",
+                                                                    message_id, input_identity, payload_size, error
+                                                                ),
+                                                            );
+                                                            eprintln!("[CHAT UI] Failed to retain received message: {}", error);
+                                                        }
                                                     }
                                                 }
                                                 Err(error) => {
+                                                    crate::session_debug::log(
+                                                        &input_identity,
+                                                        &format!(
+                                                            "[CHAT TRACE] message_id={} session_id={} side=B direction=A_TO_B stage=PARSE_FAILED type=16 payload_bytes={} valid_up_to={} error_len={:?}",
+                                                            message_id,
+                                                            input_identity,
+                                                            payload_size,
+                                                            error.utf8_error().valid_up_to(),
+                                                            error.utf8_error().error_len()
+                                                        ),
+                                                    );
                                                     eprintln!(
                                                         "[CHAT RX UTF8 ERROR] type=16 payload_len={} valid_up_to={} error_len={:?}",
-                                                        len,
+                                                        payload_size,
                                                         error.utf8_error().valid_up_to(),
                                                         error.utf8_error().error_len()
                                                     );
@@ -2465,15 +3374,60 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         20 => {
                                             let mut hdr = [0u8; 18];
-                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut hdr) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    20,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
-                                            total_file_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+                                            let offered_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
                                             let name_len = u16::from_be_bytes([hdr[16], hdr[17]]) as usize;
-                                            if name_len > 4096 { break; }
+                                            if name_len > 4096 {
+                                                if let Err(error) = discard_packet_bytes(&mut read_stream, name_len) {
+                                                    mark_session_packet_read_failed(
+                                                        &input_identity,
+                                                        20,
+                                                        "oversized_filename",
+                                                        &error,
+                                                        input_connected.as_ref(),
+                                                        input_in_session.as_ref(),
+                                                    );
+                                                    break;
+                                                }
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[FILE RX TRACE] direction=A->B packet_type=20 transfer_id={} filename_bytes={} result=rejected reason=filename_too_large",
+                                                        transfer_id, name_len
+                                                    ),
+                                                );
+                                                let mut reject = vec![25u8];
+                                                reject.extend_from_slice(&transfer_id.to_be_bytes());
+                                                if let Err(error) = write_stream_input.send(reject) {
+                                                    eprintln!("[FILE RX OFFER] Failed to reject oversized filename: {}", error);
+                                                }
+                                                continue;
+                                            }
                                             let mut name_buf = vec![0u8; name_len];
                                             
                                             if !crate::status::session_perm_file_transfer() {
-                                                if read_stream.read_exact(&mut name_buf).is_err() { break; }
+                                                if let Err(error) = read_stream.read_exact(&mut name_buf) {
+                                                    mark_session_packet_read_failed(
+                                                        &input_identity,
+                                                        20,
+                                                        "filename",
+                                                        &error,
+                                                        input_connected.as_ref(),
+                                                        input_in_session.as_ref(),
+                                                    );
+                                                    break;
+                                                }
                                                 eprintln!("[FILE RX OFFER] Rejected because File Transfer permission is OFF");
                                                 let mut reject = vec![25u8];
                                                 reject.extend_from_slice(&transfer_id.to_be_bytes());
@@ -2481,7 +3435,17 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 continue;
                                             }
                                             
-                                            if read_stream.read_exact(&mut name_buf).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut name_buf) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    20,
+                                                    "filename",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let received_name = match String::from_utf8(name_buf) {
                                                 Ok(name) => name,
                                                 Err(error) => {
@@ -2508,10 +3472,21 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 let _ = write_stream_input.send(reject);
                                                 continue;
                                             }
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE TRACE] trace_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type=20 transfer_id={} filename_bytes={} file_bytes={}",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    transfer_id,
+                                                    name_len,
+                                                    offered_size
+                                                ),
+                                            );
                                             current_file = None;
                                             current_file_path = None;
                                             current_transfer_id = Some(transfer_id);
                                             current_file_chunk_index = 0;
+                                            total_file_size = offered_size;
                                             received_bytes = 0;
                                             file_hasher = Sha256::new();
                                             if let Err(error) = crate::status::push_session_file_offer(crate::status::SessionFileOffer {
@@ -2529,13 +3504,116 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         21 => {
                                             let mut hdr = [0u8; 16];
-                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut hdr) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    21,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
                                             let chunk_idx = u32::from_be_bytes(hdr[8..12].try_into().unwrap());
                                             let chunk_len = u32::from_be_bytes(hdr[12..16].try_into().unwrap()) as usize;
-                                            if chunk_len > 10 * 1024 * 1024 { break; }
+                                            if chunk_len > 10 * 1024 * 1024 {
+                                                if chunk_len <= MAX_RECOVERABLE_PACKET_DISCARD_BYTES {
+                                                    if let Err(error) = discard_packet_bytes(&mut read_stream, chunk_len) {
+                                                        mark_session_packet_read_failed(
+                                                            &input_identity,
+                                                            21,
+                                                            "oversized_chunk_payload",
+                                                            &error,
+                                                            input_connected.as_ref(),
+                                                            input_in_session.as_ref(),
+                                                        );
+                                                        break;
+                                                    }
+                                                    crate::session_debug::log(
+                                                        &input_identity,
+                                                        &format!(
+                                                            "[FILE RX TRACE] direction=A->B packet_type=21 transfer_id={} chunk_bytes={} max_chunk_bytes=10485760 result=transfer_aborted reason=oversized_chunk",
+                                                            transfer_id, chunk_len
+                                                        ),
+                                                    );
+                                                    if current_transfer_id == Some(transfer_id) {
+                                                        current_file = None;
+                                                        if let Some(path) = current_file_path.take() {
+                                                            let _ = fs::remove_file(path);
+                                                        }
+                                                        current_transfer_id = None;
+                                                        received_bytes = 0;
+                                                        crate::status::finish_session_file(transfer_id);
+                                                    }
+                                                    send_file_error(transfer_id, "File chunk exceeds the maximum supported size");
+                                                    continue;
+                                                }
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[FILE RX TRACE] direction=A->B packet_type=21 transfer_id={} chunk_bytes={} max_recoverable_discard_bytes={} result=session_end reason=unrecoverable_stream_framing",
+                                                        transfer_id, chunk_len, MAX_RECOVERABLE_PACKET_DISCARD_BYTES
+                                                    ),
+                                                );
+                                                mark_session_disconnected(
+                                                    &input_identity,
+                                                    "session_input_reader",
+                                                    "cloned_session_reader_stream",
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                    false,
+                                                    &format!(
+                                                        "TYPE21 chunk length {} exceeds the {}-byte safe discard limit",
+                                                        chunk_len, MAX_RECOVERABLE_PACKET_DISCARD_BYTES
+                                                    ),
+                                                );
+                                                break;
+                                            }
                                             let mut chunk_buf = vec![0u8; chunk_len];
-                                            if read_stream.read_exact(&mut chunk_buf).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut chunk_buf) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    21,
+                                                    "chunk_payload",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE TRACE] trace_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type=21 transfer_id={} chunk_index={} payload_bytes={} packet_bytes={}",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    transfer_id,
+                                                    chunk_idx,
+                                                    chunk_len,
+                                                    17 + chunk_len
+                                                ),
+                                            );
+                                            if chunk_len == 0 {
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[FILE RX TRACE] direction=A->B packet_type=21 transfer_id={} chunk_index={} result=transfer_aborted reason=empty_chunk",
+                                                        transfer_id, chunk_idx
+                                                    ),
+                                                );
+                                                if current_transfer_id == Some(transfer_id) {
+                                                    current_file = None;
+                                                    if let Some(path) = current_file_path.take() {
+                                                        let _ = fs::remove_file(path);
+                                                    }
+                                                    current_transfer_id = None;
+                                                    received_bytes = 0;
+                                                    crate::status::finish_session_file(transfer_id);
+                                                }
+                                                send_file_error(transfer_id, "File chunk must not be empty");
+                                                continue;
+                                            }
                                             
                                             println!("[FILE RX CHUNK] direction=A->B transfer_id={} chunk_index={} chunk_size={}", transfer_id, chunk_idx, chunk_len);
                                             
@@ -2615,10 +3693,40 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         22 => {
                                             let mut hdr = [0u8; 48];
-                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut hdr) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    22,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
                                             let final_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE TRACE] trace_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type=22 transfer_id={} packet_bytes=49 file_bytes={}",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    transfer_id,
+                                                    final_size
+                                                ),
+                                            );
                                             let hash_hex: String = hdr[16..48].iter().map(|b| format!("{:02x}", b)).collect();
+                                            if current_transfer_id != Some(transfer_id) {
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[FILE RX TRACE] direction=A->B packet_type=22 transfer_id={} active_transfer_id={:?} result=rejected reason=unexpected_transfer",
+                                                        transfer_id, current_transfer_id
+                                                    ),
+                                                );
+                                                send_file_error(transfer_id, "Unexpected file completion packet");
+                                                continue;
+                                            }
                                             let actual_hash = std::mem::replace(&mut file_hasher, Sha256::new()).finalize();
                                             let accepted = match crate::status::session_file_is_accepted(transfer_id) {
                                                 Ok(accepted) => accepted,
@@ -2627,14 +3735,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     false
                                                 }
                                             };
-                                            if current_transfer_id.is_none() && final_size == 0 {
-                                                current_transfer_id = Some(transfer_id);
-                                            }
-                                            if current_transfer_id == Some(transfer_id)
-                                                && accepted
-                                                && final_size == 0
-                                                && current_file.is_none()
-                                            {
+                                            if should_create_empty_transfer_file(
+                                                current_transfer_id == Some(transfer_id),
+                                                accepted,
+                                                final_size,
+                                                current_file.is_some(),
+                                            ) {
                                                 if let Ok(root) = &canonical_drop_dir {
                                                     match create_session_transfer_file(
                                                         &drop_dir,
@@ -2683,15 +3789,34 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         23 => {
                                             let mut hdr = [0u8; 8];
-                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut hdr) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    23,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let transfer_id = u64::from_be_bytes(hdr);
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE TRACE] trace_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type=23 transfer_id={} packet_bytes=9",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    transfer_id
+                                                ),
+                                            );
                                             crate::status::resolve_session_file_response(transfer_id, 23);
-                                            current_file = None;
                                             if current_transfer_id == Some(transfer_id) {
+                                                current_file = None;
                                                 if let Some(path) = current_file_path.take() {
                                                     let _ = fs::remove_file(path);
                                                 }
                                                 current_transfer_id = None;
+                                                received_bytes = 0;
                                             }
                                             crate::status::finish_session_file(transfer_id);
                                             println!("[File Transfer] Cancelled.");
@@ -2699,19 +3824,80 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         24 => {
                                             let mut hdr = [0u8; 12];
-                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut hdr) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    24,
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let transfer_id = u64::from_be_bytes(hdr[0..8].try_into().unwrap());
-                                            crate::status::resolve_session_file_response(transfer_id, 24);
                                             let msg_len = u16::from_be_bytes([hdr[10], hdr[11]]) as usize;
-                                            if msg_len > 4096 { break; }
+                                            if msg_len > 4096 {
+                                                if let Err(error) = discard_packet_bytes(&mut read_stream, msg_len) {
+                                                    mark_session_packet_read_failed(
+                                                        &input_identity,
+                                                        24,
+                                                        "oversized_error_message",
+                                                        &error,
+                                                        input_connected.as_ref(),
+                                                        input_in_session.as_ref(),
+                                                    );
+                                                    break;
+                                                }
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[FILE RX TRACE] direction=A->B packet_type=24 transfer_id={} message_bytes={} result=truncated reason=error_message_too_large",
+                                                        transfer_id, msg_len
+                                                    ),
+                                                );
+                                                crate::status::resolve_session_file_response(transfer_id, 24);
+                                                if current_transfer_id == Some(transfer_id) {
+                                                    current_file = None;
+                                                    if let Some(path) = current_file_path.take() {
+                                                        let _ = fs::remove_file(path);
+                                                    }
+                                                    current_transfer_id = None;
+                                                    received_bytes = 0;
+                                                }
+                                                crate::status::finish_session_file(transfer_id);
+                                                continue;
+                                            }
                                             let mut msg_buf = vec![0u8; msg_len];
-                                            if read_stream.read_exact(&mut msg_buf).is_err() { break; }
-                                            current_file = None;
+                                            if let Err(error) = read_stream.read_exact(&mut msg_buf) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    24,
+                                                    "error_message",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE TRACE] trace_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type=24 transfer_id={} message_bytes={} packet_bytes={}",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    transfer_id,
+                                                    msg_len,
+                                                    13 + msg_len
+                                                ),
+                                            );
+                                            crate::status::resolve_session_file_response(transfer_id, 24);
                                             if current_transfer_id == Some(transfer_id) {
+                                                current_file = None;
                                                 if let Some(path) = current_file_path.take() {
                                                     let _ = fs::remove_file(path);
                                                 }
                                                 current_transfer_id = None;
+                                                received_bytes = 0;
                                             }
                                             crate::status::finish_session_file(transfer_id);
                                             if let Ok(msg) = String::from_utf8(msg_buf) {
@@ -2721,10 +3907,40 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                                         25 | 26 | 27 => {
                                             let mut hdr = [0u8; 8];
-                                            if read_stream.read_exact(&mut hdr).is_err() { break; }
+                                            if let Err(error) = read_stream.read_exact(&mut hdr) {
+                                                mark_session_packet_read_failed(
+                                                    &input_identity,
+                                                    pkt_type_buf[0],
+                                                    "header",
+                                                    &error,
+                                                    input_connected.as_ref(),
+                                                    input_in_session.as_ref(),
+                                                );
+                                                break;
+                                            }
                                             let transfer_id = u64::from_be_bytes(hdr);
-                                            crate::status::resolve_session_file_response(transfer_id, pkt_type_buf[0]);
-                                            println!("[FILE TX RESPONSE] transfer_id={} type={}", transfer_id, pkt_type_buf[0]);
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE TRACE] trace_id={} side=B direction=A_TO_B stage=PARSER_ACCEPTED type={} transfer_id={} packet_bytes=9",
+                                                    packet_trace_id.as_deref().unwrap_or("missing"),
+                                                    pkt_type_buf[0],
+                                                    transfer_id
+                                                ),
+                                            );
+                                            let matched_sender = crate::status::resolve_session_file_response(transfer_id, pkt_type_buf[0]);
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=B receiver=A stage=RESPONSE_ROUTED packet_type={} matched_waiter={} result={}",
+                                                    input_identity,
+                                                    transfer_id,
+                                                    pkt_type_buf[0],
+                                                    matched_sender,
+                                                    if matched_sender { "DELIVERED" } else { "STALE_OR_UNMATCHED" }
+                                                ),
+                                            );
+                                            println!("[FILE TX RESPONSE] session_id={} transfer_id={} type={} matched_waiter={}", input_identity, transfer_id, pkt_type_buf[0], matched_sender);
                                         }
 
                                         99 => {
@@ -2797,18 +4013,85 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             });
 
+                            let ping_identity = system_id.clone();
                             let ping_handle = thread::spawn(move || {
+                                let mut previous_id = 0u64;
+                                let mut next_ping = Instant::now();
                                 while is_conn_ping.load(Ordering::SeqCst) {
-                                    let mut ping_pkt = Vec::with_capacity(9);
-                                    ping_pkt.push(14u8);
-                                    ping_pkt.extend_from_slice(&current_time_millis().to_be_bytes());
-                                    if write_stream_ping.send(ping_pkt).is_err() {
-                                        break;
+                                    let now = Instant::now();
+                                    let timed_out = session_heartbeat_ping
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut tracker| tracker.timeout(now, HEARTBEAT_TIMEOUT));
+                                    if let Some(probe_id) = timed_out {
+                                        crate::session_debug::log(
+                                            &ping_identity,
+                                            &format!(
+                                                "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=TIMEOUT reason=response_timeout",
+                                                crate::status::now_ms(), probe_id
+                                            ),
+                                        );
+                                        log_health_transition(
+                                            &ping_identity,
+                                            "SESSION_END_TO_END",
+                                            crate::status::record_heartbeat_missed(true, "response_timeout"),
+                                        );
+                                        let missed_count = crate::status::heartbeat_missed_count(true).unwrap_or(0);
+                                        if missed_count >= crate::status::HEARTBEAT_MISS_LIMIT {
+                                            if crate::status::set_disconnect_reason_if_unknown("heartbeat_timeout") {
+                                                crate::session_debug::log(
+                                                    &ping_identity,
+                                                    &format!(
+                                                        "[DISCONNECT TRACE] timestamp_ms={} stage=FIRST_FAILURE source=session_heartbeat reason=heartbeat_timeout missed_count={}",
+                                                        crate::status::now_ms(), missed_count
+                                                    ),
+                                                );
+                                            }
+                                            crate::session_debug::log(
+                                                &ping_identity,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=SESSION_SOCKET_SHUTDOWN reason=heartbeat_timeout missed_count={}",
+                                                    crate::status::now_ms(), probe_id, missed_count
+                                                ),
+                                            );
+                                            is_conn_ping.store(false, Ordering::Release);
+                                            if let Some(shutdown_stream) = heartbeat_shutdown_stream.as_ref() {
+                                                let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    if now >= next_ping {
+                                        let probe_id = next_heartbeat_id(&mut previous_id);
+                                        let scheduled = session_heartbeat_ping
+                                            .lock()
+                                            .map(|mut tracker| tracker.schedule(probe_id))
+                                            .unwrap_or(false);
+                                        if scheduled {
+                                            let mut ping_pkt = Vec::with_capacity(9);
+                                            ping_pkt.push(14u8);
+                                            ping_pkt.extend_from_slice(&probe_id.to_be_bytes());
+                                            crate::session_debug::log(
+                                                &ping_identity,
+                                                &format!(
+                                                    "[PING TRACE] timestamp_ms={} trace_id={} channel=SESSION_END_TO_END stage=SCHEDULED type=14 interval_ms={}",
+                                                    crate::status::now_ms(), probe_id, HEARTBEAT_INTERVAL.as_millis()
+                                                ),
+                                            );
+                                            if write_stream_ping.send(ping_pkt).is_err() {
+                                                if let Ok(mut tracker) = session_heartbeat_ping.lock() {
+                                                    tracker.cancel(probe_id);
+                                                }
+                                                break;
+                                            }
+                                            next_ping = Instant::now() + HEARTBEAT_INTERVAL;
+                                        }
                                     }
                                     thread::sleep(Duration::from_millis(100));
                                 }
                             });
 
+                            let clip_identity = system_id.clone();
                             let clip_handle = thread::spawn(move || {
                                 let mut clip = Clipboard::new().ok();
                                 while is_conn_clip.load(Ordering::SeqCst) {
@@ -2823,6 +4106,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             }
                                             if is_new {
                                                 let bytes = text.into_bytes();
+                                                if bytes.len() > MAX_CLIPBOARD_PACKET_BYTES {
+                                                    crate::session_debug::log(
+                                                        &clip_identity,
+                                                        &format!(
+                                                            "[CLIPBOARD TX TRACE] packet_type=12 payload_bytes={} max_payload_bytes={} result=skipped reason=oversized",
+                                                            bytes.len(), MAX_CLIPBOARD_PACKET_BYTES
+                                                        ),
+                                                    );
+                                                    continue;
+                                                }
                                                 let mut packet = Vec::with_capacity(5 + bytes.len());
                                                 packet.push(12u8);
                                                 packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -2984,16 +4277,33 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 } else {
                                     dynamic_bitrate.clamp(20_000_000, 75_000_000)
                                 };
+                                let (target_w, target_h) = if is_aws_relay {
+                                    if prewarm_w > 1920 || prewarm_h > 1080 {
+                                        let ratio_w = 1920.0 / prewarm_w as f32;
+                                        let ratio_h = 1080.0 / prewarm_h as f32;
+                                        let ratio = ratio_w.min(ratio_h);
+                                        let mut w = (prewarm_w as f32 * ratio) as u32;
+                                        let mut h = (prewarm_h as f32 * ratio) as u32;
+                                        w -= w % 2;
+                                        h -= h % 2;
+                                        (w, h)
+                                    } else {
+                                        (prewarm_w, prewarm_h)
+                                    }
+                                } else {
+                                    (prewarm_w, prewarm_h)
+                                };
+
                                 match HardwareH264Encoder::new(
-                                    prewarm_w,
-                                    prewarm_h,
+                                    target_w,
+                                    target_h,
                                     TARGET_FPS,
                                     target_bitrate,
                                 ) {
                                     Ok(enc) => {
                                         hw_encoder = Some(enc);
-                                        current_enc_width = prewarm_w;
-                                        current_enc_height = prewarm_h;
+                                        current_enc_width = target_w;
+                                        current_enc_height = target_h;
                                         println!(
                                             "[H264 HW] Encoder pre-warmed {}x{} — ready for first frame",
                                             prewarm_w, prewarm_h
@@ -3064,7 +4374,24 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     continue;
                                 }
 
-                                if hw_encoder.is_none() || current_enc_width != src_width as u32 || current_enc_height != src_height as u32 {
+                                let (target_w, target_h) = if is_aws_relay {
+                                    if src_width > 1920 || src_height > 1080 {
+                                        let ratio_w = 1920.0 / src_width as f32;
+                                        let ratio_h = 1080.0 / src_height as f32;
+                                        let ratio = ratio_w.min(ratio_h);
+                                        let mut w = (src_width as f32 * ratio) as u32;
+                                        let mut h = (src_height as f32 * ratio) as u32;
+                                        w -= w % 2;
+                                        h -= h % 2;
+                                        (w, h)
+                                    } else {
+                                        (src_width as u32, src_height as u32)
+                                    }
+                                } else {
+                                    (src_width as u32, src_height as u32)
+                                };
+
+                                if hw_encoder.is_none() || current_enc_width != target_w || current_enc_height != target_h {
                                     let dynamic_bitrate = ((src_width * src_height) as f64 * 16.0) as u32; 
                                     let target_bitrate = if is_aws_relay {
                                         dynamic_bitrate.clamp(1_500_000, 3_000_000)
@@ -3072,11 +4399,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         dynamic_bitrate.clamp(20_000_000, 75_000_000)
                                     };
 
-                                    match HardwareH264Encoder::new(src_width as u32, src_height as u32, TARGET_FPS, target_bitrate) {
+                                    match HardwareH264Encoder::new(target_w, target_h, TARGET_FPS, target_bitrate) {
                                         Ok(enc) => {
                                             hw_encoder = Some(enc);
-                                            current_enc_width = src_width as u32;
-                                            current_enc_height = src_height as u32;
+                                            current_enc_width = target_w;
+                                            current_enc_height = target_h;
                                         }
                                         Err(e) => {
                                             eprintln!("[H264 HW][FATAL] Hardware encoder initialization failed: {}", e);
@@ -3434,6 +4761,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     system_id, system_id
                                 ),
                             );
+                            crate::session_debug::log(
+                                &system_id,
+                                &format!(
+                                    "[TYPE99 TRACE] component=HOST direction=RECV_COMPLETE device_id={} session_id={} source=idle_relay_reader reason=idle_state_confirmed",
+                                    system_id, system_id
+                                ),
+                            );
                         }
 
                         _ => {}
@@ -3489,14 +4823,19 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
         if intentional_reconnect {
             intentional_reconnect = false;
-            backoff_secs = 1;
+            reconnect_attempt = 0;
+            crate::status::set_reconnect_state("Reconnecting", 0, MAX_RECONNECT_ATTEMPTS);
             println!("[Agent] Pairing complete. Immediately replenishing listener socket...");
             continue;
         }
 
-        println!("[Agent] Relay connection lost. Reconnecting in {}s...", backoff_secs);
-        thread::sleep(Duration::from_secs(backoff_secs));
-        backoff_secs = match backoff_secs { 1 => 2, 2 => 5, 5 => 10, _ => 10 };
+        next_reconnect_attempt(&mut reconnect_attempt);
+        record_reconnect_failure(
+            &system_id,
+            reconnect_attempt,
+            "relay_socket_closed",
+            "unexpected_socket_loss",
+        );
     }
 }
 
@@ -3506,14 +4845,45 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
 #[cfg(test)]
 mod session_feature_tests {
-    use super::{decode_audio_packet, make_file_error_packet, read_next_file_chunk};
+    use super::{
+        collect_transfer_files, decode_audio_packet, discard_packet_bytes,
+        make_file_error_packet, next_reconnect_attempt, read_next_file_chunk,
+        read_packet_payload, reconnect_delay,
+        send_session_file,
+        should_create_empty_transfer_file,
+    };
     use std::io::{self, Read};
+    use std::sync::mpsc::{sync_channel, TryRecvError};
+    use std::time::Duration;
+    use sha2::Digest;
+
+    #[test]
+    fn transient_reconnect_attempts_continue_past_the_old_limit() {
+        let mut attempt = 0;
+        for expected in 1..=100 {
+            assert_eq!(next_reconnect_attempt(&mut attempt), expected);
+        }
+        let delay = reconnect_delay(attempt);
+        assert!((Duration::from_secs(8)..=Duration::from_secs(10)).contains(&delay));
+    }
 
     struct FailingReader;
 
     impl Read for FailingReader {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "test read failure"))
+        }
+    }
+
+    struct ChunkedReader<R> {
+        inner: R,
+        max_read: usize,
+    }
+
+    impl<R: Read> Read for ChunkedReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(self.max_read);
+            self.inner.read(&mut buffer[..limit])
         }
     }
 
@@ -3552,6 +4922,203 @@ mod session_feature_tests {
         assert_eq!(&packet[9..11], &[0, 0]);
         assert_eq!(u16::from_be_bytes([packet[11], packet[12]]), 11);
         assert_eq!(&packet[13..], b"read failed");
+    }
+
+    #[test]
+    fn native_sender_waits_for_acceptance_and_completion_ack() {
+        for contents in [Vec::new(), b"small transfer".to_vec(), vec![0x5a; 700_000]] {
+            let source = std::env::temp_dir().join(format!(
+                "DeskStream-send-test-{}-{}.bin",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::write(&source, &contents).unwrap();
+            let (writer, receiver) = sync_channel(8);
+            let send_source = source.clone();
+            let sender = std::thread::spawn(move || {
+                send_session_file(&writer, "test-session", &send_source, "test.bin")
+            });
+
+            let offer = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(offer[0], 20);
+            assert_eq!(u64::from_be_bytes(offer[9..17].try_into().unwrap()), contents.len() as u64);
+            let transfer_id = u64::from_be_bytes(offer[1..9].try_into().unwrap());
+            assert_eq!(u16::from_be_bytes([offer[17], offer[18]]) as usize, 8);
+            assert_eq!(&offer[19..], b"test.bin");
+            assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+            crate::status::resolve_session_file_response(transfer_id, 26);
+            let mut received = Vec::new();
+            let mut expected_chunk_index = 0u32;
+            loop {
+                let packet = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert_eq!(u64::from_be_bytes(packet[1..9].try_into().unwrap()), transfer_id);
+                match packet[0] {
+                    21 => {
+                        let chunk_index = u32::from_be_bytes(packet[9..13].try_into().unwrap());
+                        let chunk_len = u32::from_be_bytes(packet[13..17].try_into().unwrap()) as usize;
+                        assert_eq!(chunk_index, expected_chunk_index);
+                        assert_eq!(packet.len(), 17 + chunk_len);
+                        received.extend_from_slice(&packet[17..]);
+                        expected_chunk_index += 1;
+                    }
+                    22 => {
+                        assert_eq!(packet.len(), 49);
+                        assert_eq!(u64::from_be_bytes(packet[9..17].try_into().unwrap()), contents.len() as u64);
+                        let digest = sha2::Sha256::digest(&received);
+                        assert_eq!(&packet[17..49], digest.as_slice());
+                        assert_eq!(received, contents);
+                        assert!(!sender.is_finished());
+                        crate::status::resolve_session_file_response(transfer_id, 27);
+                        break;
+                    }
+                    packet_type => panic!("unexpected sender packet type {packet_type}"),
+                }
+            }
+
+            sender.join().unwrap().unwrap();
+            std::fs::remove_file(source).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_sender_decisions_are_routed_by_transfer_id() {
+        let first_source = std::env::temp_dir().join(format!(
+            "DeskStream-route-test-{}-{}.bin",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let second_source = std::env::temp_dir().join(format!(
+            "DeskStream-route-test-{}-{}.bin",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::write(&first_source, b"accepted payload").unwrap();
+        std::fs::write(&second_source, b"rejected payload").unwrap();
+        let (writer, receiver) = sync_channel(8);
+        let first_writer = writer.clone();
+        let first_path = first_source.clone();
+        let first_sender = std::thread::spawn(move || {
+            send_session_file(&first_writer, "test-session", &first_path, "first.bin")
+        });
+        let second_path = second_source.clone();
+        let second_sender = std::thread::spawn(move || {
+            send_session_file(&writer, "test-session", &second_path, "second.bin")
+        });
+
+        let offers = [
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ];
+        fn offered_filename(offer: &[u8]) -> &[u8] {
+            let name_len = u16::from_be_bytes(offer[17..19].try_into().unwrap()) as usize;
+            &offer[19..19 + name_len]
+        }
+        let (first_offer, second_offer) = if offered_filename(&offers[0]) == b"first.bin" {
+            (&offers[0], &offers[1])
+        } else {
+            (&offers[1], &offers[0])
+        };
+        assert_eq!(offered_filename(first_offer), b"first.bin");
+        assert_eq!(offered_filename(second_offer), b"second.bin");
+        assert_eq!(first_offer[0], 20);
+        assert_eq!(second_offer[0], 20);
+        let first_id = u64::from_be_bytes(first_offer[1..9].try_into().unwrap());
+        let second_id = u64::from_be_bytes(second_offer[1..9].try_into().unwrap());
+        assert_ne!(first_id, second_id);
+        assert!(!crate::status::resolve_session_file_response(u64::MAX, 26));
+        assert!(crate::status::resolve_session_file_response(first_id, 26));
+        assert!(crate::status::resolve_session_file_response(second_id, 25));
+
+        let mut delivered = Vec::new();
+        loop {
+            let packet = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            let transfer_id = u64::from_be_bytes(packet[1..9].try_into().unwrap());
+            assert_eq!(transfer_id, first_id);
+            match packet[0] {
+                21 => delivered.extend_from_slice(&packet[17..]),
+                22 => {
+                    assert_eq!(delivered, b"accepted payload");
+                    assert!(crate::status::resolve_session_file_response(first_id, 27));
+                    break;
+                }
+                packet_type => panic!("unexpected packet after approval routing: {packet_type}"),
+            }
+        }
+
+        first_sender.join().unwrap().unwrap();
+        assert!(second_sender.join().unwrap().unwrap_err().contains("was rejected"));
+        std::fs::remove_file(first_source).unwrap();
+        std::fs::remove_file(second_source).unwrap();
+    }
+
+    #[test]
+    fn folder_transfer_prefixes_root_once_and_preserves_nested_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "DeskStream-folder-test-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("top.txt"), b"top").unwrap();
+        std::fs::write(nested.join("child.txt"), b"child").unwrap();
+
+        let result = collect_transfer_files(&root);
+        let cleanup = std::fs::remove_dir_all(&root);
+        let files = result.unwrap();
+        cleanup.unwrap();
+        let root_name = root.file_name().unwrap().to_string_lossy();
+        let mut relative_paths = files
+            .iter()
+            .map(|(_, relative)| relative.as_str())
+            .collect::<Vec<_>>();
+        relative_paths.sort_unstable();
+        assert_eq!(
+            relative_paths,
+            vec![
+                format!("{root_name}/nested/child.txt"),
+                format!("{root_name}/top.txt")
+            ]
+        );
+        assert!(files.iter().all(|(path, _)| path.is_absolute()));
+    }
+
+    #[test]
+    fn accepted_empty_file_completion_requires_an_empty_destination_file() {
+        assert!(should_create_empty_transfer_file(true, true, 0, false));
+        assert!(!should_create_empty_transfer_file(false, true, 0, false));
+        assert!(!should_create_empty_transfer_file(true, false, 0, false));
+        assert!(!should_create_empty_transfer_file(true, true, 1, false));
+        assert!(!should_create_empty_transfer_file(true, true, 0, true));
+    }
+
+    #[test]
+    fn type16_payload_reads_handle_partial_reads_and_adjacent_packets() {
+        let mut reader = ChunkedReader {
+            inner: io::Cursor::new(b"firstsecond".to_vec()),
+            max_read: 2,
+        };
+        assert_eq!(read_packet_payload(&mut reader, 5).unwrap(), b"first");
+        assert_eq!(read_packet_payload(&mut reader, 6).unwrap(), b"second");
+    }
+
+    #[test]
+    fn discarding_rejected_packet_payload_preserves_next_packet() {
+        let mut reader = io::Cursor::new(b"oversized-payloadNEXT".to_vec());
+        discard_packet_bytes(&mut reader, b"oversized-payload".len()).unwrap();
+        let mut next_packet = [0u8; 4];
+        reader.read_exact(&mut next_packet).unwrap();
+        assert_eq!(&next_packet, b"NEXT");
+    }
+
+    #[test]
+    fn discarding_truncated_packet_payload_reports_eof() {
+        let mut reader = io::Cursor::new(b"short".to_vec());
+        assert_eq!(
+            discard_packet_bytes(&mut reader, 10).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 }
 
@@ -3628,7 +5195,7 @@ fn main() {
     let relay_addr = if args.len() > 1 {
         args[1].clone()
     } else {
-        "34.229.20.54:9001".to_string()
+        "34.207.168.24:9001".to_string()
     };
 
     // FIRST-LAUNCH CONFIG PROVISIONING
@@ -3829,4 +5396,4 @@ fn main() {
         );
         webview_app::run_webview(quit_signal, error_html);
     }
-}
+}

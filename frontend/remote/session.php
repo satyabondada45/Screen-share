@@ -61,9 +61,21 @@ $deviceName = $device['name'] ?? 'Unknown Device';
 $isOnline = !empty($device['is_online']);
 
 // Requested Step 2: Log both identifiers to verify routing
-$accountId = $_SESSION['user_id'];
+$accountId = $_SESSION['user_id'] ?? null;
 $requestedId = $cleanId;
 $systemId = $device['system_id'] ?: $device['device_uid'];
+
+// Authoritative Entitlement Resolution
+require_once __DIR__ . '/../../backend/services/SubscriptionService.php';
+$entitlements = SubscriptionService::getUserEntitlements((int)$accountId);
+
+// Check Free Plan concurrent session limit
+if (!empty($accountId) && (int)$entitlements['max_concurrent_sessions'] <= 1) {
+    $sessionCheck = SubscriptionService::checkConcurrentSessionLimit((int)$accountId, $_GET['token'] ?? null);
+    if (empty($sessionCheck['authorized'])) {
+        die("<!DOCTYPE html><html><body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a;color:#fff;'><div style='text-align:center;padding:32px;background:#1e293b;border-radius:12px;border:1px solid #334155;max-width:440px;'><h2 style='color:#ef4444;margin-top:0;'>Session Limit Reached</h2><p style='color:#94a3b8;line-height:1.6;'>" . htmlspecialchars($sessionCheck['message']) . "</p><p style='margin-top:24px;'><a href='../dashboard.php' style='display:inline-block;padding:10px 20px;background:#3b82f6;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;'>Return to Dashboard</a></p></div></body></html>");
+    }
+}
 ?>
 <!-- DIAGNOSTIC LOGS -->
 <script>
@@ -71,6 +83,15 @@ $systemId = $device['system_id'] ?: $device['device_uid'];
     console.log("Account ID = <?= htmlspecialchars($accountId) ?>");
     console.log("Requested Device ID = <?= htmlspecialchars($requestedId) ?>");
     console.log("Registered System ID = <?= htmlspecialchars($systemId) ?>");
+    const USER_ENTITLEMENTS = <?= json_encode([
+        'plan_name' => $entitlements['plan_name'],
+        'plan_slug' => $entitlements['plan_slug'],
+        'can_record' => (bool)$entitlements['can_record'],
+        'can_reverse_control' => (bool)$entitlements['can_reverse_control'],
+        'max_quality' => (string)$entitlements['max_quality'],
+        'max_concurrent_sessions' => (int)$entitlements['max_concurrent_sessions']
+    ]) ?>;
+    console.log("[ENTITLEMENTS]", USER_ENTITLEMENTS);
 </script>
 <?php
 $sessionCode = strlen($cleanId) === 9
@@ -1568,12 +1589,24 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let reverseRequestPending = false;
 
         function receiveReverseRequest() {
+            if (typeof USER_ENTITLEMENTS !== 'undefined' && !USER_ENTITLEMENTS.can_reverse_control) {
+                console.warn("[REVERSE] Blocked: Reverse control is disabled on the Free Plan.");
+                try {
+                    ws.send(new Uint8Array([31, 0])); // Send explicit rejection
+                } catch (error) {
+                    console.error("[REVERSE] Failed to send rejection:", error);
+                }
+                return;
+            }
             if (reverseRequestPending || !isSocketOpen() || !websocketAuthenticated) return;
             reverseRequestPending = true;
             document.getElementById("reversePermissionDialog").style.display = "flex";
         }
 
         function answerReverseRequest(accepted) {
+            if (typeof USER_ENTITLEMENTS !== 'undefined' && !USER_ENTITLEMENTS.can_reverse_control) {
+                accepted = false;
+            }
             if (!reverseRequestPending || !isSocketOpen()) return;
             try {
                 ws.send(new Uint8Array([31, accepted ? 1 : 0]));
@@ -1650,6 +1683,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         ============================================================ */
 
         function toggleRecording() {
+            if (typeof USER_ENTITLEMENTS !== 'undefined' && !USER_ENTITLEMENTS.can_record) {
+                alert("Session recording is disabled on the Free Plan. Please upgrade to record sessions.");
+                return;
+            }
 
             if (!canvas) {
 
@@ -2394,11 +2431,22 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             pendingWebCodecsFrame = null;
 
             if (canvas && ctx) {
-                if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-                    canvas.width = frame.displayWidth;
-                    canvas.height = frame.displayHeight;
-                    renderWidth = frame.displayWidth;
-                    renderHeight = frame.displayHeight;
+                let targetWidth = frame.displayWidth;
+                let targetHeight = frame.displayHeight;
+
+                if (typeof USER_ENTITLEMENTS !== 'undefined' && USER_ENTITLEMENTS.max_quality === '720p') {
+                    if (targetHeight > 720) {
+                        const scale = 720 / targetHeight;
+                        targetHeight = 720;
+                        targetWidth = Math.round(targetWidth * scale);
+                    }
+                }
+
+                if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+                    canvas.width = targetWidth;
+                    canvas.height = targetHeight;
+                    renderWidth = targetWidth;
+                    renderHeight = targetHeight;
 
                     const resEl = document.getElementById("resDisplay");
                     if (resEl) {

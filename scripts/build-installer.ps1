@@ -17,6 +17,9 @@ $DistDir = Join-Path $ProjectRoot "dist-installer"
 $CargoTargetDir = Join-Path $DesktopAgentDir "target"
 $CargoExePath = Join-Path $CargoTargetDir "release\DeskStream.exe"
 $FinalExeDir = Join-Path $ProjectRoot "DESKSTREAM"
+if ($SigningMode -eq "Development") {
+    $FinalExeDir = Join-Path $FinalExeDir "development"
+}
 $ExePath = Join-Path $FinalExeDir "DeskStream.exe"
 $PayloadVerifier = Join-Path $PSScriptRoot "verify-packaged-exe.ps1"
 $ProductionSigner = Join-Path $ProjectRoot "scripts\sign-release.ps1"
@@ -344,9 +347,9 @@ Write-Host "Building NSIS installer..."
 $makensisPath = Ensure-Nsis
 Set-Location $InstallerDir
 if ($signingScript) {
-    & $makensisPath "/DDESKSTREAM_SIGNING_SCRIPT=$signingScript" "DeskStream.nsi"
+    & $makensisPath "/DDESKSTREAM_SIGNING_SCRIPT=$signingScript" "/DDESKSTREAM_PAYLOAD_DIR=..\DESKSTREAM" "DeskStream.nsi"
 } else {
-    & $makensisPath "/DDESKSTREAM_OUTFILE=..\dist-installer\development\DeskStream-Setup-x64-unsigned.exe" "/DDESKSTREAM_DEVELOPMENT_BUILD=1" "DeskStream.nsi"
+    & $makensisPath "/DDESKSTREAM_OUTFILE=..\dist-installer\development\DeskStream-Setup-x64-unsigned.exe" "/DDESKSTREAM_PAYLOAD_DIR=..\DESKSTREAM\development" "/DDESKSTREAM_DEVELOPMENT_BUILD=1" "DeskStream.nsi"
 }
 if ($LASTEXITCODE -ne 0) {
     throw "NSIS installer build failed."

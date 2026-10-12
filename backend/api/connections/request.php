@@ -38,6 +38,21 @@ if (!$localLoopback && !empty($requesterSystemId) && $requesterSystemId === $tar
     exit();
 }
 
+// Enforce concurrent session limits on the server authorization path
+if (!empty($requesterUserId)) {
+    require_once __DIR__ . '/../../services/SubscriptionService.php';
+    $sessionAuth = SubscriptionService::checkConcurrentSessionLimit((int)$requesterUserId);
+    if (empty($sessionAuth['authorized'])) {
+        http_response_code(403);
+        echo json_encode([
+            "status" => "error",
+            "code" => $sessionAuth['code'] ?? 'LIMIT_EXCEEDED',
+            "message" => $sessionAuth['message'] ?? 'Concurrent session limit exceeded on your account.'
+        ]);
+        exit();
+    }
+}
+
 try {
     // 1. Find target device directly by system_id or device_uid
     $targetStmt = $pdo->prepare("

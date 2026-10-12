@@ -3,10 +3,157 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub const CHAT_TYPING_PACKET_TYPE: u8 = 18;
 pub const CHAT_TYPING_STOP: u8 = 0;
 pub const CHAT_TYPING_START: u8 = 1;
+pub const HEARTBEAT_MISS_LIMIT: u32 = 3;
+
+#[derive(Clone, Debug)]
+pub struct HeartbeatHealth {
+    pub state: String,
+    pub rtt_ms: Option<u64>,
+    pub last_success_ms: Option<u64>,
+    pub missed_count: u32,
+    pub last_failure_reason: Option<String>,
+}
+
+impl Default for HeartbeatHealth {
+    fn default() -> Self {
+        Self {
+            state: "Disconnected".to_string(),
+            rtt_ms: None,
+            last_success_ms: None,
+            missed_count: 0,
+            last_failure_reason: None,
+        }
+    }
+}
+
+impl HeartbeatHealth {
+    fn success(&mut self, rtt_ms: u64, now_ms: u64) -> Option<(String, String)> {
+        let old_state = self.state.clone();
+        self.rtt_ms = Some(rtt_ms);
+        self.last_success_ms = Some(now_ms);
+        self.missed_count = 0;
+        self.last_failure_reason = None;
+        self.state = "Healthy".to_string();
+        (old_state != self.state).then(|| (old_state, self.state.clone()))
+    }
+
+    fn missed(&mut self, reason: &str) -> Option<(String, String)> {
+        let old_state = self.state.clone();
+        self.missed_count = self.missed_count.saturating_add(1);
+        self.last_failure_reason = Some(reason.to_string());
+        self.state = if self.missed_count >= HEARTBEAT_MISS_LIMIT {
+            "Lost".to_string()
+        } else {
+            "Degraded".to_string()
+        };
+        (old_state != self.state).then(|| (old_state, self.state.clone()))
+    }
+
+    fn lost(&mut self, reason: &str) -> Option<(String, String)> {
+        let old_state = self.state.clone();
+        self.missed_count = self.missed_count.max(HEARTBEAT_MISS_LIMIT);
+        self.last_failure_reason = Some(reason.to_string());
+        self.state = "Lost".to_string();
+        (old_state != self.state).then(|| (old_state, self.state.clone()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeartbeatReceive {
+    Matched { rtt_ms: u64 },
+    Stale,
+    PeerRequest,
+}
+
+struct PendingHeartbeat {
+    id: u64,
+    sent_at: Option<Instant>,
+}
+
+#[derive(Default)]
+pub struct HeartbeatTracker {
+    pending: Option<PendingHeartbeat>,
+    recent_ids: VecDeque<u64>,
+}
+
+impl HeartbeatTracker {
+    pub fn schedule(&mut self, id: u64) -> bool {
+        if self.pending.is_some() || self.recent_ids.contains(&id) {
+            return false;
+        }
+        self.pending = Some(PendingHeartbeat { id, sent_at: None });
+        true
+    }
+
+    pub fn mark_sent(&mut self, id: u64, sent_at: Instant) -> bool {
+        match self.pending.as_mut() {
+            Some(pending) if pending.id == id => {
+                pending.sent_at = Some(sent_at);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn receive(&mut self, id: u64, received_at: Instant) -> HeartbeatReceive {
+        if self.pending.as_ref().is_some_and(|pending| pending.id == id) {
+            let pending = self.pending.take().expect("matched pending heartbeat");
+            let Some(sent_at) = pending.sent_at else {
+                self.remember(id);
+                return HeartbeatReceive::Stale;
+            };
+            self.remember(id);
+            return HeartbeatReceive::Matched {
+                rtt_ms: received_at.duration_since(sent_at).as_millis().min(u64::MAX as u128) as u64,
+            };
+        }
+        if self.recent_ids.contains(&id) {
+            HeartbeatReceive::Stale
+        } else {
+            HeartbeatReceive::PeerRequest
+        }
+    }
+
+    pub fn timeout(&mut self, now: Instant, timeout: Duration) -> Option<u64> {
+        let pending = self.pending.as_ref()?;
+        let sent_at = pending.sent_at?;
+        if now.duration_since(sent_at) < timeout {
+            return None;
+        }
+        let id = self.pending.take()?.id;
+        self.remember(id);
+        Some(id)
+    }
+
+    pub fn cancel(&mut self, id: u64) {
+        if self.pending.as_ref().is_some_and(|pending| pending.id == id) {
+            self.pending = None;
+            self.remember(id);
+        }
+    }
+
+    pub fn cancel_pending(&mut self) -> Option<u64> {
+        let id = self.pending.take()?.id;
+        self.remember(id);
+        Some(id)
+    }
+
+    pub fn remember_stale(&mut self, id: u64) {
+        self.remember(id);
+    }
+
+    fn remember(&mut self, id: u64) {
+        self.recent_ids.push_back(id);
+        while self.recent_ids.len() > 16 {
+            self.recent_ids.pop_front();
+        }
+    }
+}
 
 /// Live, process-wide status published by the agent and consumed by the
 /// Screen Share GUI through the local health server (127.0.0.1:49182).
@@ -26,6 +173,12 @@ pub struct AgentStatus {
     /// True while a real TCP relay session is active (B is streaming to A).
     /// Set by the agent loop when the Type-3 auth completes successfully.
     pub in_session: bool,
+    pub relay_health: HeartbeatHealth,
+    pub session_health: HeartbeatHealth,
+    pub reconnect_state: String,
+    pub reconnect_attempt: u32,
+    pub reconnect_max_attempts: u32,
+    pub disconnect_reason: String,
 }
 
 pub fn set_session_remote_typing(typing: bool) {
@@ -143,6 +296,12 @@ impl AgentStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             environment,
             in_session: false,
+            relay_health: HeartbeatHealth::default(),
+            session_health: HeartbeatHealth::default(),
+            reconnect_state: "Disconnected".to_string(),
+            reconnect_attempt: 0,
+            reconnect_max_attempts: 0,
+            disconnect_reason: "unknown_termination".to_string(),
         }
     }
 }
@@ -162,6 +321,7 @@ static SESSION_PEER_SYSTEM_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new()
 static SESSION_FILE_OFFERS: OnceLock<Mutex<HashMap<u64, SessionFileOffer>>> = OnceLock::new();
 static SESSION_ACCEPTED_FILES: OnceLock<Mutex<HashMap<u64, bool>>> = OnceLock::new();
 static SESSION_FILE_RESPONSES: OnceLock<Mutex<HashMap<u64, mpsc::Sender<u8>>>> = OnceLock::new();
+static MANUAL_RECONNECT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub struct SessionChatMessage {
@@ -387,7 +547,7 @@ pub fn clear_session_file_response(transfer_id: u64) {
     }
 }
 
-pub fn resolve_session_file_response(transfer_id: u64, response: u8) {
+pub fn resolve_session_file_response(transfer_id: u64, response: u8) -> bool {
     if let Ok(mut responses) = SESSION_FILE_RESPONSES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -397,9 +557,10 @@ pub fn resolve_session_file_response(transfer_id: u64, response: u8) {
             responses.remove(&transfer_id);
         }
         if let Some(sender) = sender {
-            let _ = sender.send(response);
+            return sender.send(response).is_ok();
         }
     }
+    false
 }
 
 /// Returns the shared status handle. Panics only if called before initialization
@@ -423,13 +584,121 @@ pub fn set_relay_state(connected: bool) {
             g.relay_connected = connected;
             if connected {
                 g.status = "online".to_string();
-                g.last_heartbeat_ms = now_ms();
+                if g.reconnect_state == "Healthy" {
+                    g.relay_health.state = "Healthy".to_string();
+                }
             } else {
                 g.status = "offline".to_string();
+                g.relay_health.state = if g.reconnect_state == "Disconnected" {
+                    "Disconnected".to_string()
+                } else {
+                    "Reconnecting".to_string()
+                };
             }
-
         }
     }
+}
+
+pub fn record_heartbeat_success(session: bool, rtt_ms: u64) -> Option<(String, String)> {
+    let status = LIVE.get()?;
+    let mut status = status.lock().ok()?;
+    let now = now_ms();
+    status.last_heartbeat_ms = now;
+    if session {
+        status.session_health.success(rtt_ms, now)
+    } else {
+        status.relay_health.success(rtt_ms, now)
+    }
+}
+
+pub fn record_heartbeat_missed(session: bool, reason: &str) -> Option<(String, String)> {
+    let status = LIVE.get()?;
+    let mut status = status.lock().ok()?;
+    if session {
+        status.session_health.missed(reason)
+    } else {
+        status.relay_health.missed(reason)
+    }
+}
+
+pub fn mark_heartbeat_lost(session: bool, reason: &str) -> Option<(String, String)> {
+    let status = LIVE.get()?;
+    let mut status = status.lock().ok()?;
+    if session {
+        status.session_health.lost(reason)
+    } else {
+        status.relay_health.lost(reason)
+    }
+}
+
+pub fn heartbeat_missed_count(session: bool) -> Option<u32> {
+    let status = LIVE.get()?;
+    let status = status.lock().ok()?;
+    Some(if session {
+        status.session_health.missed_count
+    } else {
+        status.relay_health.missed_count
+    })
+}
+
+pub fn set_reconnect_state(state: &str, attempt: u32, max_attempts: u32) {
+    if let Some(status) = LIVE.get() {
+        if let Ok(mut status) = status.lock() {
+            status.reconnect_state = state.to_string();
+            status.reconnect_attempt = attempt;
+            status.reconnect_max_attempts = max_attempts;
+            if !status.in_session {
+                status.relay_health.state = match state {
+                    "Healthy" => "Healthy",
+                    "Reconnecting" => "Reconnecting",
+                    "Disconnected" => "Disconnected",
+                    _ => status.relay_health.state.as_str(),
+                }
+                .to_string();
+            }
+        }
+    }
+}
+
+pub fn set_disconnect_reason(reason: &str) {
+    if let Some(status) = LIVE.get() {
+        if let Ok(mut status) = status.lock() {
+            status.disconnect_reason = reason.to_string();
+            if reason.starts_with("explicit_") {
+                status.session_health.state = "Disconnected".to_string();
+            }
+        }
+    }
+}
+
+pub fn set_disconnect_reason_if_unknown(reason: &str) -> bool {
+    if let Some(status) = LIVE.get() {
+        if let Ok(mut status) = status.lock() {
+            if status.disconnect_reason == "unknown_termination" {
+                status.disconnect_reason = reason.to_string();
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn request_manual_reconnect() -> bool {
+    let Some(status) = LIVE.get() else {
+        return false;
+    };
+    let Ok(status) = status.lock() else {
+        return false;
+    };
+    if status.reconnect_state != "Disconnected" {
+        return false;
+    }
+    MANUAL_RECONNECT_REQUESTED.store(true, Ordering::Release);
+    true
+}
+
+pub fn take_manual_reconnect_request() -> bool {
+    MANUAL_RECONNECT_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
 /// Called whenever a heartbeat packet is sent/received so the GUI can show the
@@ -447,6 +716,15 @@ pub fn set_session_active(active: bool) {
     if let Some(s) = LIVE.get() {
         if let Ok(mut g) = s.lock() {
             g.in_session = active;
+            if active {
+                g.session_health = HeartbeatHealth {
+                    state: "Healthy".to_string(),
+                    ..HeartbeatHealth::default()
+                };
+                g.disconnect_reason = "unknown_termination".to_string();
+            } else if g.session_health.state != "Lost" {
+                g.session_health.state = "Disconnected".to_string();
+            }
         }
     }
 }
@@ -454,9 +732,62 @@ pub fn set_session_active(active: bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_audio_enabled, set_session_audio_enabled, SessionChatHistory,
-        CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START, CHAT_TYPING_STOP,
+        session_audio_enabled, set_session_audio_enabled, HeartbeatHealth, HeartbeatReceive,
+        HeartbeatTracker, SessionChatHistory, CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START,
+        CHAT_TYPING_STOP, HEARTBEAT_MISS_LIMIT,
     };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn heartbeat_success_resets_misses_and_records_round_trip() {
+        let mut health = HeartbeatHealth::default();
+        health.missed("timeout");
+        assert_eq!(health.state, "Degraded");
+        assert_eq!(health.missed_count, 1);
+
+        health.success(42, 1_700_000_000_000);
+        assert_eq!(health.state, "Healthy");
+        assert_eq!(health.rtt_ms, Some(42));
+        assert_eq!(health.last_success_ms, Some(1_700_000_000_000));
+        assert_eq!(health.missed_count, 0);
+        assert_eq!(health.last_failure_reason, None);
+    }
+
+    #[test]
+    fn heartbeat_becomes_lost_after_three_misses() {
+        let mut health = HeartbeatHealth::default();
+        for _ in 0..HEARTBEAT_MISS_LIMIT {
+            health.missed("response_timeout");
+        }
+        assert_eq!(health.state, "Lost");
+        assert_eq!(health.missed_count, HEARTBEAT_MISS_LIMIT);
+        assert_eq!(health.last_failure_reason.as_deref(), Some("response_timeout"));
+    }
+
+    #[test]
+    fn heartbeat_tracker_matches_echo_and_suppresses_late_responses() {
+        let sent_at = Instant::now() - Duration::from_millis(42);
+        let mut tracker = HeartbeatTracker::default();
+        assert!(tracker.schedule(1234));
+        assert!(tracker.mark_sent(1234, sent_at));
+        assert!(matches!(
+            tracker.receive(1234, Instant::now()),
+            HeartbeatReceive::Matched { rtt_ms } if rtt_ms >= 42
+        ));
+        assert_eq!(tracker.receive(1234, Instant::now()), HeartbeatReceive::Stale);
+    }
+
+    #[test]
+    fn heartbeat_tracker_times_out_once_and_recognizes_peer_requests() {
+        let sent_at = Instant::now() - Duration::from_secs(9);
+        let mut tracker = HeartbeatTracker::default();
+        assert!(tracker.schedule(5678));
+        assert!(tracker.mark_sent(5678, sent_at));
+        assert_eq!(tracker.timeout(Instant::now(), Duration::from_secs(8)), Some(5678));
+        assert_eq!(tracker.timeout(Instant::now(), Duration::from_secs(8)), None);
+        assert_eq!(tracker.receive(5678, Instant::now()), HeartbeatReceive::Stale);
+        assert_eq!(tracker.receive(9999, Instant::now()), HeartbeatReceive::PeerRequest);
+    }
 
     #[test]
     fn session_chat_history_is_replayable_and_deduplicable_by_id() {

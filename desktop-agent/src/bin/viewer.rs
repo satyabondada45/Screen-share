@@ -17,6 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "../session_debug.rs"]
+#[allow(dead_code)]
+mod session_debug;
+
 /* ============================================================
    LIMITS
    ============================================================ */
@@ -661,10 +665,21 @@ fn main() {
     let mut stream = match TcpStream::connect(&relay_addr) {
         Ok(s) => s,
         Err(e) => {
+            session_debug::log(
+                &target_id,
+                &format!(
+                    "[TCP TRACE] component=VIEWER direction=CONNECT_FAILED source=viewer_connect reason={:?}",
+                    e
+                ),
+            );
             eprintln!("[Viewer] Connection failed: {:?}", e);
             return;
         }
     };
+    session_debug::log(
+        &target_id,
+        "[TCP TRACE] component=VIEWER direction=CONNECT_SUCCESS source=viewer_connect",
+    );
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -682,9 +697,20 @@ fn main() {
     println!("[Handshake] Sending connection request...");
 
     if let Err(e) = stream.write_all(&connect_packet) {
+        session_debug::log(
+            &target_id,
+            &format!(
+                "[TCP TRACE] component=VIEWER direction=HANDSHAKE_SEND_FAILED source=viewer_connect reason={:?}",
+                e
+            ),
+        );
         eprintln!("[Viewer] Handshake failed: {:?}", e);
         return;
     }
+    session_debug::log(
+        &target_id,
+        "[TCP TRACE] component=VIEWER direction=HANDSHAKE_SENT source=viewer_connect",
+    );
 
     println!("[Handshake] Waiting for host approval...");
 
@@ -720,6 +746,8 @@ fn main() {
     let connected_read = Arc::clone(&connected);
     let connected_write = Arc::clone(&connected);
     let connected_clip = Arc::clone(&connected);
+    let outbound_diagnostic_id = target_id.clone();
+    let inbound_diagnostic_id = target_id.clone();
 
     let rtt = Arc::new(AtomicU64::new(0));
     let rtt_read = Arc::clone(&rtt);
@@ -788,10 +816,58 @@ fn main() {
         while connected_write.load(Ordering::SeqCst) {
             match out_rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(packet) => {
+                    let packet_type = packet.first().copied().unwrap_or(255);
+                    let direction_byte = packet.get(1).copied().unwrap_or(255);
+                    let payload_bytes = if packet_type == 16 && packet.len() >= 4 {
+                        u16::from_be_bytes([packet[2], packet[3]]) as usize
+                    } else {
+                        0
+                    };
+                    if packet_type == 16 || packet_type == 99 {
+                        session_debug::log(
+                            &outbound_diagnostic_id,
+                            &format!(
+                                "[TYPE{} TRACE] component=VIEWER direction=SEND source=viewer_writer direction_byte={} payload_bytes={} packet_bytes={}",
+                                packet_type,
+                                direction_byte,
+                                payload_bytes,
+                                packet.len()
+                            ),
+                        );
+                    }
                     if let Err(e) = write_stream.write_all(&packet) {
+                        if packet_type == 16 || packet_type == 99 {
+                            session_debug::log(
+                                &outbound_diagnostic_id,
+                                &format!(
+                                    "[TYPE{} TRACE] component=VIEWER direction=SEND_FAILED source=viewer_writer direction_byte={} payload_bytes={} packet_bytes={} reason={:?}",
+                                    packet_type,
+                                    direction_byte,
+                                    payload_bytes,
+                                    packet.len(),
+                                    e
+                                ),
+                            );
+                        }
+                        session_debug::log(
+                            &outbound_diagnostic_id,
+                            &format!("[TCP TRACE] component=VIEWER direction=WRITE_FAILED source=viewer_writer reason={:?}", e),
+                        );
                         eprintln!("[Network] Send failed: {:?}", e);
                         connected_write.store(false, Ordering::SeqCst);
                         break;
+                    }
+                    if packet_type == 16 || packet_type == 99 {
+                        session_debug::log(
+                            &outbound_diagnostic_id,
+                            &format!(
+                                "[TYPE{} TRACE] component=VIEWER direction=SEND_COMPLETE source=viewer_writer direction_byte={} payload_bytes={} packet_bytes={}",
+                                packet_type,
+                                direction_byte,
+                                payload_bytes,
+                                packet.len()
+                            ),
+                        );
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -821,6 +897,13 @@ fn main() {
             let mut packet_type = [0u8; 1];
             if let Err(e) = read_exact_interruptible(&mut read_stream, &mut packet_type, &connected_read) {
                 if connected_read.load(Ordering::SeqCst) {
+                    session_debug::log(
+                        &inbound_diagnostic_id,
+                        &format!(
+                            "[TCP TRACE] component=VIEWER direction=READ_FAILED source=viewer_reader reason={:?}",
+                            e
+                        ),
+                    );
                     eprintln!("[Network] Receive failed: {:?}", e);
                 }
                 break;
@@ -1026,7 +1109,14 @@ fn main() {
                    ================================================== */
                 16 => {
                     let mut meta = [0u8; 3];
-                    if read_exact_interruptible(&mut read_stream, &mut meta, &connected_read).is_err() {
+                    if let Err(error) = read_exact_interruptible(&mut read_stream, &mut meta, &connected_read) {
+                        session_debug::log(
+                            &inbound_diagnostic_id,
+                            &format!(
+                                "[TYPE16 TRACE] component=VIEWER direction=RECV_FAILED source=viewer_reader stage=header reason={:?}",
+                                error
+                            ),
+                        );
                         break;
                     }
                     let sender = meta[0];
@@ -1038,9 +1128,25 @@ fn main() {
                         continue;
                     }
                     let mut data = vec![0u8; len];
-                    if read_exact_interruptible(&mut read_stream, &mut data, &connected_read).is_err() {
+                    if let Err(error) = read_exact_interruptible(&mut read_stream, &mut data, &connected_read) {
+                        session_debug::log(
+                            &inbound_diagnostic_id,
+                            &format!(
+                                "[TYPE16 TRACE] component=VIEWER direction=RECV_FAILED source=viewer_reader stage=payload payload_bytes={} reason={:?}",
+                                len, error
+                            ),
+                        );
                         break;
                     }
+                    session_debug::log(
+                        &inbound_diagnostic_id,
+                        &format!(
+                            "[TYPE16 TRACE] component=VIEWER direction=RECV source=viewer_reader direction_byte={} payload_bytes={} packet_bytes={}",
+                            sender,
+                            len,
+                            4 + len
+                        ),
+                    );
                     match decode_chat_text(data) {
                         Ok(text) => {
                             let tag = if sender == 0 { "HOST" } else { "YOU" };
@@ -1267,6 +1373,13 @@ fn main() {
                     println!("[FILE TX RESPONSE] transfer_id={} type={}", transfer_id, packet_type[0]);
                 }
 
+                99 => {
+                    session_debug::log(
+                        &inbound_diagnostic_id,
+                        "[TYPE99 TRACE] component=VIEWER direction=RECV source=viewer_reader reason=packet_byte_99",
+                    );
+                    eprintln!("[Network] Unknown packet type: 99");
+                }
                 other => {
                     eprintln!("[Network] Unknown packet type: {}", other);
                 }

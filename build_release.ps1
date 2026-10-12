@@ -73,6 +73,11 @@ foreach ($binary in @($guiSrc, $relaySrc)) {
     if ($LASTEXITCODE -ne 0) { throw "Production signature verification failed for $binary." }
 }
 
+$releaseFolder = Join-Path $Root "DESKSTREAM"
+if (-not (Test-Path $releaseFolder)) { New-Item -ItemType Directory -Path $releaseFolder -Force | Out-Null }
+Copy-Item $agentSrc -Destination "$releaseFolder\DeskStream.exe" -Force
+& (Join-Path $Root "scripts\verify-release-signature.ps1") -ExePath "$releaseFolder\DeskStream.exe"
+
 Copy-Item $agentSrc -Destination "$stagingDir\DeskStream.exe" -Force
 Copy-Item $agentSrc -Destination "$stagingDir\desktop-agent.exe" -Force
 Copy-Item $guiSrc -Destination "$stagingDir\ScreenShare.exe" -Force

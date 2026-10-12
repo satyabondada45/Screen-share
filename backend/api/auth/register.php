@@ -80,12 +80,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $insert_stmt = $db->prepare("INSERT INTO users (name, username, email, password_hash, unique_user_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
         $insert_stmt->execute([$username, $username, $email, $password_hash, $uniqueUserId]);
 
+        $newUserId = (int)$db->lastInsertId();
+
+        // Assign Welcome Plan to eligible new account
+        require_once __DIR__ . '/../../services/SubscriptionService.php';
+        $welcomeSub = SubscriptionService::assignWelcomePlanIfEligible($newUserId);
+
         if ($isJson) {
             echo json_encode([
                 "status" => "success",
                 "message" => "Registration successful! Please login.",
-                "user_id" => $db->lastInsertId(),
-                "unique_user_id" => $uniqueUserId
+                "user_id" => $newUserId,
+                "unique_user_id" => $uniqueUserId,
+                "subscription" => $welcomeSub ? [
+                    "plan_name" => $welcomeSub['plan_name'],
+                    "expires_at" => $welcomeSub['expires_at']
+                ] : null
             ]);
             exit();
         }

@@ -12,6 +12,10 @@
 !define DESKSTREAM_OUTFILE "..\dist-installer\DeskStream-Setup-x64.exe"
 !endif
 
+!ifndef DESKSTREAM_PAYLOAD_DIR
+!define DESKSTREAM_PAYLOAD_DIR "..\DESKSTREAM"
+!endif
+
 Var VerifyPayloadDir
 
 Name "DeskStream"
@@ -60,7 +64,7 @@ Section "DeskStream (required)"
 
   ${If} $VerifyPayloadDir != ""
     SetOutPath "$VerifyPayloadDir"
-    File "..\DESKSTREAM\DeskStream.exe"
+    File "${DESKSTREAM_PAYLOAD_DIR}\DeskStream.exe"
     SetErrorLevel 0
     Quit
   ${EndIf}
@@ -68,7 +72,7 @@ Section "DeskStream (required)"
   SetOutPath "$INSTDIR"
   
   ; Include the executable built by Cargo
-  File "..\DESKSTREAM\DeskStream.exe"
+  File "${DESKSTREAM_PAYLOAD_DIR}\DeskStream.exe"
   
   ; Copy icon to use for shortcuts if it exists
   IfFileExists "..\desktop-agent\assets\icon.ico" 0 +2

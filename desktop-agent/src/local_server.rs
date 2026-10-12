@@ -103,9 +103,17 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             // Keep both endpoints available on the existing local server so the dashboard can
             // come up without introducing a second backend or changing the startup flow.
             if matches!(path.as_str(), "/health" | "/health/" | "/local-health" | "/local-health/") {
-                let in_session = match crate::status::LIVE.get() {
+                let (in_session, relay_health, session_health, reconnect_state, reconnect_attempt, reconnect_max_attempts, disconnect_reason) = match crate::status::LIVE.get() {
                     Some(status) => match status.lock() {
-                        Ok(status) => status.in_session,
+                        Ok(status) => (
+                            status.in_session,
+                            status.relay_health.clone(),
+                            status.session_health.clone(),
+                            status.reconnect_state.clone(),
+                            status.reconnect_attempt,
+                            status.reconnect_max_attempts,
+                            status.disconnect_reason.clone(),
+                        ),
                         Err(_) => {
                             let _ = request.respond(
                                 Response::from_string("agent status lock poisoned").with_status_code(500),
@@ -113,7 +121,15 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                             continue;
                         }
                     },
-                    None => false,
+                    None => (
+                        false,
+                        crate::status::HeartbeatHealth::default(),
+                        crate::status::HeartbeatHealth::default(),
+                        "Disconnected".to_string(),
+                        0,
+                        0,
+                        "unknown_termination".to_string(),
+                    ),
                 };
                 let peer_system_id = match crate::status::session_peer_system_id() {
                     Ok(Some(peer_system_id)) if in_session => peer_system_id,
@@ -132,10 +148,42 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                     "session_id": null,
                     "local_device": system_id,
                     "remote_device": peer_system_id,
-                    "in_session": in_session
+                    "in_session": in_session,
+                    "connection_state": if in_session { session_health.state.clone() } else { reconnect_state.clone() },
+                    "relay_health": {
+                        "state": relay_health.state,
+                        "rtt_ms": relay_health.rtt_ms,
+                        "last_success_ms": relay_health.last_success_ms,
+                        "missed_count": relay_health.missed_count,
+                        "last_failure_reason": relay_health.last_failure_reason
+                    },
+                    "session_health": {
+                        "state": session_health.state,
+                        "rtt_ms": session_health.rtt_ms,
+                        "last_success_ms": session_health.last_success_ms,
+                        "missed_count": session_health.missed_count,
+                        "last_failure_reason": session_health.last_failure_reason
+                    },
+                    "reconnect_state": reconnect_state,
+                    "reconnect_attempt": reconnect_attempt,
+                    "reconnect_max_attempts": reconnect_max_attempts,
+                    "disconnect_reason": disconnect_reason
                 }).to_string())
                     .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/agent/reconnect" && request.method() == &tiny_http::Method::Post {
+                if crate::status::request_manual_reconnect() {
+                    let response = Response::from_string("{\"success\":true}")
+                        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                    let _ = request.respond(response);
+                } else {
+                    let _ = request.respond(
+                        Response::from_string("Agent is not waiting for a manual retry").with_status_code(409),
+                    );
+                }
                 continue;
             }
 
@@ -151,18 +199,42 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             if path == "/desktop-api/session/disconnect"
                 && request.method() == &tiny_http::Method::Post
             {
+                let caller_source = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("X-DeskStream-Diagnostic-Source"))
+                    .map(|header| header.value.as_str())
+                    .unwrap_or("HTTP_REQUEST")
+                    .chars()
+                    .filter(|character| {
+                        character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+                    })
+                    .take(64)
+                    .collect::<String>();
+                let in_session = crate::status::LIVE
+                    .get()
+                    .and_then(|status| status.lock().ok())
+                    .map(|status| status.in_session)
+                    .unwrap_or(false);
                 crate::session_debug::log(
                     &system_id,
                     &format!(
-                        "[DISCONNECT ROUTE TRACE] endpoint=/desktop-api/session/disconnect source=HTTP_REQUEST timestamp_ms={}",
-                        crate::status::now_ms()
+                        "[DISCONNECT ROUTE TRACE] component=LOCAL_HTTP direction=RECV endpoint=/desktop-api/session/disconnect source={} in_session={} timestamp_ms={}",
+                        caller_source, in_session, crate::status::now_ms()
                     ),
                 );
+                let disconnect_reason = match caller_source.as_str() {
+                    "END_SESSION_BUTTON" | "REMOTE_SESSION_END" | "REVERSE_HANDOFF" => {
+                        "explicit_session_end"
+                    }
+                    _ => "explicit_user_disconnect",
+                };
+                crate::status::set_disconnect_reason(disconnect_reason);
                 crate::session_debug::log(
                     &system_id,
                     &format!(
-                        "[TYPE99 TRACE] component=HOST direction=SEND device_id={} session_id={} source=desktop_api_session_disconnect reason=explicit_local_disconnect",
-                        system_id, system_id
+                        "[TYPE99 TRACE] component=HOST direction=SEND device_id={} session_id={} source={} reason={} in_session={}",
+                        system_id, system_id, caller_source, disconnect_reason, in_session
                     ),
                 );
                 match crate::status::send_session_packet(vec![99]) {
@@ -170,8 +242,8 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         crate::session_debug::log(
                             &system_id,
                             &format!(
-                                "[TYPE99 TRACE] component=HOST direction=SEND_COMPLETE device_id={} session_id={} source=desktop_api_session_disconnect reason=packet_queued",
-                                system_id, system_id
+                                "[TYPE99 TRACE] component=HOST direction=SEND_COMPLETE device_id={} session_id={} source={} reason=packet_queued in_session={}",
+                                system_id, system_id, caller_source, in_session
                             ),
                         );
                         println!("[SESSION DISCONNECT] TYPE 99 queued for active relay session.");
@@ -183,8 +255,8 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         crate::session_debug::log(
                             &system_id,
                             &format!(
-                                "[TYPE99 TRACE] component=HOST direction=SEND_FAILED device_id={} session_id={} source=desktop_api_session_disconnect reason={}",
-                                system_id, system_id, error
+                                "[TYPE99 TRACE] component=HOST direction=SEND_FAILED device_id={} session_id={} source={} reason={} in_session={}",
+                                system_id, system_id, caller_source, error, in_session
                             ),
                         );
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
@@ -221,6 +293,19 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             }
 
             if path == "/desktop-api/session/chat" && request.method() == &tiny_http::Method::Post {
+                let trace_id = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("X-DeskStream-Trace-Id"))
+                    .map(|header| header.value.as_str())
+                    .filter(|value| {
+                        value.len() <= 64
+                            && value
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| crate::session_debug::next_packet_trace_id(16));
                 let mut body = Vec::new();
                 if let Err(error) = request.as_reader().read_to_end(&mut body) {
                     let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
@@ -246,10 +331,28 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                     continue;
                 }
                 let mut packet = Vec::with_capacity(4 + message_bytes.len());
-                packet.extend_from_slice(&[16, 0, (message_bytes.len() >> 8) as u8, message_bytes.len() as u8]);
+                packet.extend_from_slice(&[16, 1, (message_bytes.len() >> 8) as u8, message_bytes.len() as u8]);
                 packet.extend_from_slice(message_bytes);
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[CHAT TRACE] trace_id={} side=B direction=B_TO_A stage=NATIVE_PACKET_CREATED type=16 component=HOST payload_bytes={} packet_bytes={}",
+                        trace_id,
+                        message_bytes.len(),
+                        packet.len()
+                    ),
+                );
                 match crate::status::send_session_packet(packet) {
                     Ok(()) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[CHAT TRACE] trace_id={} side=B direction=B_TO_A stage=PACKET_QUEUED type=16 component=HOST payload_bytes={} packet_bytes={}",
+                                trace_id,
+                                message_bytes.len(),
+                                4 + message_bytes.len()
+                            ),
+                        );
                         match crate::status::push_session_chat(message.to_string(), true) {
                             Ok(message) => {
                                 println!(
@@ -275,6 +378,15 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         }
                     }
                     Err(error) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[CHAT TRACE] trace_id={} side=B direction=B_TO_A stage=PACKET_QUEUE_ERROR type=16 component=HOST payload_bytes={} reason={}",
+                                trace_id,
+                                message_bytes.len(),
+                                error
+                            ),
+                        );
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
                     }
                 }
@@ -496,6 +608,7 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 match crate::status::session_file_offers() {
                     Ok(offers) => {
                         let offers: Vec<_> = offers.into_iter().map(|offer| json!({
+                            "session_id": system_id,
                             "transfer_id": offer.transfer_id.to_string(),
                             "filename": offer.filename,
                             "size": offer.size
@@ -535,14 +648,43 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         continue;
                     }
                 };
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=A receiver=B stage=NATIVE_DECISION_RECEIVED decision={}",
+                        system_id,
+                        transfer_id,
+                        if accepted { "ALLOW" } else { "REJECT" }
+                    ),
+                );
                 match crate::status::decide_session_file(transfer_id, accepted) {
                     Ok(()) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=A receiver=B stage=NATIVE_DECISION_QUEUED packet_type={} decision={}",
+                                system_id,
+                                transfer_id,
+                                if accepted { 26 } else { 25 },
+                                if accepted { "ACCEPT" } else { "REJECT" }
+                            ),
+                        );
                         println!("[FILE RX DECISION] direction=A->B transfer_id={} decision={}", transfer_id, if accepted { "ACCEPT" } else { "REJECT" });
                         let response = Response::from_string("{\"success\":true}")
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                         let _ = request.respond(response);
                     }
                     Err(error) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[FILE APPROVAL TRACE] session_id={} transfer_id={} side=B sender=A receiver=B stage=NATIVE_DECISION_FAILED decision={} reason={}",
+                                system_id,
+                                transfer_id,
+                                if accepted { "ALLOW" } else { "REJECT" },
+                                error
+                            ),
+                        );
                         let _ = request.respond(Response::from_string(error).with_status_code(409));
                     }
                 }
@@ -575,6 +717,8 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             let (content, content_type) = match static_path {
                 "/dashboard.html" | "/" | "" => (include_bytes!("../assets/dashboard.html").to_vec(), "text/html"),
                 "/session.html" => (include_bytes!("../assets/session.html").to_vec(), "text/html"),
+                "/controller_session.html" => (include_bytes!("../assets/controller_session.html").to_vec(), "text/html"),
+                "/remote_session.html" => (include_bytes!("../assets/remote_session.html").to_vec(), "text/html"),
                 "/deskstream-logo.png" => (include_bytes!("../assets/deskstream-logo.png").to_vec(), "image/png"),
                 "/deskstream-icon.jpeg" => (include_bytes!("../assets/deskstream-icon.jpeg").to_vec(), "image/jpeg"),
                 "/icon.ico" => (include_bytes!("../assets/icon.ico").to_vec(), "image/x-icon"),

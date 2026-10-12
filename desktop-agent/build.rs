@@ -7,8 +7,8 @@ fn main() {
         res.set("FileDescription", "DeskStream Remote Desktop Agent");
         res.set("LegalCopyright", "Copyright (c) Friends Software Solutions");
         res.set("CompanyName", "Friends Software Solutions");
-        res.set("InternalName", "DeskStream-Agent.exe");
-        res.set("OriginalFilename", "DeskStream-Agent.exe");
+        res.set("InternalName", "DeskStream.exe");
+        res.set("OriginalFilename", "DeskStream.exe");
         res.set("FileVersion", "1.1.3.0");
         res.set("ProductVersion", "1.1.3.0");
 

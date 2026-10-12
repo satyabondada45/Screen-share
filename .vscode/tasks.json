@@ -2,6 +2,18 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
+			"label": "Backup relay server source",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$source='C:\\xampp\\htdocs\\Screen Share\\relay-server\\src\\main.rs'; $backup='C:\\xampp\\htdocs\\Screen Share\\relay-server\\src\\main.rs.pre-peek-eof-fix.bak'; if(Test-Path -LiteralPath $backup){throw 'Backup already exists; refusing to overwrite it'}; Copy-Item -LiteralPath $source -Destination $backup; Write-Output ('BACKUP=' + $backup); Write-Output ('SHA256=' + (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash)"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
 			"label": "DeskStream Build Verify",
 			"type": "shell",
 			"command": "powershell",
@@ -284,6 +296,1028 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Build DeskStream release",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"set \"CARGO_TARGET_DIR=C:\\cargo-target\\deskstream\" && cargo build --release --manifest-path \"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\Cargo.toml\" --bin DeskStream"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify worktree diff",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager status --short && git --no-pager diff -- frontend/remote/session.php desktop-agent/assets/session.html"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect hosted file diff",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager diff -- frontend/remote/session.php"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify scoped diffs",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager diff -- frontend/remote/session.php desktop-agent/assets/session.html"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check build output",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"if exist \"C:\\cargo-target\\deskstream\\release\\DeskStream.exe\" (echo BUILD_ARTIFACT_FOUND & certutil -hashfile \"C:\\cargo-target\\deskstream\\release\\DeskStream.exe\" SHA256) else (echo BUILD_ARTIFACT_MISSING)"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Stage DeskStream release",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"if not exist \"C:\\xampp\\htdocs\\Screen Share\\DESKSTREAM\" (echo DESTINATION_MISSING & exit /b 2) else (copy /Y \"C:\\cargo-target\\deskstream\\release\\DeskStream.exe\" \"C:\\xampp\\htdocs\\Screen Share\\DESKSTREAM\\DeskStream.exe\" && certutil -hashfile \"C:\\cargo-target\\deskstream\\release\\DeskStream.exe\" SHA256 && certutil -hashfile \"C:\\xampp\\htdocs\\Screen Share\\DESKSTREAM\\DeskStream.exe\" SHA256)"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify scoped changes",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager diff --exit-code -- frontend/remote/session.php && git --no-pager status --short -- desktop-agent/assets/session.html desktop-agent/src/main.rs frontend/remote/session.php"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run native session tests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"set \"CARGO_TARGET_DIR=C:\\cargo-target\\deskstream\" && cargo test --manifest-path \"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\Cargo.toml\" --bin DeskStream session_feature_tests"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify native test selection",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"set \"CARGO_TARGET_DIR=C:\\cargo-target\\deskstream\" && cargo test --manifest-path \"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\Cargo.toml\" --bin DeskStream -- --list"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect native worktree changes",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager diff --stat -- desktop-agent && git --no-pager status --short -- desktop-agent"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Review native main diff",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager diff --unified=1 -- desktop-agent/src/main.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Search lifecycle packet paths",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"rg -n -i \"TYPE13|TYPE16|TYPE24|TYPE99|send_session_packet|session_input_reader|mark_session_disconnected|disconnectBSession|ws\\.close|beforeunload|is_in_session|is_connected|intentional_reconnect|file transfer|heartbeat|socket write|socket read|session ended|session disconnected\" desktop-agent"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Review viewer changes",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"git --no-pager diff --unified=1 -- desktop-agent/src/bin/viewer.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "List disconnect call sites",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"rg -n mark_session_disconnected desktop-agent\\src"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Search native packet flow",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"rg -n -e TYPE16 -e TYPE24 -e TYPE99 -e send_session_packet -e session_input_reader -e intentional_reconnect -e 'session ended' -e 'session disconnected' desktop-agent"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Search session packet symbols",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-ChildItem -Recurse -File desktop-agent | Select-String -Pattern 'mark_session_disconnected|send_session_packet|TYPE99|TYPE24|TYPE16|beforeunload|ws\\.close|disconnectBSession' | Select-Object -First 180 | ForEach-Object { '{0}:{1}:{2}' -f $_.Path,$_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Review webview patch",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"git --no-pager diff --unified=1 -- desktop-agent/src/webview_app.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Review local server patch",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"git --no-pager diff --unified=1 -- desktop-agent/src/local_server.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Search source packet cases",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-ChildItem desktop-agent\\src,desktop-agent\\assets -Recurse -File | Select-String -Pattern 'TYPE 24|type === 24|packet_type.*24|packet\\[0\\].*= 24|type=24|TYPE24|TYPE 16|packet\\[1\\].*= [01]|ws\\.close|beforeunload|/desktop-api/session/disconnect' | Select-Object -First 180 | ForEach-Object { '{0}:{1}:{2}' -f $_.Path,$_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Find socket read write sites",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -Path desktop-agent\\src\\main.rs,desktop-agent\\src\\bin\\viewer.rs,desktop-agent\\src\\local_server.rs -Pattern 'set_read_timeout|set_write_timeout|read_exact|write_all|\\.write\\(' | ForEach-Object { '{0}:{1}:{2}' -f $_.Path,$_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Find disconnect helper and worker loop",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -Path desktop-agent\\src\\main.rs -Pattern 'fn mark_session_disconnected|fn run_agent_loop|while is_connected|while is_conn_read|SESSION_CLEANUP|fn send_session_file|fn make_file_error_packet' -Context 2,6 | ForEach-Object { $_.Context.PreContext; $_.Line; $_.Context.PostContext }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Trace disconnect routes and senders",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -Path desktop-agent\\assets\\dashboard.html,desktop-agent\\assets\\session.html,desktop-agent\\src\\local_server.rs,desktop-agent\\src\\main.rs -Pattern 'disconnectBSession\\(|/desktop-api/session/disconnect|send_session_packet\\(vec!\\[99\\]|packet\\.push\\(99\\)|vec!\\[99\\]|TYPE99' | Select-Object -First 120 | ForEach-Object { '{0}:{1}:{2}' -f $_.Path,$_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Locate A chat handler",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -Path desktop-agent\\assets\\session.html -Pattern 'function handleChatPacket|function handleFilePacket|wsRxBuffer = new Uint8Array|MAX_RX_BUFFER_BYTES' | ForEach-Object { '{0}:{1}' -f $_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Locate lifecycle logic",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -Path desktop-agent\\src\\main.rs -Pattern 'fn mark_session_disconnected|fn send_session_file|fn make_file_error_packet|while is_connected|while is_conn_read|SESSION_CLEANUP|while is_in_session' | ForEach-Object { '{0}:{1}' -f $_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Search clipboard packet handlers",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -Path desktop-agent\\assets\\session.html,desktop-agent\\src\\main.rs,desktop-agent\\src\\bin\\viewer.rs -Pattern 'type === 12|12 =>|packet.push\\(12|push\\(12u8\\)|packet\\.push\\(12\\)|clipboard.*packet|MAX_CLIPBOARD_SIZE' | ForEach-Object { '{0}:{1}:{2}' -f $_.Path,$_.LineNumber,$_.Line.Trim() }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "DeskStream Cargo Validation",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"fmt",
+				"--check"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "DeskStream Format Check",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"fmt",
+				"--manifest-path",
+				"desktop-agent\\Cargo.toml",
+				"--check"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "DeskStream Unit Tests",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"--manifest-path",
+				"desktop-agent\\Cargo.toml",
+				"--bin",
+				"DeskStream"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "DeskStream Rust Format Check",
+			"type": "shell",
+			"command": "rustfmt",
+			"args": [
+				"--edition",
+				"2021",
+				"--check",
+				"desktop-agent\\src\\main.rs",
+				"desktop-agent\\src\\webview_app.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check DeskStream Changed Rust Formatting",
+			"type": "shell",
+			"command": "rustfmt",
+			"args": [
+				"--edition",
+				"2021",
+				"--check",
+				"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\src\\main.rs",
+				"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\src\\webview_app.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check touched Rust format only",
+			"type": "shell",
+			"command": "rustfmt",
+			"args": [
+				"--edition",
+				"2021",
+				"--config",
+				"skip_children=true",
+				"--check",
+				"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\src\\main.rs",
+				"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\src\\webview_app.rs"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Index existing session implementation",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'); const p='desktop-agent/assets/session.html'; const s=fs.readFileSync(p,'utf8'); const lines=s.split(/\\r?\\n/); console.log('FILE_BYTES='+Buffer.byteLength(s)+' LINES='+lines.length+' SCRIPT_TAGS='+(s.match(/<script\\b/gi)||[]).length+' STYLE_TAGS='+(s.match(/<style\\b/gi)||[]).length); for(let i=0;i<lines.length;i++){const t=lines[i].trim(); if(/^<script\\b|^<\\/script>|^<style\\b|^<\\/style>|^\\s*\\/\\* ={4,}|^\\s*(async )?function\\s+\\w+|^\\s*(const|let|var)\\s+\\w+\\s*=\\s*(async\\s*)?\\(?[^;]*=>/.test(t))console.log((i+1)+': '+t.slice(0,180));}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Map session page call sites",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),path=require('path');const root='desktop-agent';const files=['src/main.rs','src/webview_app.rs','assets/dashboard.html','assets/session.html','src/local_server.rs','src/bin/viewer.rs'];for(const f of files){const p=path.join(root,f);if(!fs.existsSync(p))continue;const a=fs.readFileSync(p,'utf8').split(/\\r?\\n/);console.log('\\n### '+f+' ('+a.length+' lines)');for(let i=0;i<a.length;i++){if(/session\\.html|controller_session|remote_session|include_str!|WebSocket::|WebSocket|TYPE16|TYPE17|TYPE20|TYPE24|floatingControls|viewerHeader|layer=|integrated=|SESSION_MODE|session_url|sessionUrl/i.test(a[i]))console.log((i+1)+': '+a[i].trim().slice(0,200));}}const s=fs.readFileSync(path.join(root,'assets/session.html'),'utf8').split(/\\r?\\n/);console.log('\\n### session.html structural markers');for(let i=0;i<s.length;i++){const t=s[i].trim();if(/^<script\\b|^<\\/script>|^<style\\b|^<\\/style>|^<!--|^<!--.*-->|^\\/\\* ={3,}|^\\*\\s+[A-Z][A-Z /_-]*$|^function\\s+\\w+|^async function\\s+\\w+|^const\\s+\\w+\\s*=/.test(t))console.log((i+1)+': '+t.slice(0,140));}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Find session entry references",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),path=require('path');for(const f of ['desktop-agent/assets/dashboard.html','desktop-agent/src/main.rs','desktop-agent/src/webview_app.rs','desktop-agent/src/local_server.rs','desktop-agent/src/bin/viewer.rs']){const p=path.resolve(f);if(!fs.existsSync(p))continue;const a=fs.readFileSync(p,'utf8').split(/\\r?\\n/);console.log('\\n'+f);let n=0;for(let i=0;i<a.length;i++){if(/session\\.html|controller_session|remote_session|layer|integrated|target_name|requester_system_id/i.test(a[i])){console.log((i+1)+': '+a[i].trim().slice(0,220));if(++n>=35){console.log('... limited');break}}}}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect remote session ownership",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs');for(const f of ['desktop-agent/assets/dashboard.html','desktop-agent/assets/session.html']){const a=fs.readFileSync(f,'utf8').split(/\\r?\\n/);console.log('\\n## '+f);for(let i=0;i<a.length;i++)if(/deskStreamBSession|bSessionOverlay|function\\s+\\w*BSession|B_SESSION|disconnectBSession|enterBSession|dismissBSession|toggleBOptions|bReverse|startConnection\\(/i.test(a[i]))console.log((i+1)+': '+a[i].trim().slice(0,200));}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Separate session pages",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs');const base='desktop-agent/assets/';const source=fs.readFileSync(base+'session.html','utf8');fs.writeFileSync(base+'controller_session.html',source,'utf8');const router='<!DOCTYPE html>\\n<html lang=\"en\">\\n<head>\\n<meta charset=\"UTF-8\">\\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\\n<title>DeskStream Session</title>\\n<script>\\n(() => {\\n    const params = new URLSearchParams(window.location.search);\\n    const requestedLayer = params.get(\"layer\");\\n    const layer = requestedLayer === \"A\" || requestedLayer === \"B\"\\n        ? requestedLayer\\n        : (params.get(\"integrated\") === \"1\" ? \"A\" : \"B\");\\n    params.set(\"layer\", layer);\\n    const destination = layer === \"A\" ? \"controller_session.html\" : \"remote_session.html\";\\n    const target = new URL(destination, window.location.href);\\n    target.search = params.toString();\\n    target.hash = window.location.hash;\\n    window.location.replace(target.toString());\\n})();\\n</script>\\n</head>\\n<body>\\n<noscript>DeskStream sessions require JavaScript to select the appropriate session page.</noscript>\\n</body>\\n</html>\\n';fs.writeFileSync(base+'session.html',router,'utf8');const remote='<!DOCTYPE html>\\n<html lang=\"en\">\\n<head>\\n<meta charset=\"UTF-8\">\\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\\n<title>DeskStream Remote Session</title>\\n<script>\\n(() => {\\n    const params = new URLSearchParams(window.location.search);\\n    params.set(\"layer\", \"B\");\\n    params.set(\"overlay\", \"1\");\\n    const target = new URL(\"dashboard.html\", window.location.href);\\n    target.search = params.toString();\\n    target.hash = window.location.hash;\\n    window.location.replace(target.toString());\\n})();\\n</script>\\n</head>\\n<body>\\n<noscript>DeskStream remote sessions require JavaScript to load the existing remote-session interface.</noscript>\\n</body>\\n</html>\\n';fs.writeFileSync(base+'remote_session.html',remote,'utf8');console.log('Created controller_session.html from existing session.html; replaced session.html with mode router; added remote_session.html entry to existing dashboard B overlay.');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Copy controller implementation",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Copy-Item -LiteralPath 'desktop-agent\\assets\\session.html' -Destination 'desktop-agent\\assets\\controller_session.html' -Force"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Remove B controls from controller page",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$p='desktop-agent\\assets\\controller_session.html'; $s=[IO.File]::ReadAllText($p); $start=$s.IndexOf('        <!-- B-SIDE REMOTE CONTROLS:'); $end=$s.IndexOf('        <canvas id=\"remoteCanvas\"', $start); if($start -lt 0 -or $end -lt 0){throw 'Could not locate B controls block boundaries'}; $s=$s.Remove($start, $end-$start); [IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify controller markers",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Select-String -LiteralPath 'desktop-agent\\assets\\controller_session.html' -Pattern 'B-SIDE REMOTE CONTROLS','remoteCanvas' | Select-Object -First 5"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Remove B toolbar markup",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$p='desktop-agent\\assets\\controller_session.html'; $s=[IO.File]::ReadAllText($p); $marker=$s.IndexOf('B-SIDE REMOTE CONTROLS:'); $start=$s.LastIndexOf('<', $marker); $canvas=$s.IndexOf('remoteCanvas', $marker); $end=$s.LastIndexOf('<', $canvas); if($marker -lt 0 -or $canvas -lt 0){throw 'Could not locate B controls block boundaries'}; $s=$s.Remove($start, $end-$start); [IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Strip controller B toolbar",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),p='desktop-agent/assets/controller_session.html';let s=fs.readFileSync(p,'utf8');const a=s.indexOf('B-SIDE REMOTE CONTROLS:');const b=s.indexOf('remoteCanvas',a);const start=s.lastIndexOf(String.fromCharCode(60),a);const end=s.lastIndexOf(String.fromCharCode(60),b);if(a<0||b<0)throw Error('B controls markup markers missing');s=s.slice(0,start)+s.slice(end);fs.writeFileSync(p,s,'utf8');console.log('Removed controller page B toolbar markup');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check controller file path",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs');for(const p of ['desktop-agent/assets/session.html','desktop-agent/assets/controller_session.html']){const s=fs.readFileSync(p,'utf8');console.log(p,process.cwd(),s.length,s.indexOf('B-SIDE'),s.slice(0,40).replace(/\\n/g,' '));}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check controller toolbar marker",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');console.log('bytes='+s.length+' marker='+s.indexOf('REMOTE CONTROLS')+' canvas='+s.indexOf('remoteCanvas'));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check controller toolbar tokens",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');for(const x of ['floatingControls','B-SIDE','toolbarHandle','remoteCanvas'])console.log(x,s.indexOf(x));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect controller toolbar source",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8'),i=s.indexOf('floatingControls');console.log(s.slice(i-300,i+250));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Locate toolbar DOM in controller",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');for(const x of ['optionsToggleBtn','B-SIDE REMOTE','floating-controls','id=\"floatingControls\"'])console.log(x,s.indexOf(x));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Validate session routing structure",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),vm=require('vm'),files=['desktop-agent/assets/session.html','desktop-agent/assets/controller_session.html','desktop-agent/assets/remote_session.html'];for(const f of files){const s=fs.readFileSync(f,'utf8');for(const m of s.matchAll(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/gi))new Function(m[1]);console.log(f+' scripts='+[...s.matchAll(/<script\\b/gi)].length+' bytes='+Buffer.byteLength(s));}function route(file,search){let target='';const s=fs.readFileSync(file,'utf8');const code=s.match(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/i)[1];const location={search,href:'http://127.0.0.1/session.html'+search,hash:'#keep',replace:value=>target=value};vm.runInNewContext(code,{URL,URLSearchParams,window:{location}});return new URL(target);}for(const [query,expected] of [['?id=123&token=secret&integrated=1','controller_session.html'],['?id=123&token=secret&layer=A&mode=desktop','controller_session.html'],['?id=123&token=secret&layer=B&mode=desktop','remote_session.html'],['?id=123&token=secret','remote_session.html']]){const url=route(files[0],query);if(!url.pathname.endsWith('/'+expected)||url.searchParams.get('id')!=='123'||url.searchParams.get('token')!=='secret')throw Error('Router failure for '+query);console.log('route '+query+' -> '+url.pathname+url.search);}const remote=route(files[2],'?id=123&token=secret&layer=B');if(!remote.pathname.endsWith('/dashboard.html')||remote.searchParams.get('overlay')!=='1'||remote.searchParams.get('token')!=='secret')throw Error('Remote entry did not preserve params');const c=fs.readFileSync(files[1],'utf8');if(!c.includes('id=\"viewerHeader\"')||c.includes('id=\"floatingControls\"')||c.includes('optionsToggleBtn'))throw Error('Controller UI boundary failure');console.log('Controller horizontal header present; B toolbar markup absent.');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect controller markup tokens",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');for(const x of ['viewerHeader','floatingControls','optionsToggleBtn','floating-controls','Remote controls'])console.log(x,s.indexOf(x));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check controller elements",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');for(const i of [s.indexOf('viewerHeader'),s.indexOf('floatingControls')])console.log(JSON.stringify(s.slice(i-35,i+55)));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Confirm split file content",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs');for(const p of ['desktop-agent/assets/controller_session.html','desktop-agent/assets/dashboard.html']){const a=fs.readFileSync(p,'utf8').split(/\\r?\\n/);console.log('\\n'+p+' lines='+a.length+' bytes='+Buffer.byteLength(fs.readFileSync(p,'utf8')));for(let i=800;i<Math.min(830,a.length);i++)if(/overlay|SESSION_PARAMS|function startConnection|function startWebStream|const BACKEND|CONFIG/.test(a[i]))console.log((i+1)+': '+a[i].trim());}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Find URL diagnostics",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs');for(const f of ['desktop-agent/assets/controller_session.html','desktop-agent/assets/dashboard.html']){const a=fs.readFileSync(f,'utf8').split(/\\r?\\n/);console.log(f);for(let i=0;i<a.length;i++)if(/location\\.href|current_url|console\\.(log|info|warn|error).*location/.test(a[i]))console.log((i+1)+': '+a[i].trim());}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Build DeskStream after split",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$env:CARGO_TARGET_DIR='C:\\cargo-target\\deskstream'; cargo build --release --manifest-path 'desktop-agent\\Cargo.toml'"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Test routes and UI boundaries",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),vm=require('vm'),files=['desktop-agent/assets/session.html','desktop-agent/assets/controller_session.html','desktop-agent/assets/remote_session.html'];for(const f of files){const s=fs.readFileSync(f,'utf8');for(const m of s.matchAll(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/gi))new Function(m[1]);}function route(f,search){let out='';const code=fs.readFileSync(f,'utf8').match(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/i)[1];vm.runInNewContext(code,{URL,URLSearchParams,window:{location:{search,href:'http://host/session.html'+search,hash:'#keep',replace:x=>out=x}}});return new URL(out);}for(const [q,p] of [['?id=123&token=secret&integrated=1','controller_session.html'],['?id=123&token=secret&layer=A','controller_session.html'],['?id=123&token=secret&layer=B','remote_session.html'],['?id=123&token=secret','remote_session.html']]){const u=route(files[0],q);if(!u.pathname.endsWith(p)||u.searchParams.get('id')!=='123'||u.searchParams.get('token')!=='secret')throw Error('router failed '+q);}const b=route(files[2],'?id=123&token=secret&layer=B');if(!b.pathname.endsWith('dashboard.html')||b.searchParams.get('overlay')!=='1'||b.searchParams.get('token')!=='secret')throw Error('remote entry params failed');const c=fs.readFileSync(files[1],'utf8');if(!c.includes('viewerHeader')||c.includes('optionsToggleBtn'))throw Error('controller UI boundary failed');console.log('PASS: all inline scripts parse; A/B routes and parameters preserved; remote entry sets overlay; A header present and B toolbar markup absent.');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Review scoped source changes",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"git --no-pager status --short; git --no-pager diff -- desktop-agent/src/local_server.rs desktop-agent/assets/dashboard.html; Get-Item -LiteralPath 'C:\\cargo-target\\deskstream\\release\\DeskStream.exe' -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify release build",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$env:CARGO_TARGET_DIR='C:\\cargo-target\\deskstream'; cargo build --release --manifest-path 'desktop-agent\\Cargo.toml'"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Stage built DeskStream",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$root='C:\\xampp\\htdocs\\Screen Share'; $release='C:\\cargo-target\\deskstream\\release\\DeskStream.exe'; $staged=Join-Path $root 'DESKSTREAM\\DeskStream.exe'; $verifier=Join-Path $root 'scripts\\verify-release-signature.ps1'; if(-not (Test-Path -LiteralPath $release)){throw 'Release executable missing; staging aborted'}; if(-not (Test-Path -LiteralPath $verifier)){throw 'Production signature verifier missing; staging aborted'}; & $verifier -ExePath $release; if($LASTEXITCODE -ne 0){throw 'Release signature verification failed; staging aborted'}; Copy-Item -LiteralPath $release -Destination $staged -Force; $releaseHash=(Get-FileHash -LiteralPath $release -Algorithm SHA256).Hash; $stagedHash=(Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash; if($releaseHash -ne $stagedHash){throw 'Staged executable hash mismatch'}; & $verifier -ExePath $staged; if($LASTEXITCODE -ne 0){throw 'Staged signature verification failed'}; Write-Output \"SHA256=$stagedHash\""
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify staged SHA256 hashes",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$release=(Get-FileHash -LiteralPath 'C:\\cargo-target\\deskstream\\release\\DeskStream.exe' -Algorithm SHA256).Hash; $staged=(Get-FileHash -LiteralPath 'C:\\xampp\\htdocs\\Screen Share\\DESKSTREAM\\DeskStream.exe' -Algorithm SHA256).Hash; Write-Output \"Release SHA256: $release\"; Write-Output \"Staging SHA256: $staged\"; Write-Output \"Hashes match: $($release -eq $staged)\"; if($release -ne $staged){exit 1}"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Finish controller-only extraction",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),p='desktop-agent/assets/controller_session.html';let s=fs.readFileSync(p,'utf8');const v=s.indexOf(\"const vHeader = document.getElementById('viewerHeader');\"),a=s.lastIndexOf(\"document.addEventListener('DOMContentLoaded', () => {\",v),b=s.indexOf('function sessionTraceId(',v);if(v<0||a<0||b<0)throw Error('controller role setup boundaries missing');s=s.slice(0,a)+\"document.addEventListener('DOMContentLoaded', () => {\\r\\n            const vHeader = document.getElementById('viewerHeader');\\r\\n            if (vHeader) vHeader.style.display = 'flex';\\r\\n        });\\r\\n\\r\\n        \"+s.slice(b);const t=s.indexOf('        const floatingControls =');const h=s.indexOf('        /* ============================================================\\r\\n           HUD',t);if(t<0||h<0)throw Error('controller floating toolbar helper boundaries missing');s=s.slice(0,t)+s.slice(h);fs.writeFileSync(p,s,'utf8');console.log('Removed B role toolbar behavior and drag helpers from the A controller page.');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Extract A toolbar behavior",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent/assets/_split_session_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify extracted session pages",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),vm=require('vm'),files=['desktop-agent/assets/session.html','desktop-agent/assets/controller_session.html','desktop-agent/assets/remote_session.html'];for(const f of files){const s=fs.readFileSync(f,'utf8');for(const m of s.matchAll(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/gi))new Function(m[1]);}function run(f,q){let result='';const code=fs.readFileSync(f,'utf8').match(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/i)[1];vm.runInNewContext(code,{URL,URLSearchParams,window:{location:{search:q,href:'https://unit.test/session.html'+q,hash:'#fragment',replace:x=>result=x}}});return new URL(result);}for(const [q,p] of [['?id=123&token=secret&integrated=1','controller_session.html'],['?id=123&token=secret&layer=A','controller_session.html'],['?id=123&token=secret&layer=B','remote_session.html'],['?id=123&token=secret','remote_session.html']]){const u=run(files[0],q);if(!u.pathname.endsWith(p)||u.searchParams.get('id')!=='123'||u.searchParams.get('token')!=='secret'||u.hash!=='#fragment')throw Error('route or parameter mismatch '+q);}const remote=run(files[2],'?id=123&token=secret&layer=B');if(!remote.pathname.endsWith('dashboard.html')||remote.searchParams.get('overlay')!=='1')throw Error('remote dashboard overlay route failed');const c=fs.readFileSync(files[1],'utf8');if(!c.includes('viewerHeader')||c.includes('floatingControls')||c.includes('optionsToggleBtn')||c.includes('startToolbarDrag'))throw Error('controller/remote UI separation failed');console.log('PASS: inline script syntax; layer/integrated routing; id/token/mode/hash preservation; B dashboard-overlay route; A header present and all B-toolbar DOM/drag code absent.');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect residual controller toolbar",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');for(const x of ['viewerHeader','floatingControls','optionsToggleBtn','startToolbarDrag','positionFloatingToolbar','toolbarHandle','floating-btn','B layer','isRemoteSession'])console.log(x+'='+s.indexOf(x));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Trace remaining toolbar reference",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),s=fs.readFileSync('desktop-agent/assets/controller_session.html','utf8');let i=-1;while((i=s.indexOf('floatingControls',i+1))>=0)console.log(i+': '+JSON.stringify(s.slice(i-80,i+100)));"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run router and HTML checks",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),vm=require('vm'),files=['desktop-agent/assets/session.html','desktop-agent/assets/controller_session.html','desktop-agent/assets/remote_session.html'];for(const f of files){const s=fs.readFileSync(f,'utf8');for(const m of s.matchAll(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/gi))new Function(m[1]);}function run(f,q){let result='';const code=fs.readFileSync(f,'utf8').match(/<script\\b[^>]*>([\\s\\S]*?)<\\/script>/i)[1];vm.runInNewContext(code,{URL,URLSearchParams,window:{location:{search:q,href:'https://unit.test/session.html'+q,hash:'#fragment',replace:x=>result=x}}});return new URL(result);}for(const [q,p] of [['?id=123&token=secret&integrated=1','controller_session.html'],['?id=123&token=secret&layer=A','controller_session.html'],['?id=123&token=secret&layer=B','remote_session.html'],['?id=123&token=secret','remote_session.html']]){const u=run(files[0],q);if(!u.pathname.endsWith(p)||u.searchParams.get('id')!=='123'||u.searchParams.get('token')!=='secret'||u.hash!=='#fragment')throw Error('router mismatch '+q);}const r=run(files[2],'?id=123&token=secret&layer=B');if(!r.pathname.endsWith('dashboard.html')||r.searchParams.get('overlay')!=='1')throw Error('remote entry mismatch');const c=fs.readFileSync(files[1],'utf8');if(!c.includes('viewerHeader')||c.includes('optionsToggleBtn')||c.includes('startToolbarDrag')||c.includes('positionFloatingToolbar'))throw Error('controller toolbar separation mismatch');console.log('PASS: inline JavaScript syntax, A/B routing, preserved id/token/hash, existing B overlay entry, and A-only toolbar boundary.');"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Final release build",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$env:CARGO_TARGET_DIR='C:\\cargo-target\\deskstream'; cargo build --release --manifest-path 'desktop-agent\\Cargo.toml'"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check release linker status",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process cargo,rustc -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,CPU,StartTime"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Stage final DeskStream build",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$root='C:\\xampp\\htdocs\\Screen Share'; $release='C:\\cargo-target\\deskstream\\release\\DeskStream.exe'; $staged=Join-Path $root 'DESKSTREAM\\DeskStream.exe'; $verifier=Join-Path $root 'scripts\\verify-release-signature.ps1'; if(-not (Test-Path -LiteralPath $release)){throw 'Release executable missing; staging aborted'}; if(-not (Test-Path -LiteralPath $verifier)){throw 'Production signature verifier missing; staging aborted'}; & $verifier -ExePath $release; if($LASTEXITCODE -ne 0){throw 'Release signature verification failed; staging aborted'}; Copy-Item -LiteralPath $release -Destination $staged -Force; $releaseHash=(Get-FileHash -LiteralPath $release -Algorithm SHA256).Hash; $stagedHash=(Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash; if($releaseHash -ne $stagedHash){throw 'Staged executable hash mismatch'}; & $verifier -ExePath $staged; if($LASTEXITCODE -ne 0){throw 'Staged signature verification failed'}; Write-Output \"Release SHA256: $releaseHash\"; Write-Output \"Staging SHA256: $stagedHash\"; Write-Output 'Signature and hash verification passed.'"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Move B UI into remote page",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent/assets/_extract_remote_ui_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Locate UI loader hook points",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const fs=require('fs'),a=fs.readFileSync('desktop-agent/assets/dashboard.html','utf8').split(/\\r?\\n/);for(let i=0;i<a.length;i++)if(/IS_B_SESSION_OVERLAY|pollAgentHealth\\(\\);|bSessionChatForm|DOMContentLoaded|bSessionUiMount/.test(a[i]))console.log((i+1)+': '+a[i].trim());"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Move B-session runtime into remote page",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_move_remote_logic_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Validate session page split",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_validate_split_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Validate split runtime dependencies",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_validate_split_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Stage DeskStream release and hash",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$source = 'C:\\cargo-target\\deskstream\\release\\DeskStream.exe'; $destination = 'C:\\xampp\\htdocs\\Screen Share\\DESKSTREAM\\DeskStream.exe'; if (-not (Test-Path -LiteralPath $source)) { throw \"Release artifact not found: $source\" }; Copy-Item -LiteralPath $source -Destination $destination -Force; if (-not $?) { throw 'Failed to stage release artifact.' }; Get-FileHash -LiteralPath $source -Algorithm SHA256; Get-FileHash -LiteralPath $destination -Algorithm SHA256"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify staged artifact hashes",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$source = (Get-FileHash -LiteralPath 'C:\\cargo-target\\deskstream\\release\\DeskStream.exe' -Algorithm SHA256).Hash; $destination = (Get-FileHash -LiteralPath 'C:\\xampp\\htdocs\\Screen Share\\DESKSTREAM\\DeskStream.exe' -Algorithm SHA256).Hash; Write-Output \"RELEASE=$source\"; Write-Output \"STAGED=$destination\"; if ($source -ne $destination) { throw 'Staged artifact hash does not match the release build.' }"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Final session split checks",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_validate_split_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Trace packet source locations",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_trace_audit_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Find A-side packet handlers",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_trace_audit_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Enumerate disconnect and chat paths",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_trace_audit_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check tracing patch diff",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"diff",
+				"--check"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run native agent tests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"set \"CARGO_TARGET_DIR=C:\\cargo-target\\deskstream\" && cargo test --manifest-path \"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\Cargo.toml\" --bin DeskStream"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Validate session JavaScript",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"desktop-agent\\assets\\_trace_validation_tmp.js"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Show native test failure details",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"set \"CARGO_TARGET_DIR=C:\\cargo-target\\deskstream\" && cargo test --manifest-path \"C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\Cargo.toml\" --bin DeskStream -- --nocapture"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check Rust test processes",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process | Where-Object { $_.ProcessName -match 'cargo|DeskStream|rustc' } | Select-Object ProcessName,Id,CPU,StartTime"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run packet trace unit test",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"--manifest-path",
+				"desktop-agent\\Cargo.toml",
+				"--bin",
+				"DeskStream",
+				"session_debug::tests",
+				"--",
+				"--nocapture"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect DeskStream build process",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"tasklist /FI \"IMAGENAME eq rustc.exe\" /FI \"IMAGENAME eq cargo.exe\" /FI \"IMAGENAME eq DeskStream.exe\""
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Build DeskStream local release",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--release",
+				"--manifest-path",
+				"desktop-agent\\Cargo.toml",
+				"--bin",
+				"DeskStream"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Temporary final worktree check",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"git diff -- .vscode/tasks.json;git status --short -- .vscode/tasks.json api/agent/download.php desktop-agent/src/identity/device_id.rs relay-server/src/main.rs DESKSTREAM/DeskStream.exe"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

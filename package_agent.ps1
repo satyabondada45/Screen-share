@@ -12,6 +12,12 @@ if (-not (Test-Path -LiteralPath $ReleaseExe -PathType Leaf)) {
     throw "Verified release executable was not found: $ReleaseExe"
 }
 if (-not (Test-Path -LiteralPath $CargoExe -PathType Leaf)) {
+    $fallbackCargoExe = Join-Path $PSScriptRoot "desktop-agent\target\release\DeskStream.exe"
+    if (Test-Path -LiteralPath $fallbackCargoExe -PathType Leaf) {
+        $CargoExe = $fallbackCargoExe
+    }
+}
+if (-not (Test-Path -LiteralPath $CargoExe -PathType Leaf)) {
     throw "Fresh Cargo release executable was not found: $CargoExe"
 }
 if (-not (Test-Path -LiteralPath $SignatureVerifier -PathType Leaf)) {

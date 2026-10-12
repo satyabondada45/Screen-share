@@ -1,4 +1,4 @@
-﻿Write-Host "Waiting for cargo to finish..."
+Write-Host "Waiting for cargo to finish..."
 while (Get-Process cargo -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 2 }
 
 Write-Host "
@@ -11,9 +11,12 @@ $targetHash = (Get-FileHash $targetExe -Algorithm SHA256).Hash
 $targetSize = (Get-Item $targetExe).Length
 $targetTime = (Get-Item $targetExe).LastWriteTime
 
+$targetSig = (Get-AuthenticodeSignature $targetExe).Status
+
 Write-Host "BUILD EXE SHA-256: $targetHash"
 Write-Host "BUILD EXE SIZE: $targetSize"
 Write-Host "BUILD EXE TIME: $targetTime"
+Write-Host "BUILD EXE SIGNATURE: $targetSig"
 
 Copy-Item $targetExe -Destination $deployExe -Force
 Start-Sleep -Seconds 1
@@ -21,15 +24,23 @@ Start-Sleep -Seconds 1
 $deployHash = (Get-FileHash $deployExe -Algorithm SHA256).Hash
 $deploySize = (Get-Item $deployExe).Length
 $deployTime = (Get-Item $deployExe).LastWriteTime
+$deploySig = (Get-AuthenticodeSignature $deployExe).Status
 
 Write-Host "DEPLOYMENT EXE SHA-256: $deployHash"
 Write-Host "DEPLOYMENT EXE SIZE: $deploySize"
 Write-Host "DEPLOYMENT EXE TIME: $deployTime"
+Write-Host "DEPLOYMENT EXE SIGNATURE: $deploySig"
 
 if ($targetHash -eq $deployHash) {
     Write-Host "HASH MATCH: TRUE"
 } else {
     Write-Host "HASH MATCH: FALSE"
+}
+
+if ($targetSig -eq $deploySig) {
+    Write-Host "SIGNATURE PRESERVED: TRUE"
+} else {
+    Write-Host "SIGNATURE PRESERVED: FALSE"
 }
 
 Write-Host "--- SHORTCUTS ---"

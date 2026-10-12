@@ -11,7 +11,7 @@ if (isset($_SERVER['HTTP_ORIGIN'])) {
         header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
     }
 }
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     exit(0);
 }
 $envFile = __DIR__ . '/../../.env';
@@ -55,6 +55,9 @@ try {
     $pdo->exec("SET time_zone = '+00:00'");
     $conn = $pdo; // Alias for backward compatibility across all modules
 } catch (\PDOException $e) {
+    if (!empty($ADMIN_DB_THROW_ON_ERROR)) {
+        throw $e;
+    }
     http_response_code(500);
     echo json_encode(["status" => "error", "message" => "Database connection failed"]);
     exit;
