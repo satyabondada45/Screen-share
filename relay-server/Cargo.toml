@@ -8,6 +8,8 @@ name = "relay-server"
 path = "src/main.rs"
 
 [dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1"
 tungstenite = "0.20"
 sha2 = "0.10"
 ctrlc = "3.2"

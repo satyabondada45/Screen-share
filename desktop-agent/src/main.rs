@@ -50,6 +50,20 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const MAX_CLIPBOARD_PACKET_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECOVERABLE_PACKET_DISCARD_BYTES: usize = 32 * 1024 * 1024;
 
+fn verify_viewer_pin(pin: &str, supplied_hash: &[u8; 32]) -> bool {
+    if pin.is_empty() {
+        return false;
+    }
+    let expected_hash = Sha256::digest(pin.as_bytes());
+    expected_hash
+        .iter()
+        .zip(supplied_hash)
+        .fold(0u8, |difference, (expected, supplied)| {
+            difference | (expected ^ supplied)
+        })
+        == 0
+}
+
 // ============================================================
 // DPI
 // ============================================================
@@ -1241,6 +1255,7 @@ fn make_file_error_packet(transfer_id: u64, message: &str) -> Vec<u8> {
 // ============================================================
 
 fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) {
+    let host_pin = env::var("SCREENSHARE_DEVICE_PIN").unwrap_or_else(|_| config.pin.clone());
     crate::session_debug::log(
         &config.system_id,
         &format!("B_START system_id={}", config.system_id),
@@ -1271,6 +1286,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         agent_log!("[DISCOVERY] Running in standalone relay mode.");
         config.system_id.clone()
     };
+    if system_id.len() != 9 || !system_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        eprintln!(
+            "[AUTH][ERROR] reason=protocol_error stage=device_registration device_id_length={}",
+            system_id.len()
+        );
+        return;
+    }
+    println!("[AUTH] host_pin_configured={}", !host_pin.is_empty());
     crate::session_debug::log(
         &system_id,
         &format!("B_SYSTEM_ID system_id={}", system_id),
@@ -1823,6 +1846,43 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 &system_id,
                                 "AUTHENTICATION_DATA_RECEIVED",
                                 "received_32_auth_bytes; contents_not_logged",
+                            );
+                            if host_pin.is_empty() || !verify_viewer_pin(&host_pin, &auth_hash) {
+                                native_auth_trace(
+                                    &system_id,
+                                    "AUTHENTICATION_REJECTED",
+                                    if host_pin.is_empty() {
+                                        "reason=host_pin_not_configured"
+                                    } else {
+                                        "reason=invalid_token"
+                                    },
+                                );
+                                crate::session_debug::log(
+                                    &system_id,
+                                    &format!(
+                                        "[AUTH] result=rejected reason={} device_id={}",
+                                        if host_pin.is_empty() {
+                                            "host_pin_not_configured"
+                                        } else {
+                                            "invalid_token"
+                                        },
+                                        system_id
+                                    ),
+                                );
+                                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                                if let Err(error) = stream.write_all(&[0u8]) {
+                                    eprintln!(
+                                        "[AUTH][ERROR] reason=approval_response_write_failed error_kind={:?}",
+                                        error.kind()
+                                    );
+                                    break 'viewer_loop;
+                                }
+                                continue 'viewer_loop;
+                            }
+                            native_auth_trace(
+                                &system_id,
+                                "AUTHENTICATION_ACCEPTED",
+                                "configured_pin_hash_matched",
                             );
 
                             println!("[Host] Received connection request for Target ID: {}", id_str);
@@ -4849,13 +4909,24 @@ mod session_feature_tests {
         collect_transfer_files, decode_audio_packet, discard_packet_bytes,
         make_file_error_packet, next_reconnect_attempt, read_next_file_chunk,
         read_packet_payload, reconnect_delay,
-        send_session_file,
+        send_session_file, verify_viewer_pin,
         should_create_empty_transfer_file,
     };
     use std::io::{self, Read};
     use std::sync::mpsc::{sync_channel, TryRecvError};
     use std::time::Duration;
     use sha2::Digest;
+
+    #[test]
+    fn viewer_authentication_requires_a_configured_matching_pin() {
+        let supplied_hash: [u8; 32] = sha2::Sha256::digest(b"correct-pin").into();
+        let invalid_hash: [u8; 32] = sha2::Sha256::digest(b"wrong-pin").into();
+
+        assert!(verify_viewer_pin("correct-pin", &supplied_hash));
+        assert!(!verify_viewer_pin("wrong-pin", &supplied_hash));
+        assert!(!verify_viewer_pin("", &supplied_hash));
+        assert!(!verify_viewer_pin("correct-pin", &invalid_hash));
+    }
 
     #[test]
     fn transient_reconnect_attempts_continue_past_the_old_limit() {

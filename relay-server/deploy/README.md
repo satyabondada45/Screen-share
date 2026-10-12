@@ -29,19 +29,20 @@ This directory contains the necessary files to deploy the DeskStream Relay Serve
 4. **Install the Systemd Service:**
    Copy the `relay-server.service` file to the systemd directory:
    ```bash
-   sudo cp deploy/relay-server.service /etc/systemd/system/
+   sudo cp deploy/relay-server.service /etc/systemd/system/relay-server.service
    ```
 
 5. **Configure Environment Variables:**
    Edit `/etc/systemd/system/relay-server.service` and verify the `Environment=` values.
-   - Set `SCREENSHARE_BACKEND_URL` to point to your deployed PHP backend API (e.g. `https://your-domain.com/backend/api`).
+   - Set `SCREENSHARE_BACKEND_URL=https://friendssoftwaresolutions.in/DeskStream/api`.
+   - Leave `SCREENSHARE_BACKEND_HOST` and `SCREENSHARE_BACKEND_PORT` unset when using this HTTPS URL.
    - Leave `RELAY_PORT=9001` unless you require a different port.
 
 6. **Reload Systemd and Start the Service:**
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl enable relay-server
-   sudo systemctl start relay-server
+   sudo systemctl enable relay-server.service
+   sudo systemctl start relay-server.service
    ```
 
 7. **Verify it is running:**
@@ -53,3 +54,5 @@ This directory contains the necessary files to deploy the DeskStream Relay Serve
 ## Notes
 - Ensure your AWS Security Group allows inbound TCP traffic on the port specified in `RELAY_PORT` (default: 9001).
 - The relay server leverages `ctrlc` for graceful shutdown handling when receiving SIGTERM/SIGINT.
+- Configure `SCREENSHARE_BACKEND_URL=https://friendssoftwaresolutions.in/DeskStream/api` in the systemd unit. The relay calls `/devices/heartbeat.php` with an HTTP `POST` and JSON `system_id`; the checked-in endpoint returns JSON containing `status` and `updated` and requires no authentication header.
+- The relay uses HTTPS with certificate verification. Leave `SCREENSHARE_BACKEND_HOST` and `SCREENSHARE_BACKEND_PORT` unset for Hostinger; those optional overrides must match the endpoint and its TLS certificate.

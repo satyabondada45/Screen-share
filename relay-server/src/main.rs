@@ -5,10 +5,13 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use reqwest::blocking::Client;
+use reqwest::Url;
+use sha2::{Digest, Sha256};
 use tungstenite::Message;
 
 enum ViewerSession {
@@ -105,6 +108,74 @@ const RELAY_ADDR: &str = "0.0.0.0:9001";
 const CHAT_TYPING_PACKET_TYPE: u8 = 18;
 const REVERSE_REQUEST_PACKET_TYPE: u8 = 30;
 const REVERSE_ACK_PACKET_TYPE: u8 = 31;
+const DEVICE_ID_LENGTH: usize = 9;
+const VIEWER_AUTH_HASH_LENGTH: usize = 32;
+
+type PresenceQueue = (std::sync::mpsc::SyncSender<String>, Arc<Mutex<HashMap<String, ()>>>);
+static BACKEND_PRESENCE_QUEUE: OnceLock<PresenceQueue> = OnceLock::new();
+
+fn valid_device_id(device_id: &str) -> bool {
+    device_id.len() == DEVICE_ID_LENGTH && device_id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn verify_viewer_pin(pin: &str, supplied_hash: &[u8; VIEWER_AUTH_HASH_LENGTH]) -> bool {
+    if pin.is_empty() {
+        return false;
+    }
+    let expected_hash = Sha256::digest(pin.as_bytes());
+    expected_hash
+        .iter()
+        .zip(supplied_hash)
+        .fold(0u8, |difference, (expected, supplied)| {
+            difference | (expected ^ supplied)
+        })
+        == 0
+}
+
+fn read_viewer_handshake<R: Read>(reader: &mut R) -> std::io::Result<(String, [u8; VIEWER_AUTH_HASH_LENGTH])> {
+    let mut id_bytes = [0u8; DEVICE_ID_LENGTH];
+    reader.read_exact(&mut id_bytes)?;
+    if !id_bytes.iter().all(u8::is_ascii_digit) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "viewer device ID must contain exactly nine ASCII digits",
+        ));
+    }
+
+    let session_id = std::str::from_utf8(&id_bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        .to_string();
+    let mut auth_hash = [0u8; VIEWER_AUTH_HASH_LENGTH];
+    reader.read_exact(&mut auth_hash)?;
+    Ok((session_id, auth_hash))
+}
+
+fn parse_websocket_viewer_handshake(
+    packet: &[u8],
+) -> std::io::Result<(String, [u8; VIEWER_AUTH_HASH_LENGTH])> {
+    let expected_len = 1 + DEVICE_ID_LENGTH + VIEWER_AUTH_HASH_LENGTH;
+    if packet.len() != expected_len || packet[0] != 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "viewer packet must contain type, nine-digit device ID, and 32-byte authentication hash",
+        ));
+    }
+
+    let id_bytes = &packet[1..1 + DEVICE_ID_LENGTH];
+    if !id_bytes.iter().all(u8::is_ascii_digit) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "viewer device ID must contain exactly nine ASCII digits",
+        ));
+    }
+
+    let session_id = std::str::from_utf8(id_bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        .to_string();
+    let mut auth_hash = [0u8; VIEWER_AUTH_HASH_LENGTH];
+    auth_hash.copy_from_slice(&packet[1 + DEVICE_ID_LENGTH..]);
+    Ok((session_id, auth_hash))
+}
 
 fn chat_typing_packet(state: u8) -> Option<Vec<u8>> {
     (state <= 1).then(|| vec![CHAT_TYPING_PACKET_TYPE, state])
@@ -123,6 +194,28 @@ fn initial_packet_type(bytes_peeked: usize, peek: &[u8]) -> Option<u8> {
         return None;
     }
     peek.first().copied()
+}
+
+fn is_health_check(stream: &TcpStream) -> std::io::Result<bool> {
+    const HEALTH_PREFIX: &[u8] = b"GET /health";
+    let mut peek = [0u8; HEALTH_PREFIX.len() + 1];
+
+    for _ in 0..50 {
+        let bytes_peeked = stream.peek(&mut peek)?;
+        if bytes_peeked == 0 {
+            return Ok(false);
+        }
+        let prefix_length = bytes_peeked.min(HEALTH_PREFIX.len());
+        if peek[..prefix_length] != HEALTH_PREFIX[..prefix_length] {
+            return Ok(false);
+        }
+        if bytes_peeked > HEALTH_PREFIX.len() {
+            return Ok(matches!(peek[HEALTH_PREFIX.len()], b' ' | b'?' | b'/'));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    Ok(false)
 }
 
 // ============================================================
@@ -1112,52 +1205,189 @@ fn read_server_config() -> Option<String> {
     None
 }
 
-fn resolve_backend_config() -> (String, String, String) {
+fn resolve_backend_url(
+    backend_url: &str,
+    backend_host: Option<&str>,
+    backend_port: Option<&str>,
+) -> Result<Url, String> {
+    let mut url = Url::parse(backend_url).map_err(|_| "invalid backend URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("backend URL must be an HTTP(S) URL without embedded credentials, query, or fragment".to_string());
+    }
+    if let Some(host) = backend_host.filter(|host| !host.is_empty()) {
+        url.set_host(Some(host))
+            .map_err(|_| "invalid SCREENSHARE_BACKEND_HOST".to_string())?;
+    }
+    if let Some(port) = backend_port.filter(|port| !port.is_empty()) {
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| "invalid SCREENSHARE_BACKEND_PORT".to_string())?;
+        if port == 0 {
+            return Err("invalid SCREENSHARE_BACKEND_PORT".to_string());
+        }
+        url.set_port(Some(port))
+            .map_err(|_| "invalid SCREENSHARE_BACKEND_PORT".to_string())?;
+    }
+    let normalized_path = format!("{}/", url.path().trim_end_matches('/'));
+    url.set_path(&normalized_path);
+    Ok(url)
+}
+
+fn configured_backend_url() -> Result<Url, String> {
     let backend_url = env::var("SCREENSHARE_BACKEND_URL")
-        .unwrap_or_else(|_| {
-            read_server_config()
-                .unwrap_or_else(|| "http://127.0.0.1/Screen%20Share/backend/api".to_string())
-        });
-    let backend_host = env::var("SCREENSHARE_BACKEND_HOST")
-        .unwrap_or_else(|_| {
-            let host = backend_url
-                .strip_prefix("http://")
-                .or_else(|| backend_url.strip_prefix("https://"))
-                .unwrap_or(&backend_url)
-                .split('/')
-                .next()
-                .unwrap_or("127.0.0.1");
-            host.to_string()
-        });
-    let backend_port = env::var("SCREENSHARE_BACKEND_PORT")
-        .unwrap_or_else(|_| "80".to_string());
-    (backend_url, backend_host, backend_port)
+        .ok()
+        .or_else(read_server_config)
+        .unwrap_or_else(|| "http://127.0.0.1/Screen%20Share/backend/api".to_string());
+    resolve_backend_url(
+        &backend_url,
+        env::var("SCREENSHARE_BACKEND_HOST").ok().as_deref(),
+        env::var("SCREENSHARE_BACKEND_PORT").ok().as_deref(),
+    )
+}
+
+fn heartbeat_endpoint(base_url: &Url) -> Result<Url, String> {
+    base_url
+        .join("devices/heartbeat.php")
+        .map_err(|_| "invalid heartbeat endpoint URL".to_string())
+}
+
+fn validate_presence_response(
+    status: reqwest::StatusCode,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    if !status.is_success() {
+        return Err(format!("backend returned HTTP {status}"));
+    }
+    if body.get("status").and_then(|value| value.as_str()) != Some("success") {
+        return Err("backend reported heartbeat failure".to_string());
+    }
+    if body.get("updated").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("backend did not update a matching device record".to_string());
+    }
+    Ok(())
+}
+
+fn send_backend_presence(
+    client: &Client,
+    base_url: &Url,
+    session_id: &str,
+) -> Result<(), String> {
+    let endpoint = heartbeat_endpoint(base_url)?;
+    let response = client
+        .post(endpoint)
+        .json(&serde_json::json!({ "system_id": session_id }))
+        .send()
+        .map_err(|error| format!("request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return validate_presence_response(status, serde_json::Value::Null);
+    }
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|_| "backend returned malformed JSON".to_string())?;
+    validate_presence_response(status, body)
+}
+
+fn start_backend_presence_worker() {
+    let client = match Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("[PROXY][ERROR] stage=client_init error={}", error);
+            return;
+        }
+    };
+    let base_url = match configured_backend_url() {
+        Ok(url) => url,
+        Err(error) => {
+            eprintln!("[PROXY][ERROR] stage=config error={}", error);
+            return;
+        }
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(128);
+    let pending = Arc::new(Mutex::new(HashMap::<String, ()>::new()));
+    if BACKEND_PRESENCE_QUEUE
+        .set((sender, Arc::clone(&pending)))
+        .is_err()
+    {
+        return;
+    }
+
+    thread::spawn(move || {
+        let mut success_counts = HashMap::<String, u64>::new();
+
+        while let Ok(session_id) = receiver.recv() {
+            let mut result = Err("request was not attempted".to_string());
+            for attempt in 1..=3 {
+                result = send_backend_presence(&client, &base_url, &session_id);
+                if result.is_ok() {
+                    break;
+                }
+                if attempt < 3 {
+                    thread::sleep(Duration::from_millis(500 * attempt as u64));
+                }
+            }
+            if let Ok(mut entries) = pending.lock() {
+                entries.remove(&session_id);
+            }
+            match result {
+                Ok(()) => {
+                    let count = success_counts.entry(session_id.clone()).or_default();
+                    *count += 1;
+                    if *count == 1 || *count % 50 == 0 {
+                        println!(
+                            "[PROXY] stage=heartbeat_sync device_id={} result=updated count={}",
+                            session_id, count
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "[PROXY][ERROR] stage=heartbeat_sync device_id={} attempts=3 error={}",
+                    session_id, error
+                ),
+            }
+        }
+    });
 }
 
 fn update_backend_presence(session_id: &str, _is_register: bool) {
-    let sid = session_id.to_string();
-    let (backend_url, backend_host, backend_port) = resolve_backend_config();
-
-    thread::spawn(move || {
-        println!("[SYNC] RELAY REGISTERED SYSTEM ID = {}", sid);
-        let json_payload = format!("{{\"system_id\":\"{}\"}}", sid);
-
-        let urls = vec![
-            format!("{}/devices/heartbeat.php", backend_url.trim_end_matches('/')),
-        ];
-
-        for url in &urls {
-            if let Ok(mut stream) = TcpStream::connect(format!("{}:{}", backend_host, backend_port)) {
-                let req = format!("POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", url, backend_host, json_payload.len(), json_payload);
-                let _ = stream.write_all(req.as_bytes());
-                let mut response = String::new();
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                let _ = stream.read_to_string(&mut response);
-                return;
-            }
+    let Some((sender, pending)) = BACKEND_PRESENCE_QUEUE.get() else {
+        eprintln!(
+            "[PROXY][ERROR] stage=enqueue device_id={} reason=worker_not_started",
+            session_id
+        );
+        return;
+    };
+    let mut entries = match pending.lock() {
+        Ok(entries) => entries,
+        Err(_) => {
+            eprintln!(
+                "[PROXY][ERROR] stage=enqueue device_id={} reason=pending_lock_poisoned",
+                session_id
+            );
+            return;
         }
-        eprintln!("[PROXY] Failed to connect to backend at {}:{} for device heartbeat.", backend_host, backend_port);
-    });
+    };
+    if entries.contains_key(session_id) {
+        return;
+    }
+    entries.insert(session_id.to_string(), ());
+    if let Err(error) = sender.try_send(session_id.to_string()) {
+        entries.remove(session_id);
+        eprintln!(
+            "[PROXY][ERROR] stage=enqueue device_id={} reason=queue_full_or_closed error={}",
+            session_id, error
+        );
+    }
 }
 
 // ============================================================
@@ -1186,9 +1416,13 @@ fn handle_host(mut stream: TcpStream, hosts: ClientMap) {
     }
 
     let session_id = match std::str::from_utf8(&actual_id_buf) {
-        Ok(id) => id.trim().to_string(),
+        Ok(id) if valid_device_id(id) => id.to_string(),
         Err(_) => {
             eprintln!("[Relay] Invalid host session ID.");
+            return;
+        }
+        _ => {
+            eprintln!("[Relay] Invalid host session ID format.");
             return;
         }
     };
@@ -1311,6 +1545,20 @@ fn handle_host(mut stream: TcpStream, hosts: ClientMap) {
             };
             let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
             if !approved {
+                match req.session {
+                    ViewerSession::Tcp(mut viewer) => {
+                        let _ = send_all_pair("VIEWER", &mut viewer, &[3u8]);
+                        let _ = viewer.shutdown(Shutdown::Both);
+                    }
+                    ViewerSession::WebSocket(ws_arc) => {
+                        if let Ok(mut ws) = ws_arc.lock() {
+                            let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+                                code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                                reason: "Rejected".into(),
+                            }));
+                        }
+                    }
+                }
                 let _ = req.response_tx.send(false);
                 continue;
             }
@@ -1429,31 +1677,15 @@ fn handle_viewer(mut viewer: TcpStream, hosts: ClientMap) {
         return;
     }
 
-    let mut peek_buf = [0u8; 64];
-    let n = match viewer.peek(&mut peek_buf) {
-        Ok(n) if n >= 32 => n,
-        _ => return,
-    };
-
-    let id_len = if n > 32 { n - 32 } else { 9 };
-    let mut id_buf = vec![0u8; id_len];
-    if !read_exact_logged(&mut viewer, &mut id_buf, "Viewer session ID") {
-        return;
-    }
-
-    let session_id = match std::str::from_utf8(&id_buf) {
-        Ok(id) => id.trim().to_string(),
-        Err(_) => {
-            eprintln!("[Relay] Invalid viewer session ID.");
+    let _ = viewer.set_read_timeout(Some(Duration::from_secs(5)));
+    let (session_id, auth_hash) = match read_viewer_handshake(&mut viewer) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            eprintln!("[AUTH][ERROR] reason=protocol_error stage=viewer_handshake error={}", error);
             let _ = viewer.write_all(&[3u8]);
             return;
         }
     };
-
-    let mut auth_hash = [0u8; 32];
-    if !read_exact_logged(&mut viewer, &mut auth_hash, "Viewer authentication") {
-        return;
-    }
 
     println!("[Relay] Target ID: {}", session_id);
 
@@ -1471,7 +1703,10 @@ fn handle_viewer(mut viewer: TcpStream, hosts: ClientMap) {
     let host_tx = match host_tx {
         Some(tx) => tx,
         None => {
-            println!("[RELAY][ROUTE] Requested System ID {} not currently connected", session_id);
+            println!(
+                "[RELAY][AUTH] result=rejected reason=host_offline device_id={}",
+                session_id
+            );
             let _ = viewer.write_all(&[3u8]);
             return;
         }
@@ -1491,7 +1726,10 @@ fn handle_viewer(mut viewer: TcpStream, hosts: ClientMap) {
 
     let approved = resp_rx.recv().unwrap_or(false);
     if !approved {
-        println!("[Relay] TCP viewer pairing rejected for {}", session_id);
+        println!(
+            "[RELAY][AUTH] result=rejected reason=invalid_token_or_auth_timeout device_id={}",
+            session_id
+        );
     }
 }
 
@@ -1528,52 +1766,20 @@ fn handle_websocket_viewer(stream: TcpStream, hosts: ClientMap) {
         }
     };
 
-    if msg.len() < 2 || msg[0] != 2 {
-        eprintln!("[Relay] Invalid WS viewer packet");
-        let _ = ws.send(Message::Binary(vec![3u8]));
-        return;
-    }
-
-    let payload = &msg[1..];
-    let (session_id, auth_hash) = if payload.len() >= 32 {
-        let id_len = payload.len() - 32;
-        let id_slice = &payload[..id_len];
-        let clean_id = match std::str::from_utf8(id_slice) {
-            Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
-            Err(_) => {
-                println!("[WS] Closing connection\ncode = 1008\nreason = Invalid WS session ID");
-                let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
-                    code: tungstenite::protocol::frame::coding::CloseCode::Policy,
-                    reason: "Invalid ID".into(),
-                }));
-                return;
-            }
-        };
-        let mut hash = [0u8; 32];
-        if payload.len() >= 32 {
-            hash.copy_from_slice(&payload[payload.len() - 32..]);
+    let (session_id, auth_hash) = match parse_websocket_viewer_handshake(&msg) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            eprintln!("[RELAY][WS][AUTH] result=rejected reason=protocol_error detail={}", error);
+            let _ = ws.send(Message::Binary(vec![3u8]));
+            return;
         }
-        (clean_id, hash)
-    } else {
-        let clean_id = match std::str::from_utf8(payload) {
-            Ok(id) => id.trim_matches(char::from(0)).trim().to_string(),
-            Err(_) => {
-                println!("[WS] Closing connection\ncode = 1008\nreason = Invalid WS session ID");
-                let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
-                    code: tungstenite::protocol::frame::coding::CloseCode::Policy,
-                    reason: "Invalid ID".into(),
-                }));
-                return;
-            }
-        };
-        (clean_id, [0u8; 32])
     };
 
-    println!("[DEBUG TRACE] [RELAY VIEWER HANDSHAKE] Payload length: {}, calculated session_id = '{}'", payload.len(), session_id);
+    println!("[DEBUG TRACE] [RELAY VIEWER HANDSHAKE] Payload length: {}, calculated session_id = '{}'", msg.len() - 1, session_id);
     println!("[WS] OPEN");
     println!("[AUTH] Authentication message received");
     println!("[AUTH] Target ID = {}", session_id);
-    println!("[AUTH] Token present = {}", if payload.len() >= 32 { "YES" } else { "NO" });
+    println!("[AUTH] Token present = YES");
 
     println!("[AUTH] Received viewer authentication");
     println!("[RELAY][WS] Viewer requested device = {}", session_id);
@@ -1668,6 +1874,7 @@ fn main() {
     println!("       REMOTE DESKTOP RELAY SERVER");
     println!("  BUILD VERSION: 1.1.1 (Cloud-Ready Relay)");
     println!("========================================");
+    start_backend_presence_worker();
 
     let port = env::var("RELAY_PORT")
         .or_else(|_| env::var("PORT"))
@@ -1730,12 +1937,25 @@ fn main() {
             Some(connection_type) => connection_type,
         };
 
-        if &peek[0..11] == b"GET /health" {
-            println!("[Relay] Health check from {}", peer);
-            let mut stream = stream;
-            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
-            let _ = stream.shutdown(Shutdown::Both);
-            continue;
+        if connection_type == b'G' {
+            match is_health_check(&stream) {
+                Ok(true) => {
+                    println!("[RELAY][HEALTH] peer={} result=ok", peer);
+                    let mut stream = stream;
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "[RELAY][HEALTH] peer={} result=probe_error error={}",
+                        peer, error
+                    );
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+            }
         }
 
         let hosts_clone = Arc::clone(&hosts);
@@ -1813,6 +2033,63 @@ mod tests {
         (stream, vec![video_a, chat_packet, video_b])
     }
 
+    fn start_mock_backend(
+        status: &str,
+        body: &str,
+        delay: Duration,
+    ) -> (Url, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let base_url = Url::parse(&format!("http://{address}/DeskStream/api")).unwrap();
+        let status = status.to_string();
+        let body = body.to_string();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n");
+                if let Some(header_end) = header_end {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            request
+        });
+
+        (base_url, server)
+    }
+
     fn parse_video_chat_sequence<R: Read>(reader: &mut R) -> io::Result<Vec<Vec<u8>>> {
         let mut packets = Vec::new();
         loop {
@@ -1845,6 +2122,198 @@ mod tests {
     #[test]
     fn actual_zero_initial_byte_remains_an_invalid_packet_type() {
         assert_eq!(initial_packet_type(1, &[0]), Some(0));
+    }
+
+    #[test]
+    fn device_ids_are_fixed_width_ascii_digits() {
+        assert!(valid_device_id("705004256"));
+        assert!(!valid_device_id("70500425"));
+        assert!(!valid_device_id("7050042560"));
+        assert!(!valid_device_id("70500A256"));
+    }
+
+    #[test]
+    fn viewer_pin_requires_a_nonempty_matching_sha256() {
+        let valid_hash: [u8; 32] = Sha256::digest(b"deskstream-pin").into();
+        let invalid_hash: [u8; 32] = Sha256::digest(b"other-pin").into();
+
+        assert!(verify_viewer_pin("deskstream-pin", &valid_hash));
+        assert!(!verify_viewer_pin("other-pin", &valid_hash));
+        assert!(!verify_viewer_pin("", &valid_hash));
+        assert!(!verify_viewer_pin("deskstream-pin", &invalid_hash));
+    }
+
+    #[test]
+    fn backend_url_uses_scheme_defaults_and_optional_host_port_overrides() {
+        let url = resolve_backend_url(
+            "https://friendssoftwaresolutions.in/DeskStream/api",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("friendssoftwaresolutions.in"));
+        assert_eq!(url.port_or_known_default(), Some(443));
+        assert_eq!(
+            heartbeat_endpoint(&url).unwrap().path(),
+            "/DeskStream/api/devices/heartbeat.php"
+        );
+
+        let overridden =
+            resolve_backend_url("http://localhost/api", Some("127.0.0.1"), Some("8080"))
+                .unwrap();
+        assert_eq!(overridden.host_str(), Some("127.0.0.1"));
+        assert_eq!(overridden.port(), Some(8080));
+    }
+
+    #[test]
+    fn backend_url_rejects_invalid_ports_and_embedded_credentials() {
+        assert!(resolve_backend_url("https://example.com/api", None, Some("not-a-port")).is_err());
+        assert!(resolve_backend_url("https://user:secret@example.com/api", None, None).is_err());
+        assert!(resolve_backend_url("ftp://example.com/api", None, None).is_err());
+    }
+
+    #[test]
+    fn backend_presence_requires_http_success_and_updated_device() {
+        let ok = reqwest::StatusCode::OK;
+        assert!(validate_presence_response(
+            ok,
+            serde_json::json!({"status": "success", "updated": true})
+        )
+        .is_ok());
+        assert!(validate_presence_response(
+            ok,
+            serde_json::json!({"status": "success", "updated": false})
+        )
+        .is_err());
+        assert!(validate_presence_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::Value::Null
+        )
+        .unwrap_err()
+        .contains("HTTP 500"));
+        assert!(validate_presence_response(ok, serde_json::json!({"status": "error"})).is_err());
+    }
+
+    #[test]
+    fn heartbeat_posts_the_device_id_and_accepts_updated_response() {
+        let (base_url, server) =
+            start_mock_backend("200 OK", r#"{"status":"success","updated":true}"#, Duration::ZERO);
+        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+
+        send_backend_presence(&client, &base_url, "705004256").unwrap();
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(request.starts_with(
+            "POST /DeskStream/api/devices/heartbeat.php HTTP/1.1\r\n"
+        ));
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload["system_id"], "705004256");
+    }
+
+    #[test]
+    fn heartbeat_reports_http_and_json_errors() {
+        let (base_url, server) = start_mock_backend(
+            "503 Service Unavailable",
+            r#"{"status":"error"}"#,
+            Duration::ZERO,
+        );
+        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        assert!(send_backend_presence(&client, &base_url, "705004256")
+            .unwrap_err()
+            .contains("HTTP 503"));
+        server.join().unwrap();
+
+        let (base_url, server) = start_mock_backend("200 OK", "not-json", Duration::ZERO);
+        assert!(send_backend_presence(&client, &base_url, "705004256")
+            .unwrap_err()
+            .contains("malformed JSON"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn heartbeat_timeout_and_unreachable_backend_are_errors() {
+        let (base_url, server) = start_mock_backend(
+            "200 OK",
+            r#"{"status":"success","updated":true}"#,
+            Duration::from_millis(250),
+        );
+        let short_timeout = Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        assert!(send_backend_presence(&short_timeout, &base_url, "705004256")
+            .unwrap_err()
+            .contains("request failed"));
+        server.join().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let unavailable = Url::parse(&format!("http://{address}/DeskStream/api/")).unwrap();
+        assert!(send_backend_presence(&short_timeout, &unavailable, "705004256")
+            .unwrap_err()
+            .contains("request failed"));
+    }
+
+    #[test]
+    fn tcp_viewer_handshake_reads_fixed_fields_across_fragmented_input() {
+        let auth_hash = [0xA5; VIEWER_AUTH_HASH_LENGTH];
+        let mut handshake = b"705004256".to_vec();
+        handshake.extend_from_slice(&auth_hash);
+        handshake.extend_from_slice(b"next-packet");
+        let mut reader = ChunkedReader {
+            bytes: io::Cursor::new(handshake),
+            max_chunk: 1,
+        };
+
+        let (session_id, received_hash) = read_viewer_handshake(&mut reader).unwrap();
+        assert_eq!(session_id, "705004256");
+        assert_eq!(received_hash, auth_hash);
+        let mut remaining = Vec::new();
+        reader.read_to_end(&mut remaining).unwrap();
+        assert_eq!(remaining, b"next-packet");
+    }
+
+    #[test]
+    fn tcp_viewer_handshake_rejects_incomplete_or_invalid_fields() {
+        let mut incomplete = io::Cursor::new(b"705004256short".to_vec());
+        assert_eq!(
+            read_viewer_handshake(&mut incomplete).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let mut invalid = b"70500A256".to_vec();
+        invalid.extend_from_slice(&[0; VIEWER_AUTH_HASH_LENGTH]);
+        assert_eq!(
+            read_viewer_handshake(&mut io::Cursor::new(invalid))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn websocket_viewer_handshake_requires_exact_protocol_fields() {
+        let mut packet = vec![2];
+        packet.extend_from_slice(b"705004256");
+        packet.extend_from_slice(&[0xA5; VIEWER_AUTH_HASH_LENGTH]);
+
+        let (session_id, auth_hash) = parse_websocket_viewer_handshake(&packet).unwrap();
+        assert_eq!(session_id, "705004256");
+        assert_eq!(auth_hash, [0xA5; VIEWER_AUTH_HASH_LENGTH]);
+
+        assert!(parse_websocket_viewer_handshake(&packet[1..]).is_err());
+        let mut invalid_id = packet.clone();
+        invalid_id[4] = b'x';
+        assert!(parse_websocket_viewer_handshake(&invalid_id).is_err());
+        let mut invalid_type = packet.clone();
+        invalid_type[0] = 3;
+        assert!(parse_websocket_viewer_handshake(&invalid_type).is_err());
+        assert!(parse_websocket_viewer_handshake(&packet[..packet.len() - 1]).is_err());
+        let mut trailing = packet;
+        trailing.push(0);
+        assert!(parse_websocket_viewer_handshake(&trailing).is_err());
     }
 
     #[test]
@@ -1907,6 +2376,133 @@ mod tests {
     #[test]
     fn reverse_request_keeps_the_existing_one_byte_type_30_frame() {
         assert_eq!(reverse_request_packet(), vec![30]);
+    }
+
+    fn mock_backend(
+        status: &'static str,
+        body: &'static str,
+        delay: Duration,
+    ) -> (Url, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let bytes_read = stream.read(&mut buffer).unwrap();
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..bytes_read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let lower_line = line.to_ascii_lowercase();
+                        lower_line
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            request
+        });
+        (
+            Url::parse(&format!("http://{address}/DeskStream/api/")).unwrap(),
+            server,
+        )
+    }
+
+    fn test_http_client(timeout: Duration) -> Client {
+        Client::builder()
+            .connect_timeout(timeout)
+            .timeout(timeout)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn backend_heartbeat_sends_expected_post_and_accepts_updated_response() {
+        let (url, server) = mock_backend(
+            "200 OK",
+            r#"{"status":"success","updated":true}"#,
+            Duration::ZERO,
+        );
+        let client = test_http_client(Duration::from_secs(2));
+
+        send_backend_presence(&client, &url, "705004256").unwrap();
+
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(request.starts_with("POST /DeskStream/api/devices/heartbeat.php HTTP/1.1\r\n"));
+        assert!(request.ends_with(r#"{"system_id":"705004256"}"#));
+    }
+
+    #[test]
+    fn backend_heartbeat_reports_http_malformed_and_unupdated_responses() {
+        let (url, server) = mock_backend("503 Service Unavailable", "unavailable", Duration::ZERO);
+        assert!(send_backend_presence(&test_http_client(Duration::from_secs(2)), &url, "705004256")
+            .unwrap_err()
+            .contains("HTTP 503"));
+        let _ = server.join().unwrap();
+
+        let (url, server) = mock_backend("200 OK", "not-json", Duration::ZERO);
+        assert!(send_backend_presence(&test_http_client(Duration::from_secs(2)), &url, "705004256")
+            .unwrap_err()
+            .contains("malformed JSON"));
+        let _ = server.join().unwrap();
+
+        let (url, server) = mock_backend(
+            "200 OK",
+            r#"{"status":"success","updated":false}"#,
+            Duration::ZERO,
+        );
+        assert!(send_backend_presence(&test_http_client(Duration::from_secs(2)), &url, "705004256")
+            .unwrap_err()
+            .contains("did not update"));
+        let _ = server.join().unwrap();
+    }
+
+    #[test]
+    fn backend_heartbeat_timeout_is_reported() {
+        let (url, server) = mock_backend(
+            "200 OK",
+            r#"{"status":"success","updated":true}"#,
+            Duration::from_millis(200),
+        );
+        let result = send_backend_presence(&test_http_client(Duration::from_millis(50)), &url, "705004256");
+        assert!(result.unwrap_err().contains("request failed"));
+        let _ = server.join().unwrap();
+    }
+
+    #[test]
+    fn backend_heartbeat_unreachable_host_is_reported() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let url = Url::parse(&format!("http://{address}/api/")).unwrap();
+        let result = send_backend_presence(
+            &test_http_client(Duration::from_secs(1)),
+            &url,
+            "705004256",
+        );
+        assert!(result.unwrap_err().contains("request failed"));
     }
 
     fn tcp_pair() -> (TcpStream, TcpStream) {

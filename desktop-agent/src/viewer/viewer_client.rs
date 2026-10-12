@@ -108,6 +108,10 @@ fn key_to_agent_code(key: Key) -> Option<u16> {
 
 pub fn start_remote_viewer(relay_addr: &str, target_system_id: &str, pin: &str) {
     let clean_id = target_system_id.replace(" ", "").trim().to_string();
+    if clean_id.len() != 9 || !clean_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        eprintln!("[Viewer] Invalid target device ID; expected exactly nine digits.");
+        return;
+    }
     let relay = relay_addr.to_string();
     let pin_str = pin.to_string();
 

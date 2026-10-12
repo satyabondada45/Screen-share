@@ -13,9 +13,9 @@ RestartSec=5
 
 # Environment Configuration
 Environment="RELAY_PORT=9001"
-Environment="SCREENSHARE_BACKEND_URL=http://localhost/backend/api"
-# Uncomment and update the following line if the PHP backend is on a different server:
-# Environment="SCREENSHARE_BACKEND_URL=https://your-api.com/backend/api"
+Environment="SCREENSHARE_BACKEND_URL=https://friendssoftwaresolutions.in/DeskStream/api"
+# SCREENSHARE_BACKEND_HOST and SCREENSHARE_BACKEND_PORT are optional URL overrides.
+# Leave them unset when using the HTTPS Hostinger API so TLS certificate checks use its hostname.
 
 # Security Hardening
 NoNewPrivileges=true
