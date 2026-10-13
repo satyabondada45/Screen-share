@@ -987,7 +987,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
            CONFIG
         ============================================================ */
 
-        console.log("[SECURITY] location:", location.href);
+        console.log("[SECURITY] location:", location.origin + location.pathname);
         console.log("[SECURITY] origin:", location.origin);
         console.log("[SECURITY] secure:", window.isSecureContext);
         console.log("[SECURITY] VideoDecoder:", ("VideoDecoder" in window));

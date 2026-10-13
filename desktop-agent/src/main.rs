@@ -91,12 +91,19 @@ fn set_native_cursor_pos(x: i32, y: i32) {
     }
 }
 
+#[cfg(not(windows))]
+fn set_native_cursor_pos(_x: i32, _y: i32) {}
+
+// FIXED: native input helpers are Windows-only; non-Windows stubs keep call sites compiling.
 #[cfg(windows)]
 fn send_native_mouse_click(flags: u32) {
     unsafe {
         windows_sys::Win32::UI::Input::KeyboardAndMouse::mouse_event(flags, 0, 0, 0, 0);
     }
 }
+
+#[cfg(not(windows))]
+fn send_native_mouse_click(_flags: u32) {}
 
 #[cfg(windows)]
 fn send_native_mouse_wheel(scroll_y: i16) {
@@ -106,6 +113,9 @@ fn send_native_mouse_wheel(scroll_y: i16) {
     }
 }
 
+#[cfg(not(windows))]
+fn send_native_mouse_wheel(_scroll_y: i16) {}
+
 #[cfg(windows)]
 fn send_native_key(vk: u32, is_up: bool) {
     unsafe {
@@ -113,13 +123,16 @@ fn send_native_key(vk: u32, is_up: bool) {
             keybd_event, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
         };
         let mut flags = if is_up { KEYEVENTF_KEYUP } else { 0 };
-        // Extended keys on Windows: arrows (37-40), PageUp/Dn (33-34), End (35), Home (36), Insert (45), Delete (46), Windows key (91-92)
+        // FIXED: extended keys include arrows, nav cluster, Win, NumLock, ScrollLock
         if matches!(vk, 33..=46 | 91..=93 | 144 | 145) {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
         keybd_event(vk as u8, 0, flags, 0);
     }
 }
+
+#[cfg(not(windows))]
+fn send_native_key(_vk: u32, _is_up: bool) {}
 
 #[cfg(windows)]
 fn attach_thread_to_input_desktop() {
@@ -514,6 +527,7 @@ fn mark_session_packet_read_failed(
 // KEY MAPPING
 // ============================================================
 
+// FIXED: expanded VK map covering arrows, F-keys, nav cluster, and modifiers.
 fn map_key_code(code: u32) -> Option<Key> {
     match code {
         65 => Some(Key::Unicode('a')),
@@ -558,17 +572,49 @@ fn map_key_code(code: u32) -> Option<Key> {
         13 => Some(Key::Return),
         8 => Some(Key::Backspace),
         9 => Some(Key::Tab),
+        27 => Some(Key::Escape),
 
-        16 => Some(Key::Shift),
-        17 => Some(Key::Control),
-        18 => Some(Key::Alt),
+        16 | 160 | 161 => Some(Key::Shift),
+        17 | 162 | 163 => Some(Key::Control),
+        18 | 164 | 165 => Some(Key::Alt),
+        91 | 92 => Some(Key::Meta),
 
         37 => Some(Key::LeftArrow),
         38 => Some(Key::UpArrow),
         39 => Some(Key::RightArrow),
         40 => Some(Key::DownArrow),
 
+        33 => Some(Key::PageUp),
+        34 => Some(Key::PageDown),
+        35 => Some(Key::End),
+        36 => Some(Key::Home),
+        45 => Some(Key::Insert),
         46 => Some(Key::Delete),
+
+        112 => Some(Key::F1),
+        113 => Some(Key::F2),
+        114 => Some(Key::F3),
+        115 => Some(Key::F4),
+        116 => Some(Key::F5),
+        117 => Some(Key::F6),
+        118 => Some(Key::F7),
+        119 => Some(Key::F8),
+        120 => Some(Key::F9),
+        121 => Some(Key::F10),
+        122 => Some(Key::F11),
+        123 => Some(Key::F12),
+
+        186 => Some(Key::Unicode(';')),
+        187 => Some(Key::Unicode('=')),
+        188 => Some(Key::Unicode(',')),
+        189 => Some(Key::Unicode('-')),
+        190 => Some(Key::Unicode('.')),
+        191 => Some(Key::Unicode('/')),
+        192 => Some(Key::Unicode('`')),
+        219 => Some(Key::Unicode('[')),
+        220 => Some(Key::Unicode('\\')),
+        221 => Some(Key::Unicode(']')),
+        222 => Some(Key::Unicode('\'')),
 
         _ => None,
     }
@@ -687,60 +733,134 @@ fn capture_screen_gdi() -> Option<FrameData> {
 // AUDIO
 // ============================================================
 
+// FIXED: Convert CPAL input samples to the Float32 PCM representation used by Type 17.
+fn build_audio_capture_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    sample_rate: u32,
+    channels: u16,
+    write_stream: SyncSender<Vec<u8>>,
+    is_running: Arc<AtomicBool>,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: cpal::Sample + cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    use cpal::FromSample;
+
+    device.build_input_stream(
+        config,
+        move |data: &[T], _: &cpal::InputCallbackInfo| {
+            if !is_running.load(Ordering::Relaxed)
+                || !crate::status::session_audio_enabled()
+                || data.is_empty()
+            {
+                return;
+            }
+            let byte_len = data.len().saturating_mul(std::mem::size_of::<f32>());
+            let Ok(byte_len_u32) = u32::try_from(byte_len) else {
+                return;
+            };
+            let mut packet = Vec::with_capacity(11 + byte_len);
+            packet.push(17);
+            packet.extend_from_slice(&byte_len_u32.to_be_bytes());
+            packet.extend_from_slice(&sample_rate.to_be_bytes());
+            packet.extend_from_slice(&channels.to_be_bytes());
+            for sample in data {
+                let sample: f32 = f32::from_sample(*sample);
+                packet.extend_from_slice(&sample.to_le_bytes());
+            }
+            let _ = write_stream.try_send(packet);
+        },
+        |error| eprintln!("[Audio] Input stream failed: {error}"),
+        None,
+    )
+}
+
+// FIXED: Use the selected device's native CPAL sample format for capture.
 fn start_audio_capture(
     write_stream: std::sync::mpsc::SyncSender<Vec<u8>>,
     is_running: Arc<AtomicBool>,
 ) -> Option<cpal::Stream> {
-    let host = cpal::default_host();
-    let device = host.default_input_device()?;
-    let config = device.default_input_config().ok()?;
-    let stream_config: cpal::StreamConfig = config.clone().into();
+    let device = cpal::default_host().default_input_device()?;
+    let supported_config = device.default_input_config().ok()?;
+    let sample_format = supported_config.sample_format();
+    let stream_config: cpal::StreamConfig = supported_config.into();
     let sample_rate = stream_config.sample_rate.0;
     let channels = stream_config.channels;
 
-    println!(
-        "[Audio] Microphone active: {} Hz, {} channels",
-        sample_rate, channels
-    );
-
-    let stream = device
-        .build_input_stream(
-            &stream_config,
-            move |data: &[f32], _: &_| {
-                if !is_running.load(Ordering::SeqCst) {
-                    return;
-                }
-                if !crate::status::session_audio_enabled() {
-                    return;
-                }
-
-                let byte_len = data.len() * std::mem::size_of::<f32>();
-                if byte_len == 0 {
-                    return;
-                }
-
-                let mut packet = Vec::with_capacity(11 + byte_len);
-                packet.push(17u8);
-                packet.extend_from_slice(&(byte_len as u32).to_be_bytes());
-                packet.extend_from_slice(&(sample_rate as u32).to_be_bytes());
-                packet.extend_from_slice(&(channels as u16).to_be_bytes());
-                for sample in data {
-                    packet.extend_from_slice(&sample.to_le_bytes());
-                }
-
-                let _ = write_stream.try_send(packet);
-            },
-            |_error| {},
-            None,
-        )
-        .ok()?;
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => build_audio_capture_stream::<f32>(
+            &device, &stream_config, sample_rate, channels, write_stream, is_running,
+        ),
+        cpal::SampleFormat::I16 => build_audio_capture_stream::<i16>(
+            &device, &stream_config, sample_rate, channels, write_stream, is_running,
+        ),
+        cpal::SampleFormat::U16 => build_audio_capture_stream::<u16>(
+            &device, &stream_config, sample_rate, channels, write_stream, is_running,
+        ),
+        format => {
+            eprintln!("[Audio] Unsupported input sample format: {format:?}");
+            return None;
+        }
+    }
+    .ok()?;
 
     stream.play().ok()?;
     Some(stream)
 }
+
+// FIXED: Convert Float32 playback samples into the output device's native CPAL format.
+fn build_audio_output_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    queue: Arc<Mutex<VecDeque<f32>>>,
+    output_channels: usize,
+    output_rate: u32,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
+{
+    use cpal::FromSample;
+
+    let fade_frames = (output_rate as f32 * 0.2).max(1.0);
+    let mut fade_level = 0.0f32;
+    let mut last_sample = 0.0f32;
+
+    device.build_output_stream(
+        config,
+        move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
+            let Ok(mut samples) = queue.lock() else {
+                output.fill(T::from_sample(0.0));
+                fade_level = 0.0;
+                last_sample = 0.0;
+                return;
+            };
+
+            for frame in output.chunks_mut(output_channels.max(1)) {
+                let sample = match samples.pop_front() {
+                    Some(sample) => {
+                        fade_level = 1.0;
+                        last_sample = sample;
+                        sample
+                    }
+                    None => {
+                        fade_level = (fade_level - 1.0 / fade_frames).max(0.0);
+                        last_sample * fade_level
+                    }
+                };
+                frame.fill(T::from_sample(sample));
+            }
+        },
+        |error| eprintln!("[Audio] Output stream failed: {error}"),
+        None,
+    )
+}
+
+// FIXED: single playback path — VecDeque<f32>, per-output-channel frames, linear resample
+// upstream, and 200ms fade-out when the queue underruns.
 fn setup_session_audio_playback() -> (Option<cpal::Stream>, Arc<Mutex<VecDeque<f32>>>, u32) {
     let queue = Arc::new(Mutex::new(VecDeque::<f32>::new()));
-    let queue_for_callback = Arc::clone(&queue);
     let device = match cpal::default_host().default_output_device() {
         Some(device) => device,
         None => {
@@ -755,28 +875,26 @@ fn setup_session_audio_playback() -> (Option<cpal::Stream>, Arc<Mutex<VecDeque<f
             return (None, queue, 0);
         }
     };
+    let sample_format = config.sample_format();
     let stream_config: cpal::StreamConfig = config.clone().into();
     let output_rate = stream_config.sample_rate.0;
     let output_channels = stream_config.channels.max(1) as usize;
-    let stream = match device.build_output_stream(
-        &stream_config,
-        move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if let Ok(mut samples) = queue_for_callback.lock() {
-                for frame in output.chunks_mut(output_channels) {
-                    let sample = samples.pop_front().unwrap_or(0.0);
-                    for channel in frame {
-                        *channel = sample;
-                    }
-                }
-            } else {
-                output.fill(0.0);
-            }
-        },
-        |error| {
-            eprintln!("[Audio] Output stream failed: {}", error);
-        },
-        None,
-    ) {
+    let output_stream = match sample_format {
+        cpal::SampleFormat::F32 => build_audio_output_stream::<f32>(
+            &device, &stream_config, Arc::clone(&queue), output_channels, output_rate,
+        ),
+        cpal::SampleFormat::I16 => build_audio_output_stream::<i16>(
+            &device, &stream_config, Arc::clone(&queue), output_channels, output_rate,
+        ),
+        cpal::SampleFormat::U16 => build_audio_output_stream::<u16>(
+            &device, &stream_config, Arc::clone(&queue), output_channels, output_rate,
+        ),
+        format => {
+            eprintln!("[Audio] Unsupported output sample format: {format:?}");
+            return (None, queue, 0);
+        }
+    };
+    let stream = match output_stream {
         Ok(stream) => stream,
         Err(error) => {
             eprintln!("[Audio] Failed to create output stream: {}", error);
@@ -790,6 +908,7 @@ fn setup_session_audio_playback() -> (Option<cpal::Stream>, Arc<Mutex<VecDeque<f
     (Some(stream), queue, output_rate)
 }
 
+// FIXED: downmix to mono then resample capture→output rate with linear interpolation.
 fn decode_audio_packet(
     payload: &[u8],
     sample_rate: u32,
@@ -820,19 +939,30 @@ fn decode_audio_packet(
 
     let mono = samples
         .chunks_exact(channel_count)
-        .map(|frame| {
-            frame.iter().copied().sum::<f32>() / channel_count as f32
-        })
+        .map(|frame| frame.iter().copied().sum::<f32>() / channel_count as f32)
         .collect::<Vec<_>>();
+
+    if sample_rate == output_rate {
+        return Some(mono);
+    }
+
     let output_len = ((mono.len() as u64 * output_rate as u64) / sample_rate as u64) as usize;
-    if output_len == 0 {
+    if output_len == 0 || mono.is_empty() {
         return Some(Vec::new());
     }
+
+    let last = mono.len() - 1;
+    let ratio = sample_rate as f64 / output_rate as f64;
     Some(
         (0..output_len)
             .map(|index| {
-                let source_index = index * sample_rate as usize / output_rate as usize;
-                mono[source_index.min(mono.len() - 1)]
+                let src = index as f64 * ratio;
+                let i0 = src.floor() as usize;
+                let i1 = (i0 + 1).min(last);
+                let t = (src - i0 as f64) as f32;
+                let s0 = mono[i0.min(last)];
+                let s1 = mono[i1];
+                s0 + (s1 - s0) * t
             })
             .collect(),
     )
@@ -2778,9 +2908,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let shared_frame = Arc::new((Mutex::new(None::<FrameData>), Condvar::new()));
                             let shared_frame_cap = Arc::clone(&shared_frame);
 
+                            // FIXED: shared clipboard state + remote-apply flag to avoid echo loops.
                             let last_clipboard_text = Arc::new(Mutex::new(String::new()));
+                            let remote_clipboard_apply = Arc::new(AtomicBool::new(false));
                             let last_clip_recv = Arc::clone(&last_clipboard_text);
                             let last_clip_send = Arc::clone(&last_clipboard_text);
+                            let remote_clip_recv = Arc::clone(&remote_clipboard_apply);
+                            let remote_clip_send = Arc::clone(&remote_clipboard_apply);
                             if let Err(error) = crate::status::clear_session_peer_system_id() {
                                 eprintln!("[SESSION UI] Failed to clear stale peer identity: {}", error);
                             }
@@ -2817,7 +2951,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 );
                                 let (_audio_output_stream, audio_playback_queue, audio_output_rate) =
                                     setup_session_audio_playback();
-                                println!("[INPUT THREAD] Started native input processing loop");
+                                // FIXED: thread-safe arboard clipboard handle for remote apply.
                                 let mut clip = Clipboard::new().ok();
                                 let mut current_file: Option<File> = None;
                                 let mut current_file_path: Option<PathBuf> = None;
@@ -2828,6 +2962,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let mut received_bytes: u64 = 0;
                                 let mut file_hasher = Sha256::new();
                                 let mut inbound_chat_message_id = 0u64;
+                                // FIXED: keyboard modifier latch (Ctrl/Shift/Alt/Win).
+                                let mut mod_ctrl = false;
+                                let mut mod_shift = false;
+                                let mut mod_alt = false;
+                                let mut mod_win = false;
                                 let user_profile = env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
                                 let drop_dir = PathBuf::from(user_profile).join("Downloads").join("DeskStream");
                                 let canonical_drop_dir = fs::create_dir_all(&drop_dir)
@@ -2909,43 +3048,28 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 continue;
                                             }
 
-                                            let type_name = match event_type {
-                                                0 => "MOUSE_MOVE",
-                                                1 | 3 | 7 => "MOUSE_DOWN",
-                                                2 | 4 | 8 => "MOUSE_UP",
-                                                5 => "KEY_DOWN",
-                                                6 => "KEY_UP",
-                                                9 => "MOUSE_WHEEL",
-                                                _ => "CONTROL",
-                                            };
-                                            println!("[CONTROL DEBUG][HOST RX]\ntype={}\nlength=9", type_name);
-                                            println!("[AGENT CONTROL RX]\ntype={}\nbytes=9", event_type);
-                                            println!("[AGENT CONTROL RX] {}", type_name);
-
                                             if event_type == 10 {
                                                 active_idx_input.store(data[0] as usize, Ordering::SeqCst);
                                                 continue;
                                             }
                                             if event_type == 9 {
                                                 let scroll_y = i16::from_be_bytes(data[2..4].try_into().unwrap());
-                                                #[cfg(windows)]
-                                                {
-                                                    send_native_mouse_wheel(scroll_y);
-                                                    println!("[AGENT MOUSE] injected wheel scroll={}", scroll_y);
-                                                    println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_WHEEL\nresult=success");
-                                                }
+                                                send_native_mouse_wheel(scroll_y);
                                                 continue;
                                             }
+                                            // FIXED: track modifiers and inject key events without hot-loop println.
                                             if event_type == 5 || event_type == 6 {
                                                 let key_code = u32::from_be_bytes(data[0..4].try_into().unwrap());
-                                                #[cfg(windows)]
-                                                {
-                                                    send_native_key(key_code, event_type == 6);
-                                                    println!("[INPUT INJECT] keyboard event={} vk={}", if event_type == 5 { "keydown" } else { "keyup" }, key_code);
-                                                    println!("[AGENT KEYBOARD]\nevent={}\nkey={}\ncode={}", if event_type == 5 { "keydown" } else { "keyup" }, key_code, key_code);
-                                                    println!("[AGENT KEYBOARD] injected");
-                                                    println!("[CONTROL DEBUG][INPUT INJECTION]\ntype={}\nresult=success", if event_type == 5 { "KEY_DOWN" } else { "KEY_UP" });
+                                                let is_up = event_type == 6;
+                                                match key_code {
+                                                    16 | 160 | 161 => mod_shift = !is_up,
+                                                    17 | 162 | 163 => mod_ctrl = !is_up,
+                                                    18 | 164 | 165 => mod_alt = !is_up,
+                                                    91 | 92 => mod_win = !is_up,
+                                                    _ => {}
                                                 }
+                                                let _ = (mod_ctrl, mod_shift, mod_alt, mod_win);
+                                                send_native_key(key_code, is_up);
                                                 continue;
                                             }
 
@@ -2965,6 +3089,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             let target_x = ((norm_x as f32 / 65535.0) * (sw - 1.0)).round() as i32;
                                             let target_y = ((norm_y as f32 / 65535.0) * (sh - 1.0)).round() as i32;
 
+                                            // FIXED: mouse inject without hot-loop println noise.
                                             #[cfg(windows)]
                                             {
                                                 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -2973,58 +3098,22 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 };
 
                                                 match event_type {
-                                                    0 => {
-                                                        set_native_cursor_pos(target_x, target_y);
-                                                        println!("[INPUT INJECT] mousemove x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=none", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_MOVE\nresult=success");
-                                                    }
+                                                    0 => set_native_cursor_pos(target_x, target_y),
                                                     1 => {
                                                         set_native_cursor_pos(target_x, target_y);
                                                         send_native_mouse_click(MOUSEEVENTF_LEFTDOWN);
-                                                        println!("[INPUT INJECT] mousedown button=LEFT x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=left_down", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_DOWN\nresult=success");
                                                     }
-                                                    2 => {
-                                                        send_native_mouse_click(MOUSEEVENTF_LEFTUP);
-                                                        println!("[INPUT INJECT] mouseup button=LEFT x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=left_up", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_UP\nresult=success");
-                                                    }
+                                                    2 => send_native_mouse_click(MOUSEEVENTF_LEFTUP),
                                                     3 => {
                                                         set_native_cursor_pos(target_x, target_y);
                                                         send_native_mouse_click(MOUSEEVENTF_RIGHTDOWN);
-                                                        println!("[INPUT INJECT] mousedown button=RIGHT x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=right_down", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_DOWN\nresult=success");
                                                     }
-                                                    4 => {
-                                                        send_native_mouse_click(MOUSEEVENTF_RIGHTUP);
-                                                        println!("[INPUT INJECT] mouseup button=RIGHT x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=right_up", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_UP\nresult=success");
-                                                    }
+                                                    4 => send_native_mouse_click(MOUSEEVENTF_RIGHTUP),
                                                     7 => {
                                                         set_native_cursor_pos(target_x, target_y);
                                                         send_native_mouse_click(MOUSEEVENTF_MIDDLEDOWN);
-                                                        println!("[INPUT INJECT] mousedown button=MIDDLE x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=middle_down", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_DOWN\nresult=success");
                                                     }
-                                                    8 => {
-                                                        send_native_mouse_click(MOUSEEVENTF_MIDDLEUP);
-                                                        println!("[INPUT INJECT] mouseup button=MIDDLE x={} y={}", target_x, target_y);
-                                                        println!("[AGENT MOUSE]\nx={}\ny={}\nbutton=middle_up", target_x, target_y);
-                                                        println!("[AGENT MOUSE] injected");
-                                                        println!("[CONTROL DEBUG][INPUT INJECTION]\ntype=MOUSE_UP\nresult=success");
-                                                    }
+                                                    8 => send_native_mouse_click(MOUSEEVENTF_MIDDLEUP),
                                                     _ => {}
                                                 }
                                             }
@@ -3100,12 +3189,38 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 );
                                                 break;
                                             }
+                                            // FIXED: only apply remote clipboard when different; mark remote-apply flag.
                                             if let Ok(text) = String::from_utf8(text_buf) {
-                                                if let Ok(mut guard) = last_clip_recv.lock() {
-                                                    *guard = text.clone();
+                                                if text.len() > MAX_CLIPBOARD_PACKET_BYTES {
+                                                    continue;
                                                 }
-                                                if let Some(ref mut c) = clip {
-                                                    let _ = c.set_text(text);
+                                                let mut should_apply = false;
+                                                if let Ok(mut guard) = last_clip_recv.lock() {
+                                                    if *guard != text {
+                                                        *guard = text.clone();
+                                                        should_apply = true;
+                                                    }
+                                                }
+                                                if should_apply {
+                                                    remote_clip_recv.store(true, Ordering::SeqCst);
+                                                    if let Some(ref mut c) = clip {
+                                                        let already_matches = c
+                                                            .get_text()
+                                                            .map(|current| current == text)
+                                                            .unwrap_or(false);
+                                                        if !already_matches {
+                                                            if let Err(error) = c.set_text(&text) {
+                                                                eprintln!(
+                                                                    "[CLIPBOARD RX] Failed to apply remote text: {error}"
+                                                                );
+                                                            }
+                                                        }
+                                                    } else {
+                                                        eprintln!(
+                                                            "[CLIPBOARD RX] Clipboard handle unavailable; remote text was not applied"
+                                                        );
+                                                    }
+                                                    remote_clip_recv.store(false, Ordering::SeqCst);
                                                 }
                                             }
                                         }
@@ -3542,6 +3657,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     offered_size
                                                 ),
                                             );
+                                            // FIXED: Type 20 offer → UI acceptance state (25 reject / 26 accept).
                                             current_file = None;
                                             current_file_path = None;
                                             current_transfer_id = Some(transfer_id);
@@ -3558,8 +3674,22 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 let mut reject = vec![25u8];
                                                 reject.extend_from_slice(&transfer_id.to_be_bytes());
                                                 let _ = write_stream_input.send(reject);
+                                                current_transfer_id = None;
+                                                continue;
                                             }
-                                            println!("[FILE RX OFFER] direction=A->B transfer_id={} filename={} total_bytes={}", transfer_id, current_filename, total_file_size);
+                                            crate::status::update_session_file_progress(crate::status::SessionFileProgress {
+                                                transfer_id,
+                                                filename: current_filename.clone(),
+                                                total_bytes: total_file_size,
+                                                received_bytes: 0,
+                                                chunk_index: 0,
+                                                running_sha256_hex: String::new(),
+                                                accepted: false,
+                                            });
+                                            agent_log!(
+                                                "[FILE RX OFFER] transfer_id={} filename={} total_bytes={} awaiting_accept=true",
+                                                transfer_id, current_filename, total_file_size
+                                            );
                                         }
 
                                         21 => {
@@ -3675,8 +3805,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 continue;
                                             }
                                             
-                                            println!("[FILE RX CHUNK] direction=A->B transfer_id={} chunk_index={} chunk_size={}", transfer_id, chunk_idx, chunk_len);
-                                            
+                                            // FIXED: Type 21 chunks require prior Type 26 acceptance; progress + SHA every 100 chunks.
                                             let accepted = match crate::status::session_file_is_accepted(transfer_id) {
                                                 Ok(accepted) => accepted,
                                                 Err(error) => {
@@ -3684,7 +3813,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     false
                                                 }
                                             };
-                                            println!("[FILE RX CHUNK STATE] direction=A->B transfer_id={} received_bytes={} chunk_count={} accepted={}", transfer_id, received_bytes, current_file_chunk_index, accepted);
                                             let chunk_is_valid = current_transfer_id == Some(transfer_id)
                                                 && accepted
                                                 && chunk_idx == current_file_chunk_index
@@ -3709,7 +3837,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                             current_file_path = Some(path);
                                                         }
                                                         Err(error) => {
-                                                            eprintln!("[FILE RX START] direction=A->B transfer_id={} success=false reason=\"Failed to create file: {:?}\"", transfer_id, error);
+                                                            eprintln!("[FILE RX START] transfer_id={} create_failed={:?}", transfer_id, error);
                                                             send_file_error(transfer_id, "Unable to create destination file");
                                                             crate::status::finish_session_file(transfer_id);
                                                             current_transfer_id = None;
@@ -3719,7 +3847,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 }
                                                 if let Some(ref mut file) = current_file {
                                                     if let Err(error) = file.write_all(&chunk_buf) {
-                                                        println!("[FILE RX CHUNK] direction=A->B transfer_id={} success=false reason=\"{}\"", transfer_id, error);
                                                         send_file_error(transfer_id, &format!("Disk write failed: {}", error));
                                                         current_file = None;
                                                         if let Some(path) = current_file_path.take() {
@@ -3733,12 +3860,33 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     file_hasher.update(&chunk_buf);
                                                     received_bytes += chunk_len as u64;
                                                     current_file_chunk_index = current_file_chunk_index.saturating_add(1);
+
+                                                    // FIXED: progress via status; publish running SHA-256 every 100 chunks.
+                                                    let publish_hash = current_file_chunk_index % 100 == 0;
+                                                    let running_hex = if publish_hash {
+                                                        let checkpoint = file_hasher.clone().finalize();
+                                                        checkpoint.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                    crate::status::update_session_file_progress(crate::status::SessionFileProgress {
+                                                        transfer_id,
+                                                        filename: current_filename.clone(),
+                                                        total_bytes: total_file_size,
+                                                        received_bytes,
+                                                        chunk_index: current_file_chunk_index,
+                                                        running_sha256_hex: running_hex,
+                                                        accepted: true,
+                                                    });
                                                 }
+                                            } else if current_transfer_id == Some(transfer_id) && !accepted {
+                                                // FIXED: chunks before UI acceptance (Type 26) — ignore, keep offer pending.
+                                                continue;
                                             } else if current_transfer_id == Some(transfer_id) {
                                                 let reason = if chunk_idx != current_file_chunk_index {
                                                     format!("Unexpected chunk index {}; expected {}", chunk_idx, current_file_chunk_index)
                                                 } else {
-                                                    "Chunk exceeded offered file size or transfer was not accepted".to_string()
+                                                    "Chunk exceeded offered file size".to_string()
                                                 };
                                                 send_file_error(transfer_id, &reason);
                                                 current_file = None;
@@ -3817,6 +3965,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                     }
                                                 }
                                             }
+                                            // FIXED: Type 22 end — final SHA-256 verify + Type 27 ack / Type 24 error.
                                             let transfer_matches = current_transfer_id == Some(transfer_id) && accepted;
                                             let size_matches = total_file_size == final_size && received_bytes == final_size;
                                             let hash_matches = actual_hash.as_slice() == &hdr[16..48];
@@ -3824,23 +3973,27 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 .take()
                                                 .map(|mut file| file.flush().is_ok())
                                                 .unwrap_or(false);
-                                            println!("[FILE RX VERIFY] direction=A->B transfer_id={} end_received=true file_closed={} expected_bytes={} received_bytes={} final_bytes={} size_match={} sha256_match={} accepted={}", transfer_id, flush_ok, total_file_size, received_bytes, final_size, size_matches, hash_matches, transfer_matches);
+                                            crate::status::update_session_file_progress(crate::status::SessionFileProgress {
+                                                transfer_id,
+                                                filename: current_filename.clone(),
+                                                total_bytes: total_file_size,
+                                                received_bytes,
+                                                chunk_index: current_file_chunk_index,
+                                                running_sha256_hex: hash_hex.clone(),
+                                                accepted: transfer_matches,
+                                            });
                                             let valid = transfer_matches && size_matches && hash_matches;
                                             if valid && flush_ok {
                                                 let mut ack = vec![27u8];
                                                 ack.extend_from_slice(&transfer_id.to_be_bytes());
                                                 if let Err(error) = write_stream_input.send(ack) {
-                                                    eprintln!("[FILE RX COMPLETE_ACK] direction=A->B transfer_id={} success=false reason=\"{}\"", transfer_id, error);
-                                                } else {
-                                                    println!("[FILE RX COMPLETE_ACK] direction=A->B transfer_id={} success=true", transfer_id);
+                                                    eprintln!("[FILE RX COMPLETE_ACK] transfer_id={} err={}", transfer_id, error);
                                                 }
-                                                println!("[FILE RX END] direction=A->B transfer_id={} final_sha256={} success=true", transfer_id, hash_hex);
                                             } else {
                                                 send_file_error(transfer_id, "File size or SHA-256 verification failed");
                                                 if let Some(path) = current_file_path.take() {
                                                     let _ = fs::remove_file(path);
                                                 }
-                                                println!("[FILE RX END] direction=A->B transfer_id={} success=false reason=\"SHA-256 or size mismatch\"", transfer_id);
                                             }
                                             crate::status::finish_session_file(transfer_id);
                                             current_transfer_id = None;
@@ -4151,12 +4304,21 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             });
 
+                            // FIXED: local clipboard watcher skips remote-apply echoes and enforces size limit.
                             let clip_identity = system_id.clone();
                             let clip_handle = thread::spawn(move || {
                                 let mut clip = Clipboard::new().ok();
                                 while is_conn_clip.load(Ordering::SeqCst) {
+                                    if remote_clip_send.load(Ordering::SeqCst) {
+                                        thread::sleep(Duration::from_millis(50));
+                                        continue;
+                                    }
                                     if let Some(ref mut c) = clip {
                                         if let Ok(text) = c.get_text() {
+                                            if text.len() > MAX_CLIPBOARD_PACKET_BYTES {
+                                                thread::sleep(Duration::from_millis(1000));
+                                                continue;
+                                            }
                                             let mut is_new = false;
                                             if let Ok(mut guard) = last_clip_send.lock() {
                                                 if *guard != text && !text.is_empty() {
@@ -4166,16 +4328,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             }
                                             if is_new {
                                                 let bytes = text.into_bytes();
-                                                if bytes.len() > MAX_CLIPBOARD_PACKET_BYTES {
-                                                    crate::session_debug::log(
-                                                        &clip_identity,
-                                                        &format!(
-                                                            "[CLIPBOARD TX TRACE] packet_type=12 payload_bytes={} max_payload_bytes={} result=skipped reason=oversized",
-                                                            bytes.len(), MAX_CLIPBOARD_PACKET_BYTES
-                                                        ),
-                                                    );
-                                                    continue;
-                                                }
                                                 let mut packet = Vec::with_capacity(5 + bytes.len());
                                                 packet.push(12u8);
                                                 packet.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -4289,6 +4441,8 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let mut current_enc_width: u32 = 0;
                             let mut current_enc_height: u32 = 0;
                             let mut encode_error_count = 0u64;
+                            // FIXED: do not re-init every frame when hw_encoder stays None after a fatal failure.
+                            let mut encoder_init_failed = false;
 
                             // ── PRE-WARM ENCODER ─────────────────────────────────────────────
                             // The encoder was previously initialized lazily on the first captured
@@ -4451,8 +4605,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     (src_width as u32, src_height as u32)
                                 };
 
-                                if hw_encoder.is_none() || current_enc_width != target_w || current_enc_height != target_h {
-                                    let dynamic_bitrate = ((src_width * src_height) as f64 * 16.0) as u32; 
+                                // FIXED: only (re)init when missing once, or when resolution actually changes.
+                                let resolution_changed =
+                                    current_enc_width != target_w || current_enc_height != target_h;
+                                if (hw_encoder.is_none() && !encoder_init_failed) || resolution_changed {
+                                    let dynamic_bitrate = ((src_width * src_height) as f64 * 16.0) as u32;
                                     let target_bitrate = if is_aws_relay {
                                         dynamic_bitrate.clamp(1_500_000, 3_000_000)
                                     } else {
@@ -4464,26 +4621,44 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             hw_encoder = Some(enc);
                                             current_enc_width = target_w;
                                             current_enc_height = target_h;
+                                            encoder_init_failed = false;
                                         }
                                         Err(e) => {
+                                            // FIXED: remember the attempted dimensions and stop
+                                            // retrying the same failed encoder setup every frame.
+                                            hw_encoder = None;
+                                            current_enc_width = target_w;
+                                            current_enc_height = target_h;
+                                            encoder_init_failed = true;
                                             eprintln!("[H264 HW][FATAL] Hardware encoder initialization failed: {}", e);
-                                            break;
+                                            continue;
                                         }
                                     }
                                 }
 
-                                let encoder = hw_encoder.as_mut().unwrap();
-                                let is_keyframe_request = frame_number == 0 || !encoder.has_produced_keyframe || (frame_number % (TARGET_FPS as u64) == 0) || recovery_req;
-                                if is_keyframe_request {
-                                    println!("[H264] KEYFRAME REQUESTED");
-                                }
+                                let encoder = match hw_encoder.as_mut() {
+                                    Some(enc) => enc,
+                                    None => continue,
+                                };
+                                let is_keyframe_request = frame_number == 0
+                                    || !encoder.has_produced_keyframe
+                                    || (frame_number % (TARGET_FPS as u64) == 0)
+                                    || recovery_req;
 
-                                let h264_bytes = match encoder.encode_rgba(&frame.raw_pixels, src_width, src_height, is_keyframe_request) {
+                                let h264_bytes = match encoder.encode_rgba(
+                                    &frame.raw_pixels,
+                                    src_width,
+                                    src_height,
+                                    is_keyframe_request,
+                                ) {
                                     Ok(bytes) => bytes,
                                     Err(error) => {
                                         encode_error_count += 1;
                                         if encode_error_count == 1 || encode_error_count % 60 == 0 {
-                                            eprintln!("[VIDEO ENCODE ERROR] count={} error={}", encode_error_count, error);
+                                            eprintln!(
+                                                "[VIDEO ENCODE ERROR] count={} error={}",
+                                                encode_error_count, error
+                                            );
                                         }
                                         continue;
                                     }
@@ -4494,85 +4669,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
 
                                 frame_number += 1;
-                                let mut nal_types = Vec::new();
-                                let mut has_sps = false;
-                                let mut has_pps = false;
-                                let mut has_idr = false;
+                                let (_nal_types, _has_sps, _has_pps, has_idr) =
+                                    encoder::mf_encoder::inspect_nals(&h264_bytes);
 
-                                let (parsed_nals, sps_found, pps_found, idr_found) = encoder::mf_encoder::inspect_nals(&h264_bytes);
-                                nal_types = parsed_nals;
-                                has_sps = sps_found;
-                                has_pps = pps_found;
-                                has_idr = idr_found;
-                                let mut i = 0;
-                                while i + 3 < h264_bytes.len() {
-                                    if (h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 1)
-                                        || (i + 4 <= h264_bytes.len() && h264_bytes[i] == 0 && h264_bytes[i+1] == 0 && h264_bytes[i+2] == 0 && h264_bytes[i+3] == 1)
-                                    {
-                                        let sc_len = if h264_bytes[i+2] == 1 { 3 } else { 4 };
-                                        if i + sc_len < h264_bytes.len() {
-                                            let n_type = h264_bytes[i + sc_len] & 0x1F;
-                                            nal_types.push(n_type);
-                                            if n_type == 7 { has_sps = true; }
-                                            else if n_type == 8 { has_pps = true; }
-                                            else if n_type == 5 { has_idr = true; }
-                                        }
-                                        i += sc_len;
-                                    } else {
-                                        i += 1;
-                                    }
-                                }
-
-                                let log_video_frame = frame_number <= 5
-                                    || frame_number % (TARGET_FPS as u64) == 0;
-                                if log_video_frame {
-                                    if has_idr {
-                                        println!("[H264] IDR GENERATED");
-                                        println!("[H264] NAL TYPES={:?}", nal_types);
-                                        println!("[H264] SENDING KEYFRAME TO VIEWER");
-                                    }
-
-                                    let mut raw_hash = 0u64;
-                                    for (idx, &b) in frame.raw_pixels.iter().take(4096).enumerate() {
-                                        raw_hash = raw_hash.wrapping_add((b as u64).wrapping_mul(idx as u64 + 1));
-                                    }
-                                    let pts = (frame_number as u64) * (1_000_000u64 / (TARGET_FPS as u64));
-
-                                    println!("[ENCODER]\nframe={}\ninput_bytes={}\ninput_hash={:016x}\noutput_bytes={}\nnal_types={:?}\nsps={}\npps={}\nidr={}\npts={}",
-                                        frame_number,
-                                        frame.raw_pixels.len(),
-                                        raw_hash,
-                                        h264_bytes.len(),
-                                        nal_types,
-                                        has_sps,
-                                        has_pps,
-                                        has_idr,
-                                        pts
-                                    );
-                                    println!("[VIDEO ENCODE]\nframe={}\nbytes={}\nkeyframe={}\nSPS={}\nPPS={}\nIDR={}",
-                                        frame_number,
-                                        h264_bytes.len(),
-                                        if has_idr { "true" } else { "false" },
-                                        if has_sps { "true" } else { "false" },
-                                        if has_pps { "true" } else { "false" },
-                                        if has_idr { "true" } else { "false" }
-                                    );
-
-                                    let format_str = if h264_bytes.starts_with(&[0, 0, 0, 1]) || h264_bytes.starts_with(&[0, 0, 1]) {
-                                        "AnnexB"
-                                    } else {
-                                        "AVC"
-                                    };
-                                    println!("[AGENT H264]\nencoder=hardware\nformat={}\nsize={}\nNAL types={:?}", format_str, h264_bytes.len(), nal_types);
-                                    println!("[VIDEO TX]");
-                                    println!("capture = YES");
-                                    println!("encoded = YES");
-                                    println!("width = {}", current_enc_width);
-                                    println!("height = {}", current_enc_height);
-                                    println!("bytes = {}", h264_bytes.len());
-                                    println!("keyframe = {}", if has_idr { "YES" } else { "NO" });
-                                }
-
+                                // FIXED: TYPE 13 layout unchanged — type + width + height + size + pts + payload.
                                 let packet_size = 21 + h264_bytes.len();
                                 let mut packet = Vec::with_capacity(packet_size);
                                 packet.push(13u8);
@@ -4582,27 +4682,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 packet.extend_from_slice(&frame.captured_at_ms.to_be_bytes());
                                 packet.extend_from_slice(&h264_bytes);
 
-                                if log_video_frame {
-                                    println!("[VIDEO TX PREP]");
-                                    println!("type = 13");
-                                    println!("width = {}", current_enc_width);
-                                    println!("height = {}", current_enc_height);
-                                    println!("payload_size = {}", h264_bytes.len());
-                                    println!("keyframe = {}", if has_idr { "true" } else { "false" });
-                                    println!("packet_size = {}", packet.len());
-                                }
-
                                 if has_idr {
                                     video_recovery_capture.store(false, Ordering::Release);
                                 } else if recovery_req {
-                                    // Encoder was requested to produce IDR, but didn't produce one yet
+                                    // Still waiting for the requested IDR — do not enqueue P-frames.
                                     continue;
                                 }
 
                                 let mut queue = match video_slot_capture.lock() {
                                     Ok(q) => q,
                                     Err(_) => {
-                                        println!("[VIDEO TX QUEUE ERROR]\nerror=slot_poisoned");
                                         mark_session_disconnected(
                                             &system_id,
                                             "session_capture_pipeline",
@@ -4615,13 +4704,17 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         break;
                                     }
                                 };
-                                
+
+                                // FIXED: keep at most three frames; clear only for a requested
+                                // keyframe when full, and request recovery only on full/no-IDR.
                                 if queue.len() >= 3 {
-                                    queue.clear();
-                                    if !has_idr {
-                                        video_recovery_capture.store(true, Ordering::Release);
-                                        println!("[VIDEO TX DROP] Low-latency queue reached 3 frames; discarded stale frames and requested IDR");
-                                        continue;
+                                    if is_keyframe_request {
+                                        queue.clear();
+                                    } else {
+                                        let _ = queue.pop_front();
+                                        if !has_idr {
+                                            video_recovery_capture.store(true, Ordering::Release);
+                                        }
                                     }
                                 }
 

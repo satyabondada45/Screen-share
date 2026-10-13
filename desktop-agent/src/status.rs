@@ -370,6 +370,20 @@ pub struct SessionFileOffer {
     pub size: u64,
 }
 
+// FIXED: progress reporting for inbound file transfers (UI/status polling).
+#[derive(Clone, Default)]
+pub struct SessionFileProgress {
+    pub transfer_id: u64,
+    pub filename: String,
+    pub total_bytes: u64,
+    pub received_bytes: u64,
+    pub chunk_index: u32,
+    pub running_sha256_hex: String,
+    pub accepted: bool,
+}
+
+static SESSION_FILE_PROGRESS: OnceLock<Mutex<HashMap<u64, SessionFileProgress>>> = OnceLock::new();
+
 fn session_writer() -> &'static Mutex<Option<SyncSender<Vec<u8>>>> {
     SESSION_WRITER.get_or_init(|| Mutex::new(None))
 }
@@ -409,6 +423,11 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
             .lock()
             .map_err(|_| "accepted file lock poisoned".to_string())?
             .clear();
+        SESSION_FILE_PROGRESS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "file progress lock poisoned".to_string())?
+            .clear();
     } else {
         let pending_responses = SESSION_FILE_RESPONSES
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -429,6 +448,11 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .map_err(|_| "accepted file lock poisoned".to_string())?
+            .clear();
+        SESSION_FILE_PROGRESS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "file progress lock poisoned".to_string())?
             .clear();
     }
     Ok(())
@@ -525,6 +549,31 @@ pub fn finish_session_file(transfer_id: u64) {
     {
         accepted.remove(&transfer_id);
     }
+    // FIXED: clear progress when transfer ends.
+    if let Ok(mut progress) = SESSION_FILE_PROGRESS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        progress.remove(&transfer_id);
+    }
+}
+
+// FIXED: publish / query inbound file transfer progress for UI.
+pub fn update_session_file_progress(progress: SessionFileProgress) {
+    if let Ok(mut map) = SESSION_FILE_PROGRESS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        map.insert(progress.transfer_id, progress);
+    }
+}
+
+pub fn session_file_progress() -> Result<Vec<SessionFileProgress>, String> {
+    SESSION_FILE_PROGRESS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map(|map| map.values().cloned().collect())
+        .map_err(|_| "file progress lock poisoned".to_string())
 }
 
 pub fn register_session_file_response(transfer_id: u64) -> Receiver<u8> {
