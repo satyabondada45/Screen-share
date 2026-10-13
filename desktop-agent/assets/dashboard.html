@@ -32,6 +32,19 @@
             --shadow-subtle: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
             --shadow-card: 0 4px 6px -1px rgba(0, 0, 0, 0.03), 0 2px 4px -2px rgba(0, 0, 0, 0.03);
             --shadow-modal: 0 25px 50px -12px rgba(15, 23, 42, 0.25);
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: #fff;
+        }
+
+        .controller-session-layer iframe {
+            position: absolute;
+            inset: 0;
+            display: block;
+            width: 100%;
+            height: 100%;
+            border: 0;
         }
 
         * {
@@ -1343,6 +1356,22 @@
             }
         }
 
+        .controller-session-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: #fff;
+        }
+
+        .controller-session-layer iframe {
+            position: absolute;
+            inset: 0;
+            display: block;
+            width: 100%;
+            height: 100%;
+            border: 0;
+        }
+
     </style>
 </head>
 
@@ -2063,6 +2092,7 @@
             const pass = document.getElementById('loginPassword').value;
             const errEl = document.getElementById('loginErr');
             errEl.style.display = 'none';
+            errEl.style.color = '';
 
             if (!email || !pass) {
                 errEl.textContent = 'Please enter email and password.';
@@ -2101,6 +2131,7 @@
             const pass = document.getElementById('regPassword').value;
             const errEl = document.getElementById('regErr');
             errEl.style.display = 'none';
+            errEl.style.color = '';
 
             if (!username || !email || !pass) {
                 errEl.textContent = 'Please fill all fields.';
@@ -2115,6 +2146,9 @@
                     credentials: 'include',
                     body: JSON.stringify({ username, email, password: pass })
                 });
+                if (!res.ok) {
+                    throw new Error(`Registration failed (HTTP ${res.status}).`);
+                }
                 const data = await res.json();
                 if (data.status === 'success') {
                     showLoginOverlay();
@@ -2126,22 +2160,21 @@
                 } else {
                     errEl.textContent = data.message || 'Registration failed.';
                     errEl.style.display = 'block';
+                    showToast(errEl.textContent);
                 }
-            } catch (e) {
-                console.error("Register fetch error:", e);
-                errEl.textContent = 'Connection error: ' + e.message;
+            } catch (error) {
+                console.error('[AUTH] Registration request failed:', error);
+                errEl.textContent = error.message || 'Could not connect to the registration service.';
                 errEl.style.display = 'block';
+                showToast(errEl.textContent);
             }
         }
 
         async function onAuthenticated(username) {
             isAuthenticated = true;
-            await pollAgentHealth();
             const safeUsername = normalizeDisplayName(username) || getBestAvailableDisplayName();
-            // Hide auth overlays
             document.getElementById('loginOverlay').style.display = 'none';
             document.getElementById('registerOverlay').style.display = 'none';
-            // Reveal dashboard chrome (hidden at startup to prevent flash)
             const topbar = document.getElementById('mainTopbar');
             const workspace = document.getElementById('mainWorkspace');
             if (topbar) topbar.style.display = '';
@@ -2151,6 +2184,7 @@
             document.getElementById('topbarUsername').textContent = '👤 ' + safeUsername;
             applyDisplayIdentity(safeUsername);
             showDashboardPage('home');
+            await pollAgentHealth();
             fetchAllDevices(false);
             setInterval(() => fetchAllDevices(false), 5000);
             setInterval(checkIncoming, 4000);
@@ -2520,10 +2554,7 @@
             const home = document.getElementById('dashboardInnerContent');
             const settings = document.getElementById('settingsPage');
             const about = document.getElementById('aboutPage');
-            
-            // Switching away from any session to view a sidebar page
-            switchSessionTab('dashboard');
-            
+
             const isHome = page === 'home';
             if (home) home.style.display = isHome ? 'block' : 'none';
             if (settings) settings.style.display = page === 'settings' ? 'block' : 'none';
@@ -2793,16 +2824,42 @@
 
         function populateRecentDropdown(devices) {
             const dd = document.getElementById('recentDropdown');
-            if (!devices || devices.length === 0) {
-                dd.innerHTML = '<div class="dropdown-item" style="color:var(--text-muted);">No recent devices</div>';
+            if (!dd) return;
+            const recentDevices = Array.isArray(devices) ? devices.slice(0, 5) : [];
+            if (recentDevices.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'dropdown-item';
+                empty.textContent = 'No recent devices';
+                empty.style.color = 'var(--text-muted)';
+                dd.replaceChildren(empty);
                 return;
             }
-            dd.innerHTML = devices.slice(0, 5).map(dev =>
-                `<div class="dropdown-item" onclick="selectDropdownId('${dev.device_uid || dev.system_id}')">
-                <span><strong>${dev.name || 'Workstation'}</strong> (${formatId(dev.device_uid || dev.system_id)})</span>
-                <span style="font-size:0.75rem;color:var(--text-muted);">${dev.ip_address || ''}</span>
-            </div>`
-            ).join('');
+
+            const items = recentDevices.map(device => {
+                const id = String(device.device_uid || device.system_id || '').replace(/\D/g, '');
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'dropdown-item';
+                item.style.width = '100%';
+                item.style.border = '0';
+                item.style.background = 'transparent';
+                item.style.textAlign = 'left';
+                item.style.font = 'inherit';
+                item.addEventListener('click', () => selectDropdownId(id));
+
+                const identity = document.createElement('span');
+                const name = document.createElement('strong');
+                name.textContent = device.name || 'Workstation';
+                identity.append(name, document.createTextNode(` (${formatId(id)})`));
+
+                const address = document.createElement('span');
+                address.style.fontSize = '0.75rem';
+                address.style.color = 'var(--text-muted)';
+                address.textContent = device.ip_address || '';
+                item.append(identity, address);
+                return item;
+            });
+            dd.replaceChildren(...items);
         }
 
         // ── Incoming modal ───────────────────────────────────────────
@@ -2871,13 +2928,19 @@
             const fileTransfer = document.getElementById('permFileTransfer') ? document.getElementById('permFileTransfer').checked : true;
             
             try {
-                await fetch('http://127.0.0.1:49182/desktop-api/session/permissions', {
+                const permissionsResponse = await fetch(`${BACKEND}/desktop-api/session/permissions`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ view_screen: viewScreen, control_input: controlInput, file_transfer: fileTransfer })
+                    body: JSON.stringify({ view_screen: viewScreen, control_input: controlInput, file_transfer: fileTransfer }),
+                    credentials: 'include'
                 });
-            } catch (e) {
-                console.error('Failed to set local session permissions', e);
+                if (!permissionsResponse.ok) {
+                    throw new Error(`HTTP ${permissionsResponse.status}`);
+                }
+            } catch (error) {
+                console.error('[SESSION] Failed to set session permissions:', error);
+                showToast('Could not apply the selected session permissions.');
+                return;
             }
 
             let accepted = false;
@@ -2933,6 +2996,7 @@
             const INTERVAL_MS = 500;
             const generation = ++_bAcceptPollGeneration;
             const deadline = Date.now() + MAX_WAIT_MS;
+            let lastPollError = null;
 
             const poll = async () => {
                 if (generation !== _bAcceptPollGeneration) return;
@@ -2947,16 +3011,23 @@
                         const bSession = window.deskStreamBSession;
                         if (!bSession) throw new Error('Remote session controls are unavailable.');
                         await bSession.sync();
+                        showToast('Remote session connected.');
                         return;
                     }
                 } catch (error) {
                     if (generation !== _bAcceptPollGeneration) return;
+                    lastPollError = error;
                     console.warn('[DESKSTREAM] waitForRealBSession: health poll failed:', error);
                 } finally {
                     _bAcceptPollInFlight = false;
                 }
                 if (Date.now() >= deadline) {
                     console.warn('[DESKSTREAM] waitForRealBSession: timed out after 30s');
+                    showToast(
+                        lastPollError
+                            ? 'The remote session could not be activated. Check agent and relay status.'
+                            : 'The remote session did not become active. Check the agent and relay connection.'
+                    );
                     return;
                 }
                 if (generation === _bAcceptPollGeneration) {
@@ -3160,10 +3231,6 @@
                     openIntegratedSession(sessionUrl);
                 }
 
-        function switchSessionTab(tabId) {
-            // No-op for direct navigation
-        }
-
         function openIntegratedSession(url) {
             const targetUrl = new URL(url, window.location.href);
             const targetId = targetUrl.searchParams.get('id');
@@ -3179,23 +3246,14 @@
 
             const container = document.createElement('div');
             container.className = 'controller-session-layer';
-            Object.assign(container.style, {
-                position: 'fixed',
-                inset: '0',
-                zIndex: '1000',
-                background: '#fff'
-            });
 
             const iframe = document.createElement('iframe');
             iframe.title = 'Remote controller session';
             iframe.src = targetUrl.toString();
-            iframe.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen');
-            Object.assign(iframe.style, {
-                display: 'block',
-                width: '100%',
-                height: '100%',
-                border: '0'
-            });
+            iframe.setAttribute(
+                'allow',
+                'clipboard-read; clipboard-write; microphone; camera; fullscreen; display-capture'
+            );
             container.appendChild(iframe);
             document.body.appendChild(container);
 
@@ -3240,7 +3298,6 @@
             
             if (currentActiveTab === targetId) {
                 currentActiveTab = 'dashboard';
-                switchSessionTab('dashboard');
             }
             fetchAllDevices();
         }
@@ -3251,7 +3308,6 @@
                 closeSessionTab(currentActiveTab);
             }
         }
-        let integratedSessionEntered = false;
         window.addEventListener('message', function (e) {
             if (e.origin !== window.location.origin) return;
             const sourceEntry = Object.entries(activeSessions).find(([, session]) =>

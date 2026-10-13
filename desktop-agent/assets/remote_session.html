@@ -411,10 +411,11 @@
                 overlay.style.right = '10px';
                 overlay.style.left = 'auto';
                 overlay.style.bottom = 'auto';
+                overlay.style.pointerEvents = 'auto';
 
                 // Try to make the window small if Wry allows it
                 try {
-                    window.resizeTo(350, 150);
+                    window.resizeTo(360, 90);
                 } catch(e) {}
             }
         })();
@@ -645,6 +646,9 @@
             const overlay = document.getElementById('bSessionOverlay');
             if (overlay) overlay.style.display = 'flex';
             window.deskStreamBInstallOverlayDrag?.();
+            if (window.ipc && !window.location.search.includes('overlay=1')) {
+                try { window.ipc.postMessage('open_overlay'); } catch(e) {}
+            }
             // Start session timer
             _bSessionStartTime = Date.now();
             if (_bSessionTimerInterval) clearInterval(_bSessionTimerInterval);
@@ -689,6 +693,9 @@
         }
 
         function _dismissBSessionOverlay() {
+            if (window.ipc) {
+                try { window.ipc.postMessage('close_overlay'); } catch(e) {}
+            }
             if (!_bSessionActive) return;
             _bSessionActive = false;
             _bSessionGeneration++;

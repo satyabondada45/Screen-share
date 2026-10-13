@@ -194,7 +194,7 @@ macro_rules! println {
 
 macro_rules! eprintln {
     ($($arg:tt)*) => {
-        agent_log!($($arg)*);
+        agent_log!($($arg)*)
     };
 }
 
@@ -767,7 +767,7 @@ where
             packet.extend_from_slice(&sample_rate.to_be_bytes());
             packet.extend_from_slice(&channels.to_be_bytes());
             for sample in data {
-                let sample: f32 = f32::from_sample(*sample);
+                let sample: f32 = f32::from_sample_(*sample);
                 packet.extend_from_slice(&sample.to_le_bytes());
             }
             let _ = write_stream.try_send(packet);
@@ -831,7 +831,7 @@ where
         config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             let Ok(mut samples) = queue.lock() else {
-                output.fill(T::from_sample(0.0));
+                output.fill(T::from_sample_(0.0));
                 fade_level = 0.0;
                 last_sample = 0.0;
                 return;
@@ -849,7 +849,7 @@ where
                         last_sample * fade_level
                     }
                 };
-                frame.fill(T::from_sample(sample));
+                frame.fill(T::from_sample_(sample));
             }
         },
         |error| eprintln!("[Audio] Output stream failed: {error}"),
