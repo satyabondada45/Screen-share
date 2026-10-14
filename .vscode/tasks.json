@@ -1318,6 +1318,165 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "cargo-test-auth",
+			"type": "shell",
+			"command": "cd desktop-agent && cargo test viewer_authentication_requires_a_configured_matching_pin -- --nocapture",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "cargo-test-session-feature",
+			"type": "shell",
+			"command": "cd desktop-agent && cargo test session_feature_tests --bin DeskStream -- --nocapture",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "cargo-test-list",
+			"type": "shell",
+			"command": "cd desktop-agent && cargo test --bin DeskStream -- --list",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "cargo-list-tests-2",
+			"type": "shell",
+			"command": "cd desktop-agent && cargo test --bin DeskStream -- --list",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "cargo-test-auth-pinned",
+			"type": "shell",
+			"command": "cd desktop-agent && cargo test --bin DeskStream viewer_authentication_requires_a_configured_matching_pin -- --nocapture",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "cargo-verify-build",
+			"type": "shell",
+			"command": "cd desktop-agent && cargo test --bin DeskStream --no-run ; echo BUILD_OK:$?",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-env-inspect",
+			"type": "shell",
+			"command": "git status --short & cd /d \"C:\\xampp\\htdocs\\Screen Share\\relay-server\" & rustup target list --installed & where.exe cargo & where.exe file",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-build-linux-x86",
+			"type": "shell",
+			"command": "cd relay-server && cargo build --release --target x86_64-unknown-linux-gnu --bin relay-server",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "probe-heartbeat-post",
+			"type": "shell",
+			"command": "curl.exe --silent --show-error --max-time 20 --include --request POST --header \"Content-Type: application/json\" --data-binary \"{\\\"system_id\\\":\\\"542157504\\\"}\" \"https://friendssoftwaresolutions.in/DeskStream/api/devices/heartbeat.php\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "probe-reqwest-agent-ua",
+			"type": "shell",
+			"command": "curl.exe --silent --show-error --max-time 20 --include --request POST --header \"Content-Type: application/json\" --header \"User-Agent: reqwest/0.11.0\" --data-binary \"{\\\"system_id\\\":\\\"542157504\\\"}\" \"https://friendssoftwaresolutions.in/DeskStream/api/devices/heartbeat.php\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-heartbeat-test-build",
+			"type": "shell",
+			"command": "cd relay-server && cargo test --bin relay-server && cargo build --release --target x86_64-unknown-linux-gnu --bin relay-server",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-hb-verify",
+			"type": "shell",
+			"command": "cd relay-server && cargo test --bin relay-server && cargo build --release --target x86_64-unknown-linux-gnu --bin relay-server",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-heartbeat-tests",
+			"type": "shell",
+			"command": "cd relay-server && cargo test --bin relay-server backend_ && cargo test --bin relay-server heartbeat",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-hb-tests-and-linux",
+			"type": "shell",
+			"command": "cd relay-server && cargo test --bin relay-server backend_ && cargo test --bin relay-server heartbeat && cargo build --release --target x86_64-unknown-linux-gnu --bin relay-server",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-artifact-details",
+			"type": "shell",
+			"command": "$p='C:\\xampp\\htdocs\\Screen Share\\relay-server\\target\\x86_64-unknown-linux-gnu\\release\\relay-server'; Get-FileHash -Algorithm SHA256 -LiteralPath $p; $b=[System.IO.File]::ReadAllBytes($p); 'SIZE=' + $b.Length; 'ELF_MAGIC=' + (($b[0..3] | ForEach-Object { $_.ToString('X2') }) -join ' '); 'ELF_CLASS=' + $b[4]; 'ELF_ENDIAN=' + $b[5]; 'ELF_MACHINE=' + ([BitConverter]::ToUInt16($b,18)); 'TARGET=x86_64-unknown-linux-gnu'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "artifact-sha-elf",
+			"type": "shell",
+			"command": "powershell.exe -NoProfile -Command \"$p='C:\\xampp\\htdocs\\Screen Share\\relay-server\\target\\x86_64-unknown-linux-gnu\\release\\relay-server'; Get-FileHash -Algorithm SHA256 -LiteralPath $p; $b=[System.IO.File]::ReadAllBytes($p); 'SIZE=' + $b.Length; 'ELF_MAGIC=' + (($b[0..3] | ForEach-Object { $_.ToString('X2') }) -join ' '); 'ELF_CLASS=' + $b[4]; 'ELF_ENDIAN=' + $b[5]; 'ELF_MACHINE=' + ([BitConverter]::ToUInt16($b,18)); 'TARGET=x86_64-unknown-linux-gnu'\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ssh-access-check",
+			"type": "shell",
+			"command": "where.exe ssh; where.exe scp; ssh-add -l",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "relay-full-test-build-final",
+			"type": "shell",
+			"command": "cd relay-server && cargo test --bin relay-server && cargo build --release --target x86_64-unknown-linux-gnu --bin relay-server",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ssh-tools-agent-check",
+			"type": "shell",
+			"command": "where.exe ssh & where.exe scp & ssh-add -l",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ssh-workflow-discovery",
+			"type": "shell",
+			"command": "powershell.exe -NoProfile -Command \"$d=Join-Path $HOME '.ssh'; if(Test-Path $d){Get-ChildItem -LiteralPath $d -File | Select-Object -ExpandProperty Name; $c=Join-Path $d 'config'; if(Test-Path $c){Select-String -Path $c -Pattern '^\\s*Host\\s+' | ForEach-Object {$_.Line.Trim()}}}\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "get-relay-build-hash",
+			"type": "shell",
+			"command": "powershell.exe -NoProfile -Command \"$p='C:\\xampp\\htdocs\\Screen Share\\relay-server\\target\\x86_64-unknown-linux-gnu\\release\\relay-server'; (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash; 'SIZE=' + (Get-Item -LiteralPath $p).Length; $b=[System.IO.File]::ReadAllBytes($p); 'ELF=' + (($b[0..3] | ForEach-Object { $_.ToString('X2') }) -join ' '); 'MACHINE=' + [BitConverter]::ToUInt16($b,18)\" & git status --short & git rev-parse HEAD & git diff --stat",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Temporary relay test build",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"--manifest-path",
+				"relay-server/Cargo.toml"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

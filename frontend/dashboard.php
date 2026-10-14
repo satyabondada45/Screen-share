@@ -2079,6 +2079,7 @@ function getRelativeTime($timestamp)
             }
 
             showToast('Sending connection request to ' + formatId(cleanId) + '...');
+            console.info('[CONNECT] stage=SESSION_REQUEST_STARTED target_id=' + cleanId + ' timestamp=' + new Date().toISOString());
 
             try {
                 const res = await fetch('/DeskStream/api/connections/request.php', {
@@ -2093,18 +2094,21 @@ function getRelativeTime($timestamp)
 
                 const data = await res.json();
 
-                if (data.status !== 'success') {
+                if (!res.ok || data.status !== 'success') {
+                    console.warn('[CONNECT] stage=SESSION_REQUEST result=rejected http_status=' + res.status + ' code=' + (data.code || 'unspecified'));
                     showToast(data.message || 'Failed to initiate connection');
                     return;
                 }
 
                 const token = data.request.request_token;
+                console.info('[CONNECT] stage=SESSION_CREATED request_id=' + data.request.id + ' target_id=' + data.request.target_system_id + ' token_present=' + Boolean(token));
                 showToast('Request sent. Waiting for remote approval (up to 60s)...');
 
                 // Clear any existing polling loop
                 if (pendingPollInterval) clearInterval(pendingPollInterval);
 
                 let pollCount = 0;
+                let lastStatusPollErrorAt = 0;
                 pendingPollInterval = setInterval(async () => {
                     pollCount++;
                     if (pollCount > 65) {
@@ -2117,8 +2121,18 @@ function getRelativeTime($timestamp)
                         const statusRes = await fetch(`/DeskStream/api/connections/status.php?token=${encodeURIComponent(token)}`);
                         const statusData = await statusRes.json();
 
+                        if (!statusRes.ok || statusData.status !== 'success') {
+                            if (Date.now() - lastStatusPollErrorAt >= 10000) {
+                                console.warn('[CONNECT] stage=SESSION_STATUS_POLL result=error http_status=' + statusRes.status + ' code=' + (statusData.code || 'unspecified'));
+                                lastStatusPollErrorAt = Date.now();
+                            }
+                            return;
+                        }
+                        lastStatusPollErrorAt = 0;
+
                         if (statusData.request_status === 'accepted') {
                             clearInterval(pendingPollInterval);
+                            console.info('[CONNECT] stage=SESSION_APPROVED request_id=' + statusData.request.id + ' target_id=' + statusData.request.target_system_id);
                             showToast('Connection APPROVED! Launching session...');
                             setTimeout(() => {
                                 const sessionUrl = `remote/session.php?id=${encodeURIComponent(cleanId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}`;
@@ -2132,11 +2146,15 @@ function getRelativeTime($timestamp)
                             showToast('Connection request expired (timeout).');
                         }
                     } catch (e) {
-                        // ignore network blips
+                        if (Date.now() - lastStatusPollErrorAt >= 10000) {
+                            console.warn('[CONNECT] stage=SESSION_STATUS_POLL result=network_error');
+                            lastStatusPollErrorAt = Date.now();
+                        }
                     }
                 }, 1000);
 
             } catch (err) {
+                console.error('[CONNECT] stage=SESSION_REQUEST result=network_error');
                 showToast('Server error initiating connection request');
             }
         }
@@ -2149,7 +2167,7 @@ function getRelativeTime($timestamp)
                 return;
             }
             console.log("[REQUEST] Incoming remote request");
-            console.log("[REQUEST] Request ID:", token);
+            console.log("[REQUEST] Request token present:", Boolean(token));
             console.log("[REQUEST] Target User ID:", currentHostUid);
             console.log("[REQUEST] Requester User ID:", uid);
 
@@ -2171,7 +2189,7 @@ function getRelativeTime($timestamp)
             if (currentRequestToken) {
                 handledTokens.add(currentRequestToken);
                 console.log("[REQUEST] REJECT clicked");
-                console.log("[REQUEST] Sending REJECT for Request ID:", currentRequestToken);
+                console.log("[REQUEST] Sending REJECT; request token present:", Boolean(currentRequestToken));
                 try {
                     await fetch('/DeskStream/api/connections/reject.php', {
                         method: 'POST',
@@ -2198,7 +2216,7 @@ function getRelativeTime($timestamp)
                 isApprovedReverseRequest = requestToken === autoAcceptingReverseToken;
                 handledTokens.add(requestToken);
                 console.log("[REQUEST] ACCEPT clicked");
-                console.log("[REQUEST] Sending ACCEPT for Request ID:", requestToken);
+                console.log("[REQUEST] Sending ACCEPT; request token present:", Boolean(requestToken));
                 try {
                     const response = await fetch('/DeskStream/api/connections/accept.php', {
                         method: 'POST',
@@ -2792,6 +2810,15 @@ function getRelativeTime($timestamp)
                     <span style="font-size:0.75rem; color:var(--text-muted);">${dev.ip_address || ''}</span>
                 </div>
             `).join('');
+        }
+
+        const connectTarget = new URLSearchParams(window.location.search).get('connect');
+        if (connectTarget) {
+            const remoteIdInput = document.getElementById('remoteIdInput');
+            if (remoteIdInput) {
+                remoteIdInput.value = connectTarget;
+                setTimeout(startConnection, 0);
+            }
         }
         // Initialize: Fetch on start and poll every 3 seconds
         fetchAllDevices();

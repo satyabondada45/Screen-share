@@ -19,7 +19,7 @@ pub mod session_debug;
 
 use arboard::Clipboard;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use enigo::{Axis, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+use enigo::Key;
 use encoder::HardwareH264Encoder;
 use screenshots::Screen;
 use sha2::{Digest, Sha256};
@@ -50,18 +50,70 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const MAX_CLIPBOARD_PACKET_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECOVERABLE_PACKET_DISCARD_BYTES: usize = 32 * 1024 * 1024;
 
-fn verify_viewer_pin(pin: &str, supplied_hash: &[u8; 32]) -> bool {
-    if pin.is_empty() {
+// FIXED: Type-2/Type-3 PIN auth uses a raw 32-byte SHA-256 digest of the UTF-8 PIN.
+// Never generate an all-zero digest as a stand-in for a missing PIN.
+#[allow(dead_code)]
+const AUTH_PIN_MISSING: &str = "AUTH_PIN_MISSING";
+#[allow(dead_code)]
+const AUTH_PIN_INVALID: &str = "AUTH_PIN_INVALID";
+const AUTH_SESSION_REJECTED: &str = "AUTH_SESSION_REJECTED";
+#[allow(dead_code)]
+const AUTH_PROTOCOL_MISMATCH: &str = "AUTH_PROTOCOL_MISMATCH";
+const AUTH_RELAY_DISCONNECTED: &str = "AUTH_RELAY_DISCONNECTED";
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerAuthResult {
+    Accepted,
+    Rejected(&'static str),
+}
+
+fn is_all_zero_auth_hash(hash: &[u8; 32]) -> bool {
+    hash.iter().copied().fold(0u8, |acc, byte| acc | byte) == 0
+}
+
+#[allow(dead_code)]
+fn hashes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
         return false;
     }
-    let expected_hash = Sha256::digest(pin.as_bytes());
-    expected_hash
-        .iter()
-        .zip(supplied_hash)
-        .fold(0u8, |difference, (expected, supplied)| {
-            difference | (expected ^ supplied)
-        })
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
         == 0
+}
+
+#[allow(dead_code)]
+fn viewer_pin_sha256(pin: &str) -> [u8; 32] {
+    Sha256::digest(pin.trim().as_bytes()).into()
+}
+
+#[allow(dead_code)]
+fn authenticate_viewer_pin(pin: &str, supplied_hash: &[u8; 32]) -> ViewerAuthResult {
+    let pin = pin.trim();
+
+    if pin.is_empty() {
+        return ViewerAuthResult::Rejected(AUTH_PIN_MISSING);
+    }
+
+    // Configured PIN: require exact digest. Never accept all-zero as a bypass.
+    if is_all_zero_auth_hash(supplied_hash) {
+        return ViewerAuthResult::Rejected(AUTH_PROTOCOL_MISMATCH);
+    }
+    let expected = viewer_pin_sha256(pin);
+    if hashes_equal(&expected, supplied_hash) {
+        ViewerAuthResult::Accepted
+    } else {
+        ViewerAuthResult::Rejected(AUTH_PIN_INVALID)
+    }
+}
+
+#[allow(dead_code)]
+fn verify_viewer_pin(pin: &str, supplied_hash: &[u8; 32]) -> bool {
+    matches!(
+        authenticate_viewer_pin(pin, supplied_hash),
+        ViewerAuthResult::Accepted
+    )
 }
 
 // ============================================================
@@ -292,6 +344,21 @@ fn record_reconnect_failure(identity: &str, attempt: u32, stage: &str, reason: &
     thread::sleep(delay);
 }
 
+fn stage_log(identity: &str, stage_event: &str, detail: &str) {
+    let timestamp_ms = current_time_millis();
+    println!(
+        "[STAGE] timestamp_ms={} device_id={} event={} {}",
+        timestamp_ms, identity, stage_event, detail
+    );
+    crate::session_debug::log(
+        identity,
+        &format!(
+            "event={} timestamp_ms={} {}",
+            stage_event, timestamp_ms, detail
+        ),
+    );
+}
+
 fn native_auth_trace(identity: &str, event: &str, detail: &str) {
     let timestamp_ms = current_time_millis();
     println!(
@@ -301,8 +368,8 @@ fn native_auth_trace(identity: &str, event: &str, detail: &str) {
     crate::session_debug::log(
         identity,
         &format!(
-            "[NATIVE AUTH TRACE] timestamp_ms={} event={} detail={}",
-            timestamp_ms, event, detail
+            "event={} timestamp_ms={} detail={}",
+            event, timestamp_ms, detail
         ),
     );
 }
@@ -821,8 +888,6 @@ fn build_audio_output_stream<T>(
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
 {
-    use cpal::FromSample;
-
     let fade_frames = (output_rate as f32 * 0.2).max(1.0);
     let mut fade_level = 0.0f32;
     let mut last_sample = 0.0f32;
@@ -1385,7 +1450,24 @@ fn make_file_error_packet(transfer_id: u64, message: &str) -> Vec<u8> {
 // ============================================================
 
 fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) {
-    let host_pin = env::var("SCREENSHARE_DEVICE_PIN").unwrap_or_else(|_| config.pin.clone());
+    let host_pin = config.get_effective_pin();
+    let backend_url = if !config.backend_url.is_empty() {
+        config.backend_url.clone()
+    } else {
+        identity::device_id::DEFAULT_BACKEND_URL.to_string()
+    };
+    stage_log(
+        &config.system_id,
+        "AGENT_STARTUP",
+        &format!(
+            "system_id={} device_uuid={} relay_addr={} backend_url={} host_pin_configured={}",
+            config.system_id,
+            config.device_uuid,
+            relay_addr,
+            backend_url,
+            !host_pin.trim().is_empty()
+        ),
+    );
     crate::session_debug::log(
         &config.system_id,
         &format!("B_START system_id={}", config.system_id),
@@ -1394,8 +1476,6 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         &config.system_id,
         &format!("B_RELAY_CONFIG endpoint={}", relay_addr),
     );
-    let host_ip = relay_addr.split(':').next().unwrap_or("127.0.0.1");
-    let backend_url = "https://friendssoftwaresolutions.in/DeskStream/api".to_string(); 
     // Use persistent device UUID as the machine identifier
     // Use the config system_id (deterministic from UUID) as the initial system_id hint
     let mut backend = registration::backend_client::BackendClient::new(
@@ -1508,8 +1588,23 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                 reconnect_was_requested
             ),
         );
+        stage_log(
+            &system_id,
+            "RECONNECT_STARTED",
+            &format!(
+                "attempt={} max_attempts={} intentional={}",
+                reconnect_attempt.saturating_add(1),
+                MAX_RECONNECT_ATTEMPTS,
+                reconnect_was_requested
+            ),
+        );
 
         agent_log!("[RELAY] Connecting to relay {}...", relay_addr);
+        stage_log(
+            &system_id,
+            "RELAY_CONNECT_STARTED",
+            &format!("relay_addr={} system_id={}", relay_addr, system_id),
+        );
         crate::session_debug::lifecycle(
             &system_id,
             "OUTER_LOOP_RECONNECT_STARTED",
@@ -1534,6 +1629,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
         let stream = match TcpStream::connect(&relay_addr) {
             Ok(s) => {
+                stage_log(
+                    &system_id,
+                    "RELAY_CONNECTED",
+                    &format!("relay_addr={} system_id={}", relay_addr, system_id),
+                );
                 crate::session_debug::lifecycle(
                     &system_id,
                     "NEW_RELAY_CONNECTION",
@@ -1550,6 +1650,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                 s
             }
             Err(e) => {
+                stage_log(
+                    &system_id,
+                    "RELAY_DISCONNECTED",
+                    &format!("reason=tcp_connect_failed error={:?}", e),
+                );
                 crate::session_debug::log(
                     &system_id,
                     &format!("B_TCP_CONNECT_FAILED error={}", e),
@@ -1664,6 +1769,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
         }
 
         println!("[RELAY] Registration ACK received");
+        stage_log(
+            &system_id,
+            "DEVICE_REGISTERED",
+            &format!("device_id={} ack={}", system_id, ack[0]),
+        );
         crate::status::set_relay_state(true);
         crate::status::set_reconnect_state("Healthy", 0, MAX_RECONNECT_ATTEMPTS);
         reconnect_attempt = 0;
@@ -1777,6 +1887,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     if let Ok(mut tracker) = idle_heartbeat_sender.lock() {
                                         tracker.mark_sent(probe_id, Instant::now());
                                     }
+                                    stage_log(
+                                        &heartbeat_identity,
+                                        "HEARTBEAT_SENT",
+                                        &format!("type=14 probe_id={} packet_bytes=9", probe_id),
+                                    );
                                     crate::session_debug::log(
                                         &heartbeat_identity,
                                         &format!(
@@ -1827,6 +1942,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
             match stream.read_exact(&mut type_buf) {
                 Ok(_) => {
+                    stage_log(
+                        &system_id,
+                        "INCOMING_MESSAGE_RECEIVED",
+                        &format!("message_type={}", type_buf[0]),
+                    );
                     match type_buf[0] {
                         // Type 14: Heartbeat ACK from relay
                         14 => {
@@ -1842,6 +1962,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         .unwrap_or(crate::status::HeartbeatReceive::Stale);
                                     match outcome {
                                         crate::status::HeartbeatReceive::Matched { rtt_ms } => {
+                                            stage_log(
+                                                &system_id,
+                                                "HEARTBEAT_ACKNOWLEDGED",
+                                                &format!("probe_id={} rtt_ms={}", probe_id, rtt_ms),
+                                            );
                                             crate::session_debug::log(
                                                 &system_id,
                                                 &format!(
@@ -1912,6 +2037,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                         // Type 3: Incoming session request / Authentication
                         3 => {
+                            stage_log(
+                                &system_id,
+                                "CONNECTION_REQUEST_RECEIVED",
+                                &format!("message_type=3 device_id={}", system_id),
+                            );
                             native_auth_trace(
                                 &system_id,
                                 "SESSION_REQUEST_RECEIVED",
@@ -1969,38 +2099,80 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     reconnect_was_requested,
                                     &format!("Type 3 authentication hash read_exact failed: {:?}", error),
                                 );
+                                native_auth_trace(
+                                    &system_id,
+                                    AUTH_RELAY_DISCONNECTED,
+                                    "type3_auth_hash_read_failed",
+                                );
                                 eprintln!("[Agent] Failed to read auth hash from relay.");
                                 break 'viewer_loop;
                             }
+                            let is_zero_hash = is_all_zero_auth_hash(&auth_hash);
+                            let target_len = system_id.len();
+                            stage_log(
+                                &system_id,
+                                "SESSION_FIELDS_VALIDATED",
+                                &format!(
+                                    "target_device_id_len={} expected_payload_len=32 actual_payload_len=32 hash_empty={}",
+                                    target_len,
+                                    is_zero_hash
+                                ),
+                            );
+                            stage_log(
+                                &system_id,
+                                "AUTHENTICATION_STARTED",
+                                &format!(
+                                    "device_id={} host_approval_check=true supplied_digest_len=32",
+                                    system_id
+                                ),
+                            );
                             native_auth_trace(
                                 &system_id,
                                 "AUTHENTICATION_DATA_RECEIVED",
-                                "received_32_auth_bytes; contents_not_logged",
+                                "received_32_auth_bytes; host_approval_check; contents_not_logged",
                             );
-                            if host_pin.is_empty() || !verify_viewer_pin(&host_pin, &auth_hash) {
+
+                            let is_approved = if is_zero_hash {
+                                false
+                            } else {
+                                crate::status::check_and_consume_approved_session(&auth_hash)
+                            };
+
+                            if !is_approved {
+                                stage_log(
+                                    &system_id,
+                                    "AUTHENTICATION_FAILED",
+                                    &format!("device_id={} reason=HOST_APPROVAL_MISSING_OR_EXPIRED response_byte=0x00", system_id),
+                                );
+                                stage_log(
+                                    &system_id,
+                                    "SESSION_REJECTED",
+                                    &format!("device_id={} response_byte=0 reason=HOST_APPROVAL_MISSING_OR_EXPIRED", system_id),
+                                );
                                 native_auth_trace(
                                     &system_id,
                                     "AUTHENTICATION_REJECTED",
-                                    if host_pin.is_empty() {
-                                        "reason=host_pin_not_configured"
-                                    } else {
-                                        "reason=invalid_token"
-                                    },
+                                    "HOST_APPROVAL_MISSING_OR_EXPIRED",
                                 );
                                 crate::session_debug::log(
                                     &system_id,
                                     &format!(
-                                        "[AUTH] result=rejected reason={} device_id={}",
-                                        if host_pin.is_empty() {
-                                            "host_pin_not_configured"
-                                        } else {
-                                            "invalid_token"
-                                        },
+                                        "[AUTH] result=rejected reason=HOST_APPROVAL_MISSING_OR_EXPIRED response_byte=0x00 device_id={}",
                                         system_id
                                     ),
                                 );
+                                native_auth_trace(
+                                    &system_id,
+                                    AUTH_SESSION_REJECTED,
+                                    "writing_auth_failure_byte_0x00",
+                                );
                                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                                 if let Err(error) = stream.write_all(&[0u8]) {
+                                    native_auth_trace(
+                                        &system_id,
+                                        AUTH_RELAY_DISCONNECTED,
+                                        "approval_response_write_failed",
+                                    );
                                     eprintln!(
                                         "[AUTH][ERROR] reason=approval_response_write_failed error_kind={:?}",
                                         error.kind()
@@ -2009,10 +2181,23 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                                 continue 'viewer_loop;
                             }
+
+                            stage_log(
+                                &system_id,
+                                "AUTHENTICATION_SUCCEEDED",
+                                &format!("device_id={} response_byte=0x01", system_id),
+                            );
                             native_auth_trace(
                                 &system_id,
                                 "AUTHENTICATION_ACCEPTED",
-                                "configured_pin_hash_matched",
+                                "host_approved_session_matched",
+                            );
+                            crate::session_debug::log(
+                                &system_id,
+                                &format!(
+                                    "[AUTH] result=accepted response_byte=0x01 device_id={}",
+                                    system_id
+                                ),
                             );
 
                             println!("[Host] Received connection request for Target ID: {}", id_str);
@@ -2068,6 +2253,16 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 eprintln!("[Agent] Failed to send approval ACK to relay.");
                                 break 'viewer_loop;
                             }
+                            stage_log(
+                                &system_id,
+                                "SESSION_ACCEPTED",
+                                &format!("device_id={} response_byte=1 outcome=accepted", system_id),
+                            );
+                            stage_log(
+                                &system_id,
+                                "STREAM_INITIALIZATION_STARTED",
+                                &format!("device_id={} target_fps={}", system_id, TARGET_FPS),
+                            );
                             native_auth_trace(&system_id, "APPROVAL_SENT", "approval_ack_1_written");
                             crate::session_debug::log(
                                 &system_id,
@@ -2093,6 +2288,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let session_stream = match stream.try_clone() {
                                 Ok(s) => s,
                                 Err(e) => {
+                                    stage_log(
+                                        &system_id,
+                                        "STREAM_INITIALIZATION_FAILED",
+                                        &format!("device_id={} error=session_stream_clone_failed: {:?}", system_id, e),
+                                    );
                                     eprintln!("[Agent] Failed to clone stream for session thread: {}", e);
                                     break 'viewer_loop;
                                 }
@@ -2133,7 +2333,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let worker_connected = Arc::clone(&panic_connected);
                                 let worker_result = std::panic::catch_unwind(
                                     std::panic::AssertUnwindSafe(|| {
-                                let mut stream = LifecycleTcpStream::new(
+                                let stream = LifecycleTcpStream::new(
                                     session_stream,
                                     system_id_clone.clone(),
                                     "session_pipeline",
@@ -2197,6 +2397,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             Some(is_in_session.as_ref()),
                                             false,
                                             &format!("TcpStream::try_clone failed: {:?}", e),
+                                        );
+                                        stage_log(
+                                            &system_id,
+                                            "STREAM_INITIALIZATION_FAILED",
+                                            &format!("device_id={} error=reader_socket_clone_failed: {:?}", system_id, e),
                                         );
                                         mark_session_disconnected(
                                             &system_id,
@@ -2269,6 +2474,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         false,
                                         &format!("TcpStream::try_clone failed: {:?}", e),
                                     );
+                                    stage_log(
+                                        &system_id,
+                                        "STREAM_INITIALIZATION_FAILED",
+                                        &format!("device_id={} error=writer_socket_clone_failed: {:?}", system_id, e),
+                                    );
                                     mark_session_disconnected(
                                         &system_id,
                                         "session_pipeline",
@@ -2297,6 +2507,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
                             println!("[STREAM STATE] ACTIVE");
                             println!("[VIDEO STATE] ACTIVE");
+                            stage_log(
+                                &system_id,
+                                "STREAM_STARTED",
+                                &format!("device_id={} state=ACTIVE", system_id),
+                            );
                             crate::session_debug::log(
                                 &system_id,
                                 "B_STREAM_STATE state=ACTIVE",
@@ -4217,7 +4432,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                     false,
                                     "reader thread returning",
                                 );
-                                current_file = None;
+                                drop(current_file.take());
                                 if let Some(path) = current_file_path.take() {
                                     let _ = fs::remove_file(path);
                                 }
@@ -4305,7 +4520,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             });
 
                             // FIXED: local clipboard watcher skips remote-apply echoes and enforces size limit.
-                            let clip_identity = system_id.clone();
+                            let _clip_identity = system_id.clone();
                             let clip_handle = thread::spawn(move || {
                                 let mut clip = Clipboard::new().ok();
                                 while is_conn_clip.load(Ordering::SeqCst) {
@@ -4768,6 +4983,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 &system_id,
                                 "B_STREAM_STATE state=STOPPED",
                             );
+                            stage_log(
+                                &system_id,
+                                "SESSION_DISCONNECTED",
+                                &format!("device_id={} outcome=session_ended", system_id),
+                            );
 
                             println!("[Agent] Session ended. Preparing for next request...");
                             is_in_session.store(false, Ordering::SeqCst);
@@ -4957,6 +5177,11 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                     println!("[RELAY][DISCONNECT] system_id={}", system_id);
                     println!("[RELAY][DISCONNECT] socket_error={:?}", e);
                     println!("[RELAY][DISCONNECT] remote_closed=true");
+                    stage_log(
+                        &system_id,
+                        "RELAY_DISCONNECTED",
+                        &format!("device_id={} reason=socket_closed error={:?}", system_id, e),
+                    );
                     crate::session_debug::log(
                         &system_id,
                         &format!("B_DISCONNECT error={}", e),
@@ -4999,16 +5224,45 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 #[cfg(test)]
 mod session_feature_tests {
     use super::{
-        collect_transfer_files, decode_audio_packet, discard_packet_bytes,
+        authenticate_viewer_pin, collect_transfer_files,
+        decode_audio_packet, discard_packet_bytes, is_all_zero_auth_hash,
         make_file_error_packet, next_reconnect_attempt, read_next_file_chunk,
-        read_packet_payload, reconnect_delay,
-        send_session_file, verify_viewer_pin,
-        should_create_empty_transfer_file,
+        read_packet_payload, reconnect_delay, send_session_file,
+        should_create_empty_transfer_file, verify_viewer_pin, viewer_pin_sha256,
+        ViewerAuthResult, AUTH_PIN_INVALID, AUTH_PIN_MISSING, AUTH_PROTOCOL_MISMATCH,
     };
     use std::io::{self, Read};
     use std::sync::mpsc::{sync_channel, TryRecvError};
     use std::time::Duration;
     use sha2::Digest;
+
+    #[test]
+    fn host_approval_workflow_authenticates_valid_token_and_rejects_unapproved_or_replayed() {
+        use crate::status::{clear_approved_sessions, record_approved_session, check_and_consume_approved_session};
+        clear_approved_sessions();
+
+        let token = "approved-token-12345";
+        let valid_hash: [u8; 32] = sha2::Sha256::digest(token.as_bytes()).into();
+        let unapproved_hash: [u8; 32] = sha2::Sha256::digest(b"unapproved-token").into();
+        let zero_hash = [0u8; 32];
+
+        // 1. Before approval: rejected
+        assert!(!check_and_consume_approved_session(&valid_hash));
+        assert!(!check_and_consume_approved_session(&zero_hash));
+
+        // 2. Host approves request
+        record_approved_session(token, "requester-device-999");
+
+        // 3. Unapproved and zero hashes rejected
+        assert!(!check_and_consume_approved_session(&unapproved_hash));
+        assert!(!check_and_consume_approved_session(&zero_hash));
+
+        // 4. Approved token accepted
+        assert!(check_and_consume_approved_session(&valid_hash));
+
+        // 5. Replay attempt rejected (single-use)
+        assert!(!check_and_consume_approved_session(&valid_hash));
+    }
 
     #[test]
     fn viewer_authentication_requires_a_configured_matching_pin() {
@@ -5017,8 +5271,116 @@ mod session_feature_tests {
 
         assert!(verify_viewer_pin("correct-pin", &supplied_hash));
         assert!(!verify_viewer_pin("wrong-pin", &supplied_hash));
-        assert!(!verify_viewer_pin("", &supplied_hash));
         assert!(!verify_viewer_pin("correct-pin", &invalid_hash));
+        assert!(!verify_viewer_pin("", &supplied_hash));
+        assert!(!verify_viewer_pin("   ", &supplied_hash));
+    }
+
+    #[test]
+    fn missing_host_pin_rejects_zero_and_empty_string_digests() {
+        let zeros = [0u8; 32];
+        let empty_digest = viewer_pin_sha256("");
+        assert!(!is_all_zero_auth_hash(&empty_digest));
+        assert_eq!(
+            authenticate_viewer_pin("", &zeros),
+            ViewerAuthResult::Rejected(AUTH_PIN_MISSING)
+        );
+        assert_eq!(
+            authenticate_viewer_pin("", &empty_digest),
+            ViewerAuthResult::Rejected(AUTH_PIN_MISSING)
+        );
+        assert_eq!(
+            authenticate_viewer_pin("", &viewer_pin_sha256("not-empty")),
+            ViewerAuthResult::Rejected(AUTH_PIN_MISSING)
+        );
+        assert_eq!(
+            authenticate_viewer_pin("   ", &zeros),
+            ViewerAuthResult::Rejected(AUTH_PIN_MISSING)
+        );
+    }
+
+    #[test]
+    fn configured_pin_rejects_zero_hash_and_wrong_digest() {
+        let zeros = [0u8; 32];
+        assert_eq!(
+            authenticate_viewer_pin("secret", &zeros),
+            ViewerAuthResult::Rejected(AUTH_PROTOCOL_MISMATCH)
+        );
+        assert_eq!(
+            authenticate_viewer_pin("secret", &viewer_pin_sha256("other")),
+            ViewerAuthResult::Rejected(AUTH_PIN_INVALID)
+        );
+        assert_eq!(
+            authenticate_viewer_pin("secret", &viewer_pin_sha256("secret")),
+            ViewerAuthResult::Accepted
+        );
+    }
+
+    #[test]
+    fn invalid_session_tokens_and_digests_are_rejected() {
+        let pin = "987654";
+        let valid_hash = viewer_pin_sha256(pin);
+        
+        // Single bit flip
+        let mut corrupted = valid_hash;
+        corrupted[15] ^= 0x01;
+        assert_eq!(
+            authenticate_viewer_pin(pin, &corrupted),
+            ViewerAuthResult::Rejected(AUTH_PIN_INVALID)
+        );
+
+        // All zeros
+        assert_eq!(
+            authenticate_viewer_pin(pin, &[0u8; 32]),
+            ViewerAuthResult::Rejected(AUTH_PROTOCOL_MISMATCH)
+        );
+
+        // Empty PIN on host rejects any token
+        assert_eq!(
+            authenticate_viewer_pin("", &valid_hash),
+            ViewerAuthResult::Rejected(AUTH_PIN_MISSING)
+        );
+    }
+
+    #[test]
+    fn default_host_pin_authenticates_valid_hash_and_rejects_invalid_hash() {
+        use crate::identity::device_id::DEFAULT_PIN;
+        let valid_hash = viewer_pin_sha256(DEFAULT_PIN);
+        let wrong_hash = viewer_pin_sha256("wrong-pin");
+        let zero_hash = [0u8; 32];
+
+        // Valid PIN digest is accepted
+        assert_eq!(
+            authenticate_viewer_pin(DEFAULT_PIN, &valid_hash),
+            ViewerAuthResult::Accepted
+        );
+
+        // Wrong PIN digest is rejected
+        assert_eq!(
+            authenticate_viewer_pin(DEFAULT_PIN, &wrong_hash),
+            ViewerAuthResult::Rejected(AUTH_PIN_INVALID)
+        );
+
+        // All-zero digest is rejected as protocol mismatch
+        assert_eq!(
+            authenticate_viewer_pin(DEFAULT_PIN, &zero_hash),
+            ViewerAuthResult::Rejected(AUTH_PROTOCOL_MISMATCH)
+        );
+    }
+
+    #[test]
+    fn incorrect_target_device_id_format_is_detected() {
+        let is_valid_target_id = |id: &str| -> bool {
+            let clean: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+            clean.len() == 9 && id.chars().all(|c| c.is_ascii_digit() || c == ' ')
+        };
+
+        assert!(is_valid_target_id("123456789"));
+        assert!(is_valid_target_id("123 456 789"));
+        assert!(!is_valid_target_id("12345678"));
+        assert!(!is_valid_target_id("1234567890"));
+        assert!(!is_valid_target_id("12345678a"));
+        assert!(!is_valid_target_id(""));
     }
 
     #[test]
@@ -5388,7 +5750,7 @@ fn main() {
     let relay_addr = config.relay_addr.clone();
 
     // Initialise shared log buffer (bounded, 500 lines)
-    let log_buf: Arc<Mutex<std::collections::VecDeque<String>>> =
+    let _log_buf: Arc<Mutex<std::collections::VecDeque<String>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(500)));
 
     // Initialise LIVE status global

@@ -31,9 +31,63 @@ fn center_window_on_primary_monitor(window: &Window) {
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
+fn controller_dashboard_url(local_url: &str) -> String {
+    let url_without_fragment = local_url.split_once('#').map_or(local_url, |(url, _)| url);
+    let (url_without_query, query) = url_without_fragment
+        .split_once('?')
+        .map_or((url_without_fragment, None), |(url, query)| (url, Some(query)));
+    let path_start = url_without_query.find("://").map_or(0, |scheme_end| {
+        url_without_query[scheme_end + 3..]
+            .find('/')
+            .map_or(url_without_query.len(), |path_start| scheme_end + 3 + path_start)
+    });
+    let path = &url_without_query[path_start..];
+    let filename = path.rsplit('/').next().unwrap_or_default();
+    let path_is_directory = path.is_empty()
+        || path.ends_with('/')
+        || !filename.contains('.');
+    let dashboard_base = if path.is_empty() || (!path.ends_with('/') && !filename.contains('.')) {
+        format!("{url_without_query}/")
+    } else if path.ends_with('/') {
+        url_without_query.to_string()
+    } else {
+        let directory_end = url_without_query
+            .rfind('/')
+            .filter(|index| *index >= path_start)
+            .unwrap_or(path_start);
+        url_without_query[..=directory_end].to_string()
+    };
+    let mut dashboard_url = format!("{dashboard_base}dashboard.html");
+    if filename == "dashboard.html" || path_is_directory {
+        if let Some(query) = query {
+            dashboard_url.push('?');
+            dashboard_url.push_str(query);
+        }
+    }
+    dashboard_url
+}
+
+fn url_with_overlay_parameter(url: &str) -> String {
+    let (url_without_fragment, fragment) = url
+        .split_once('#')
+        .map_or((url, None), |(url, fragment)| (url, Some(fragment)));
+    let separator = if url_without_fragment.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let mut overlay_url = format!("{url_without_fragment}{separator}overlay=1");
+    if let Some(fragment) = fragment {
+        overlay_url.push('#');
+        overlay_url.push_str(fragment);
+    }
+    overlay_url
+}
+
 /// Runs the WebView application on the main thread.
 /// `quit` is shared with the tray controller and closes the application when set.
 pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
+    let controller_url = controller_dashboard_url(&local_url);
     let event_loop = EventLoopBuilder::<String>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
@@ -57,13 +111,13 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
 
     #[cfg(target_os = "windows")]
     let builder = WebViewBuilder::new()
-        .with_url(&local_url)
+        .with_url(&controller_url)
         .with_additional_browser_args(
             "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required",
         );
 
     #[cfg(not(target_os = "windows"))]
-    let builder = WebViewBuilder::new().with_url(&local_url);
+    let builder = WebViewBuilder::new().with_url(&controller_url);
 
     let proxy_main = proxy.clone();
     let webview = builder
@@ -166,16 +220,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                 }
                 "open_overlay" => {
                     if overlay_webview.is_none() {
-                        let overlay_base = if local_url.contains("/dashboard.html") {
-                            local_url.replace("/dashboard.html", "/remote_session.html")
-                        } else {
-                            local_url.clone()
-                        };
-                        let url = if overlay_base.contains('?') {
-                            format!("{}&overlay=1", overlay_base)
-                        } else {
-                            format!("{}?overlay=1", overlay_base)
-                        };
+                        let url = url_with_overlay_parameter(&controller_url);
                         let overlay_win = match WindowBuilder::new()
                             .with_title("DeskStream Overlay")
                             .with_inner_size(LogicalSize::new(360_u32, 90_u32))
@@ -401,14 +446,15 @@ fn decode_ico_image(
     let planes = u16::from_le_bytes(image_data[12..14].try_into().ok()?);
     let bit_count = u16::from_le_bytes(image_data[14..16].try_into().ok()?);
     let compression = u32::from_le_bytes(image_data[16..20].try_into().ok()?);
+    let height_valid = doubled_height == directory_height as i32
+        || (doubled_height == (directory_height * 2) as i32);
 
     if header_size < 40
         || header_size > image_data.len()
         || bitmap_width <= 0
         || doubled_height <= 0
-        || doubled_height % 2 != 0
         || bitmap_width as u32 != directory_width
-        || (doubled_height / 2) as u32 != directory_height
+        || !height_valid
         || planes != 1
         || bit_count != 32
         || compression != 0
@@ -471,5 +517,114 @@ mod icon_tests {
     #[test]
     fn malformed_ico_is_rejected() {
         assert!(load_icon_from_ico(&[0, 0, 1, 0, 1, 0]).is_none());
+    }
+
+    #[test]
+    fn decode_ico_image_accepts_uncompressed_dib() {
+        let width = 1u32;
+        let height = 1u32;
+        let mut image_data = Vec::new();
+        image_data.extend_from_slice(&40u32.to_le_bytes());
+        image_data.extend_from_slice(&(width as i32).to_le_bytes());
+        image_data.extend_from_slice(&((height * 2) as i32).to_le_bytes());
+        image_data.extend_from_slice(&1u16.to_le_bytes());
+        image_data.extend_from_slice(&32u16.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&0i32.to_le_bytes());
+        image_data.extend_from_slice(&0i32.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&[0x12, 0x34, 0x56, 0xFF]);
+        image_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        let icon = super::decode_ico_image(&image_data, width, height);
+        assert!(icon.is_some());
+    }
+
+    #[test]
+    fn decode_ico_image_rejects_unsupported_compression_format() {
+        let width = 1u32;
+        let height = 1u32;
+        let mut image_data = Vec::new();
+        image_data.extend_from_slice(&40u32.to_le_bytes());
+        image_data.extend_from_slice(&(width as i32).to_le_bytes());
+        image_data.extend_from_slice(&((height * 2) as i32).to_le_bytes());
+        image_data.extend_from_slice(&1u16.to_le_bytes());
+        image_data.extend_from_slice(&32u16.to_le_bytes());
+        image_data.extend_from_slice(&1u32.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&0i32.to_le_bytes());
+        image_data.extend_from_slice(&0i32.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.extend_from_slice(&[0x12, 0x34, 0x56, 0xFF]);
+        image_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        let icon = super::decode_ico_image(&image_data, width, height);
+        assert!(icon.is_none());
+    }
+}
+
+#[cfg(test)]
+mod controller_url_tests {
+    use super::{controller_dashboard_url, url_with_overlay_parameter};
+
+    #[test]
+    fn direct_session_urls_are_routed_to_the_controller_dashboard() {
+        assert_eq!(
+            controller_dashboard_url(
+                "http://127.0.0.1:49182/remote_session.html?id=123456789&token=secret"
+            ),
+            "http://127.0.0.1:49182/dashboard.html"
+        );
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182/session.html?integrated=1"),
+            "http://127.0.0.1:49182/dashboard.html"
+        );
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182/controller_session.html"),
+            "http://127.0.0.1:49182/dashboard.html"
+        );
+    }
+
+    #[test]
+    fn arbitrary_local_urls_are_routed_to_dashboard_in_the_same_directory() {
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182/auth/index.html"),
+            "http://127.0.0.1:49182/auth/dashboard.html"
+        );
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182/DeskStream"),
+            "http://127.0.0.1:49182/DeskStream/dashboard.html"
+        );
+    }
+
+    #[test]
+    fn dashboard_url_and_its_query_are_preserved() {
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182/dashboard.html?mode=desktop"),
+            "http://127.0.0.1:49182/dashboard.html?mode=desktop"
+        );
+    }
+
+    #[test]
+    fn local_server_root_is_expanded_to_the_dashboard_route() {
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182/"),
+            "http://127.0.0.1:49182/dashboard.html"
+        );
+        assert_eq!(
+            controller_dashboard_url("http://127.0.0.1:49182"),
+            "http://127.0.0.1:49182/dashboard.html"
+        );
+    }
+
+    #[test]
+    fn overlay_parameter_is_added_without_replacing_existing_query_or_fragment() {
+        assert_eq!(
+            url_with_overlay_parameter("http://127.0.0.1:49182/dashboard.html?mode=desktop#top"),
+            "http://127.0.0.1:49182/dashboard.html?mode=desktop&overlay=1#top"
+        );
     }
 }

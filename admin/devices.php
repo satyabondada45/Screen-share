@@ -4,6 +4,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/layout.php';
 
 admin_require_auth();
+
 try {
     $pdo = admin_db();
 } catch (Throwable $e) {
@@ -11,22 +12,14 @@ try {
     echo admin_render_page('System Error', 'error', '<div class="flash error">Unable to connect to the database. Please check system configuration.</div>');
     exit;
 }
+
 $deviceTable = admin_table_exists($pdo, 'devices') ? 'devices' : null;
 $subscriptionTable = admin_table_exists($pdo, 'subscriptions') ? 'subscriptions' : null;
 $planTable = admin_table_exists($pdo, 'plans') ? 'plans' : null;
-$historyTable = admin_table_exists($pdo, 'subscription_history') ? 'subscription_history' : null;
-$paymentTable = admin_table_exists($pdo, 'payments') ? 'payments' : null;
 $userTable = admin_table_exists($pdo, 'users') ? 'users' : null;
-$statusFilter = (string) ($_GET['status'] ?? 'all');
-$subscriptionFilter = (string) ($_GET['subscription_status'] ?? 'all');
-$statusFilter = in_array($statusFilter, ['all', 'online', 'offline'], true) ? $statusFilter : 'all';
-$subscriptionFilter = in_array($subscriptionFilter, ['all', 'active', 'expired', 'expiring_soon', 'none'], true) ? $subscriptionFilter : 'all';
-$search = trim((string) ($_GET['q'] ?? ''));
-$page = max(1, (int) ($_GET['page'] ?? 1));
-$perPage = 20;
-$pageError = '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_plan'])) {
+// Handle Plan Assignment (POST)
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['assign_plan'])) {
     if (!admin_verify_csrf_token($_POST['csrf_token'] ?? null)) {
         admin_set_flash('error', 'Invalid request token. Please refresh and try again.');
     } else {
@@ -37,54 +30,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_plan'])) {
             admin_set_flash('error', 'Invalid device or plan selection.');
         } else {
             try {
-                // Get plan details
+                // Find device and its owner
+                $dStmt = $pdo->prepare('SELECT id, user_id, name, system_id FROM `devices` WHERE `id` = ? OR `system_id` = ? OR `device_uid` = ? LIMIT 1');
+                $dStmt->execute([$assignDeviceId, $assignDeviceId, $assignDeviceId]);
+                $dev = $dStmt->fetch(PDO::FETCH_ASSOC);
+
+                if (!$dev) {
+                    throw new RuntimeException('Device not found.');
+                }
+
+                $userId = !empty($dev['user_id']) ? (int) $dev['user_id'] : null;
+                if (!$userId) {
+                    throw new RuntimeException('This device is not associated with any registered user. Please assign the device to a user before activating a subscription.');
+                }
+
+                // Verify plan
                 $planStmt = $pdo->prepare('SELECT * FROM `plans` WHERE `id` = ? AND `status` = "active" LIMIT 1');
                 $planStmt->execute([$planId]);
                 $plan = $planStmt->fetch(PDO::FETCH_ASSOC);
 
                 if (!$plan) {
-                    throw new RuntimeException('The selected plan does not exist or is inactive.');
+                    throw new RuntimeException('The selected plan is not active or does not exist.');
                 }
 
                 $duration = (int) ($plan['duration_days'] ?? 30);
+                $durationUnit = (string) ($plan['duration_unit'] ?? 'days');
                 $price = (float) ($plan['price'] ?? 0);
-                
-                // Get device column name
-                $devCol = 'device_id';
-                if (admin_column_exists($pdo, 'subscriptions', 'system_id')) $devCol = 'system_id';
-                elseif (admin_column_exists($pdo, 'subscriptions', 'device_uid')) $devCol = 'device_uid';
-
                 $startDate = date('Y-m-d H:i:s');
-                $expiryDate = date('Y-m-d H:i:s', strtotime("+{$duration} days"));
-                
-                $columns = [$devCol, 'plan_id', 'plan_name', 'status', 'start_date', 'expiry_date', 'amount'];
-                $placeholders = ['?', '?', '?', '?', '?', '?', '?'];
-                $values = [$assignDeviceId, $planId, $plan['name'], 'active', $startDate, $expiryDate, $price];
+                $expiryDate = ($durationUnit === 'unlimited') ? null : date('Y-m-d H:i:s', strtotime("+{$duration} days"));
 
-                // Check if user_id should be populated
-                if (admin_column_exists($pdo, 'subscriptions', 'user_id')) {
-                    $devQCol = 'id';
-                    if (admin_column_exists($pdo, 'devices', 'system_id')) $devQCol = 'system_id';
-                    elseif (admin_column_exists($pdo, 'devices', 'device_uid')) $devQCol = 'device_uid';
-                    elseif (admin_column_exists($pdo, 'devices', 'device_id')) $devQCol = 'device_id';
-                    
-                    $uStmt = $pdo->prepare('SELECT `user_id` FROM `devices` WHERE `' . $devQCol . '` = ? LIMIT 1');
-                    $uStmt->execute([$assignDeviceId]);
-                    $devUser = $uStmt->fetchColumn();
-                    if ($devUser) {
-                        $columns[] = 'user_id';
-                        $placeholders[] = '?';
-                        $values[] = $devUser;
-                    }
+                // Deactivate any currently active subscriptions for this user
+                $deactStmt = $pdo->prepare('UPDATE `subscriptions` SET `status` = "expired" WHERE `user_id` = ? AND `status` = "active"');
+                $deactStmt->execute([$userId]);
+
+                // Insert into subscriptions
+                $subStmt = $pdo->prepare('INSERT INTO `subscriptions` (`user_id`, `plan_id`, `status`, `starts_at`, `expires_at`, `created_at`) VALUES (?, ?, "active", ?, ?, NOW())');
+                $subStmt->execute([$userId, $planId, $startDate, $expiryDate]);
+                $newSubId = (int) $pdo->lastInsertId();
+
+                // If payments table exists, record payment transaction
+                if (admin_table_exists($pdo, 'payments')) {
+                    $txnId = 'ADMIN-' . strtoupper(bin2hex(random_bytes(4)));
+                    $payStmt = $pdo->prepare('INSERT INTO `payments` (`user_id`, `subscription_id`, `amount`, `transaction_id`, `payment_method`, `status`, `created_at`) VALUES (?, ?, ?, ?, "admin_assigned", "completed", NOW())');
+                    $payStmt->execute([$userId, $newSubId, $price, $txnId]);
                 }
 
-                // Attempt to insert
-                $sql = 'INSERT INTO `subscriptions` (' . implode(', ', array_map(fn($c) => "`$c`", $columns)) . ') VALUES (' . implode(', ', $placeholders) . ')';
-                $insert = $pdo->prepare($sql);
-                $insert->execute($values);
-
-                admin_set_flash('success', 'Plan assigned successfully.');
-                header('Location: ' . admin_url('devices.php', ['view' => $assignDeviceId]));
+                admin_log_action($pdo, 'assign_plan', "Assigned plan '{$plan['name']}' to device {$dev['system_id']} (User #{$userId})");
+                admin_set_flash('success', "Plan '{$plan['name']}' assigned successfully to device owner.");
+                header('Location: ' . admin_url('devices.php', ['view' => (string) $dev['id']]));
                 exit;
             } catch (Throwable $e) {
                 error_log('Plan assignment error: ' . $e->getMessage());
@@ -94,318 +87,410 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_plan'])) {
     }
 }
 
-$canJoinUser = $deviceTable && $userTable
-    && admin_column_exists($pdo, $deviceTable, 'user_id')
-    && admin_column_exists($pdo, $userTable, 'id');
-$userSelect = [];
-if ($canJoinUser && admin_column_exists($pdo, $userTable, 'email')) {
-    $userSelect[] = 'u.`email` AS `owner_email`';
+// ─────────────────────────────────────────────────────────────────────────────
+// DETAIL VIEW (view = DEVICE_ID or SYSTEM_ID)
+// ─────────────────────────────────────────────────────────────────────────────
+$selectedKey = trim((string) ($_GET['view'] ?? ''));
+if ($selectedKey !== '' && $deviceTable) {
+    try {
+        $devSql = "
+            SELECT d.*, 
+                   u.name AS owner_name, 
+                   u.email AS owner_email,
+                   u.username AS owner_username,
+                   u.unique_user_id AS owner_unique_id
+            FROM `devices` d
+            LEFT JOIN `users` u ON d.user_id = u.id
+            WHERE d.id = ? OR d.system_id = ? OR d.device_uid = ?
+            LIMIT 1
+        ";
+        $selStmt = $pdo->prepare($devSql);
+        $selStmt->execute([$selectedKey, $selectedKey, $selectedKey]);
+        $device = $selStmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$device) {
+            $body = '<div class="section"><div class="section-header"><h3>Device Not Found</h3><div class="mini-actions"><a class="outline-button" href="' . htmlspecialchars(admin_url('devices.php'), ENT_QUOTES, 'UTF-8') . '">&larr; Back to Devices</a></div></div><div class="empty-state">The requested device could not be found.</div></div>';
+            echo admin_render_page('Device Details', 'devices', $body);
+            exit;
+        }
+
+        $devId = (int) $device['id'];
+        $sysId = htmlspecialchars((string) ($device['system_id'] ?? ($device['device_uid'] ?? 'ID#' . $devId)), ENT_QUOTES, 'UTF-8');
+        $devName = htmlspecialchars((string) ($device['name'] ?? 'Unnamed device'), ENT_QUOTES, 'UTF-8');
+        $machineId = htmlspecialchars((string) ($device['machine_identifier'] ?? '—'), ENT_QUOTES, 'UTF-8');
+        $os = htmlspecialchars((string) ($device['os_type'] ?? 'Windows'), ENT_QUOTES, 'UTF-8');
+        $ip = htmlspecialchars((string) ($device['ip_address'] ?? '—'), ENT_QUOTES, 'UTF-8');
+        $isOnline = !empty($device['is_online']);
+        $devStatus = $isOnline ? '<span class="status-badge status-active">Online</span>' : '<span class="status-badge status-inactive">Offline</span>';
+        $lastSeen = admin_time_ago($device['last_seen_at'] ?? null);
+        $created = admin_utc_date($device['created_at'] ?? null);
+
+        // Owner details
+        $hasOwner = !empty($device['user_id']);
+        $ownerName = htmlspecialchars((string) ($device['owner_name'] ?? 'Unassigned'), ENT_QUOTES, 'UTF-8');
+        $ownerEmail = htmlspecialchars((string) ($device['owner_email'] ?? '—'), ENT_QUOTES, 'UTF-8');
+        $ownerLink = $hasOwner ? '<a href="' . htmlspecialchars(admin_url('users.php', ['view' => (int) $device['user_id']]), ENT_QUOTES, 'UTF-8') . '" style="color:var(--accent); font-weight:600;">' . $ownerName . ' (#' . (int) $device['user_id'] . ')</a>' : 'Unassigned';
+
+        // Owner Subscriptions
+        $ownerSubs = [];
+        if ($hasOwner && admin_table_exists($pdo, 'subscriptions')) {
+            $sStmt = $pdo->prepare("
+                SELECT s.*, p.name AS plan_name, p.price, p.duration_unit
+                FROM `subscriptions` s
+                LEFT JOIN `plans` p ON s.plan_id = p.id
+                WHERE s.user_id = ?
+                ORDER BY s.id DESC
+            ");
+            $sStmt->execute([(int) $device['user_id']]);
+            $ownerSubs = $sStmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        $subsMarkup = '';
+        if (!empty($ownerSubs)) {
+            $subsMarkup = '<table><thead><tr><th>Sub ID</th><th>Plan</th><th>Price</th><th>Started</th><th>Expires</th><th>Status</th></tr></thead><tbody>';
+            foreach ($ownerSubs as $s) {
+                $subId = (int) $s['id'];
+                $pName = htmlspecialchars((string) ($s['plan_name'] ?? 'Plan #' . $s['plan_id']), ENT_QUOTES, 'UTF-8');
+                $price = '₹' . number_format((float) ($s['price'] ?? 0), 2);
+                $starts = !empty($s['starts_at']) ? htmlspecialchars((string) $s['starts_at'], ENT_QUOTES, 'UTF-8') : 'N/A';
+                $expVal = $s['expires_at'] ?? null;
+                if (empty($expVal) || ($s['duration_unit'] ?? '') === 'unlimited') {
+                    $expires = '<span style="color:#16a34a; font-weight:600;">Unlimited</span>';
+                } else {
+                    $expires = htmlspecialchars((string) $expVal, ENT_QUOTES, 'UTF-8');
+                }
+                $stat = strtoupper((string) ($s['status'] ?? 'ACTIVE'));
+                $statClass = strtolower($stat);
+                $subsMarkup .= "<tr><td>#{$subId}</td><td><strong>{$pName}</strong></td><td>{$price}</td><td>{$starts}</td><td>{$expires}</td><td><span class=\"status-badge status-{$statClass}\">{$stat}</span></td></tr>";
+            }
+            $subsMarkup .= '</tbody></table>';
+        } else {
+            $subsMarkup = '<div class="empty-state">No subscription plan assigned to this device owner.</div>';
+        }
+
+        // Device Remote Sessions (host_device_id = device.id)
+        $deviceSessions = [];
+        if (admin_table_exists($pdo, 'sessions')) {
+            $sessStmt = $pdo->prepare("SELECT * FROM `sessions` WHERE `host_device_id` = ? ORDER BY id DESC LIMIT 15");
+            $sessStmt->execute([$devId]);
+            $deviceSessions = $sessStmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        $sessionsMarkup = '';
+        if (!empty($deviceSessions)) {
+            $sessionsMarkup = '<table><thead><tr><th>Session Key</th><th>Status</th><th>Bandwidth</th><th>Duration</th><th>Started At</th></tr></thead><tbody>';
+            foreach ($deviceSessions as $sess) {
+                $sKey = htmlspecialchars((string) ($sess['session_key'] ?? 'N/A'), ENT_QUOTES, 'UTF-8');
+                $st = strtoupper((string) ($sess['status'] ?? 'COMPLETED'));
+                $stClass = strtolower($st);
+                $bw = admin_format_bytes((float) ($sess['bandwidth_used_mb'] ?? 0) * 1024 * 1024);
+                $dur = admin_format_duration($sess['started_at'] ?? null, $sess['ended_at'] ?? null);
+                $started = admin_time_ago($sess['started_at'] ?? null);
+                $sessionsMarkup .= "<tr><td><code>{$sKey}</code></td><td><span class=\"status-badge status-{$stClass}\">{$st}</span></td><td>{$bw}</td><td>{$dur}</td><td><small>{$started}</small></td></tr>";
+            }
+            $sessionsMarkup .= '</tbody></table>';
+        } else {
+            $sessionsMarkup = '<div class="empty-state">No remote sessions recorded on this device yet.</div>';
+        }
+
+        // Connection Requests involving this device (requester or target)
+        $connRequests = [];
+        if (admin_table_exists($pdo, 'connection_requests')) {
+            $crStmt = $pdo->prepare("SELECT * FROM `connection_requests` WHERE `requester_system_id` = ? OR `target_system_id` = ? ORDER BY id DESC LIMIT 15");
+            $crStmt->execute([$sysId, $sysId]);
+            $connRequests = $crStmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        $connReqMarkup = '';
+        if (!empty($connRequests)) {
+            $connReqMarkup = '<table><thead><tr><th>Token</th><th>Role</th><th>Peer System ID</th><th>Status</th><th>Created</th><th>Expires</th></tr></thead><tbody>';
+            foreach ($connRequests as $cr) {
+                $token = htmlspecialchars((string) ($cr['request_token'] ?? '—'), ENT_QUOTES, 'UTF-8');
+                $isRequester = ($cr['requester_system_id'] === $sysId);
+                $role = $isRequester ? '<span style="color:var(--accent); font-weight:600;">Outgoing (Requester)</span>' : '<span style="color:#1d4ed8; font-weight:600;">Incoming (Target)</span>';
+                $peer = htmlspecialchars((string) ($isRequester ? $cr['target_system_id'] : $cr['requester_system_id']), ENT_QUOTES, 'UTF-8');
+                $st = strtoupper((string) ($cr['status'] ?? 'PENDING'));
+                $stClass = strtolower($st);
+                $crCreated = admin_time_ago($cr['created_at'] ?? null);
+                $crExp = !empty($cr['expires_at']) ? htmlspecialchars((string) $cr['expires_at'], ENT_QUOTES, 'UTF-8') : '—';
+                $connReqMarkup .= "<tr><td><code>{$token}</code></td><td>{$role}</td><td><code>{$peer}</code></td><td><span class=\"status-badge status-{$stClass}\">{$st}</span></td><td><small>{$crCreated}</small></td><td><small>{$crExp}</small></td></tr>";
+            }
+            $connReqMarkup .= '</tbody></table>';
+        } else {
+            $connReqMarkup = '<div class="empty-state">No connection requests logged for this device.</div>';
+        }
+
+        // Plan options for assignment
+        $planOptions = '<option value="">-- Choose Subscription Plan --</option>';
+        if ($planTable) {
+            $plansList = $pdo->query('SELECT * FROM `plans` WHERE `status` = "active" ORDER BY price ASC')->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($plansList as $pl) {
+                $pPrice = '₹' . number_format((float) $pl['price'], 2);
+                $pDur = ($pl['duration_unit'] === 'unlimited') ? 'Unlimited' : ($pl['duration_days'] . ' days');
+                $planOptions .= '<option value="' . (int) $pl['id'] . '">' . htmlspecialchars($pl['name'], ENT_QUOTES, 'UTF-8') . " ({$pPrice} &bull; {$pDur})</option>";
+            }
+        }
+
+        $csrfToken = htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8');
+        $devicesBackUrl = htmlspecialchars(admin_url('devices.php'), ENT_QUOTES, 'UTF-8');
+
+        $body = <<<HTML
+<div class="section">
+    <div class="section-header">
+        <h3>Device: {$devName}</h3>
+        <div class="mini-actions"><a class="outline-button" href="{$devicesBackUrl}">&larr; Back to Devices</a></div>
+    </div>
+    <div class="detail-panels">
+        <div class="detail-panel">
+            <h4>Hardware & Network Details</h4>
+            <div class="detail-row"><span>System ID</span><strong><code>{$sysId}</code></strong></div>
+            <div class="detail-row"><span>Device Name</span><strong>{$devName}</strong></div>
+            <div class="detail-row"><span>Operating System</span><strong>{$os}</strong></div>
+            <div class="detail-row"><span>IP Address</span><strong><code>{$ip}</code></strong></div>
+            <div class="detail-row"><span>Machine Identifier</span><strong><small><code>{$machineId}</code></small></strong></div>
+            <div class="detail-row"><span>Live Status</span><strong>{$devStatus}</strong></div>
+            <div class="detail-row"><span>Last Seen</span><strong>{$lastSeen}</strong></div>
+            <div class="detail-row"><span>Registered Date</span><strong>{$created}</strong></div>
+        </div>
+        <div class="detail-panel">
+            <h4>Ownership & Plan Assignment</h4>
+            <div class="detail-row"><span>Device Owner</span><strong>{$ownerLink}</strong></div>
+            <div class="detail-row"><span>Owner Email</span><strong>{$ownerEmail}</strong></div>
+            <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+                <h5 style="margin-bottom:10px; font-size:0.85rem; font-weight:700;">Assign or Renew Plan</h5>
+                <form method="POST" action="{$devicesBackUrl}?view={$devId}" style="display:flex; flex-direction:column; gap:10px;">
+                    <input type="hidden" name="csrf_token" value="{$csrfToken}">
+                    <input type="hidden" name="assign_plan" value="1">
+                    <input type="hidden" name="device_id" value="{$devId}">
+                    <select name="plan_id" class="filter-select" required style="width:100%;">
+                        {$planOptions}
+                    </select>
+                    <button type="submit" class="button" style="width:100%;">Assign Plan to Device Owner</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">
+        <h3>Owner Subscriptions</h3>
+    </div>
+    <div style="overflow:auto;">
+        {$subsMarkup}
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">
+        <h3>Recent Remote Sessions ({$devName})</h3>
+    </div>
+    <div style="overflow:auto;">
+        {$sessionsMarkup}
+    </div>
+</div>
+
+<div class="section">
+    <div class="section-header">
+        <h3>Connection Requests ({$devName})</h3>
+    </div>
+    <div style="overflow:auto;">
+        {$connReqMarkup}
+    </div>
+</div>
+HTML;
+
+        echo admin_render_page('Device Details', 'devices', $body);
+        exit;
+    } catch (Throwable $e) {
+        error_log('Device details error: ' . $e->getMessage());
+    }
 }
-if ($canJoinUser && admin_column_exists($pdo, $userTable, 'username')) {
-    $userSelect[] = 'u.`username` AS `owner_username`';
-}
-$deviceFrom = $deviceTable ? ' FROM `devices` d' . ($canJoinUser ? ' LEFT JOIN `users` u ON u.`id` = d.`user_id`' : '') : '';
-$deviceSelect = $deviceTable ? 'SELECT d.*' . ($userSelect ? ', ' . implode(', ', $userSelect) : '') . $deviceFrom : '';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIST VIEW WITH SERVER-SIDE PAGINATION, SEARCH, STATUS FILTERS & KPI CARDS
+// ─────────────────────────────────────────────────────────────────────────────
+
+$search = trim((string) ($_GET['q'] ?? ''));
+$statusFilter = strtolower(trim((string) ($_GET['status'] ?? 'all')));
+$statusFilter = in_array($statusFilter, ['all', 'online', 'offline'], true) ? $statusFilter : 'all';
+
+$page = max(1, (int) ($_GET['page'] ?? 1));
+$perPage = 15;
+$offset = ($page - 1) * $perPage;
 
 $where = [];
-$parameters = [];
+$params = [];
+
 if ($search !== '' && $deviceTable) {
-    $searchFields = [];
-    foreach (['id', 'device_uid', 'system_id', 'name', 'device_name', 'machine_identifier'] as $column) {
-        if (admin_column_exists($pdo, $deviceTable, $column)) {
-            $searchFields[] = 'd.`' . $column . '` LIKE ?';
-        }
-    }
-    if ($canJoinUser && admin_column_exists($pdo, $userTable, 'email')) {
-        $searchFields[] = 'u.`email` LIKE ?';
-    }
-    if ($canJoinUser && admin_column_exists($pdo, $userTable, 'username')) {
-        $searchFields[] = 'u.`username` LIKE ?';
-    }
-    $where[] = $searchFields ? '(' . implode(' OR ', $searchFields) . ')' : '1 = 0';
-    foreach ($searchFields as $_) {
-        $parameters[] = '%' . $search . '%';
-    }
+    $where[] = '(d.name LIKE ? OR d.system_id LIKE ? OR d.device_uid LIKE ? OR d.ip_address LIKE ? OR u.name LIKE ? OR u.email LIKE ?)';
+    $params[] = '%' . $search . '%';
+    $params[] = '%' . $search . '%';
+    $params[] = '%' . $search . '%';
+    $params[] = '%' . $search . '%';
+    $params[] = '%' . $search . '%';
+    $params[] = '%' . $search . '%';
 }
 
-if ($deviceTable && $statusFilter !== 'all') {
-    if (admin_column_exists($pdo, $deviceTable, 'is_online')) {
-        $where[] = 'd.`is_online` = ?';
-        $parameters[] = $statusFilter === 'online' ? 1 : 0;
-    } elseif (admin_column_exists($pdo, $deviceTable, 'status')) {
-        $where[] = 'LOWER(d.`status`) = ?';
-        $parameters[] = $statusFilter;
-    }
+if ($statusFilter !== 'all' && $deviceTable) {
+    $where[] = 'd.is_online = ?';
+    $params[] = ($statusFilter === 'online') ? 1 : 0;
 }
 
-$subscriptionCorrelation = [];
-if ($deviceTable && $subscriptionTable) {
-    foreach (['device_id' => ['id', 'device_id', 'device_uid', 'system_id'], 'device_uid' => ['device_uid', 'system_id'], 'system_id' => ['system_id', 'device_uid']] as $subColumn => $deviceFields) {
-        if (!admin_column_exists($pdo, $subscriptionTable, $subColumn)) {
-            continue;
-        }
-        foreach ($deviceFields as $deviceField) {
-            if (admin_column_exists($pdo, $deviceTable, $deviceField)) {
-                $subscriptionCorrelation[] = 's.`' . $subColumn . '` = d.`' . $deviceField . '`';
-            }
-        }
-    }
-}
+$whereSql = $where ? ' WHERE ' . implode(' AND ', $where) : '';
 
-if ($subscriptionFilter !== 'all' && $subscriptionCorrelation) {
-    $exists = 'EXISTS (SELECT 1 FROM `subscriptions` s WHERE (' . implode(' OR ', $subscriptionCorrelation) . ')';
-    if ($subscriptionFilter === 'active' && admin_column_exists($pdo, $subscriptionTable, 'status')) {
-        $where[] = $exists . ' AND LOWER(s.`status`) = "active")';
-    } elseif ($subscriptionFilter === 'expired' && admin_column_exists($pdo, $subscriptionTable, 'expiry_date')) {
-        $where[] = $exists . ' AND s.`expiry_date` < NOW())';
-    } elseif ($subscriptionFilter === 'expiring_soon' && admin_column_exists($pdo, $subscriptionTable, 'expiry_date')) {
-        $where[] = $exists . ' AND s.`expiry_date` BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 7 DAY))';
-    } elseif ($subscriptionFilter === 'none') {
-        $where[] = 'NOT ' . $exists . ')';
-    }
-}
+// KPI Fleet Counters
+$kpiTotal = (int) $pdo->query('SELECT COUNT(*) FROM `devices`')->fetchColumn();
+$kpiOnline = (int) $pdo->query('SELECT COUNT(*) FROM `devices` WHERE `is_online` = 1')->fetchColumn();
+$kpiOffline = max(0, $kpiTotal - $kpiOnline);
+$kpiAssigned = (int) $pdo->query('SELECT COUNT(*) FROM `devices` WHERE `user_id` IS NOT NULL')->fetchColumn();
 
-$selectedDevice = null;
-$selectedKey = trim((string) ($_GET['view'] ?? $_GET['subscription'] ?? ''));
-$deviceRows = [];
-$totalRows = 0;
-$totalPages = 1;
-$relatedRows = static function (string $table, array $device, int $limit = 20, array $subIds = []) use ($pdo): array {
-    return admin_related_rows($pdo, $table, $device, $limit, $subIds);
-};
+// Total count matching current filters
+$countStmt = $pdo->prepare("
+    SELECT COUNT(DISTINCT d.id) 
+    FROM `devices` d
+    LEFT JOIN `users` u ON d.user_id = u.id
+    {$whereSql}
+");
+$countStmt->execute($params);
+$totalMatchingDevices = (int) $countStmt->fetchColumn();
 
-if ($deviceTable) {
-    try {
-        $whereSql = $where ? ' WHERE ' . implode(' AND ', $where) : '';
-        $count = $pdo->prepare('SELECT COUNT(DISTINCT d.`id`)' . $deviceFrom . $whereSql);
-        $count->execute($parameters);
-        $totalRows = (int) $count->fetchColumn();
-        $totalPages = max(1, (int) ceil($totalRows / $perPage));
-        $page = min($page, $totalPages);
-        $orderColumn = admin_column_exists($pdo, $deviceTable, 'last_seen_at')
-            ? 'd.`last_seen_at`'
-            : (admin_column_exists($pdo, $deviceTable, 'created_at') ? 'd.`created_at`' : 'd.`id`');
-        $list = $pdo->prepare($deviceSelect . $whereSql . ' ORDER BY ' . $orderColumn . ' DESC LIMIT ' . (($page - 1) * $perPage) . ', ' . $perPage);
-        $list->execute($parameters);
-        $deviceRows = $list->fetchAll(PDO::FETCH_ASSOC);
+// Fetch paginated devices
+$sql = "
+    SELECT d.*, 
+           u.name AS owner_name, 
+           u.email AS owner_email,
+           (SELECT p.name 
+            FROM `subscriptions` s 
+            JOIN `plans` p ON s.plan_id = p.id 
+            WHERE s.user_id = d.user_id AND s.status = 'active' 
+            ORDER BY s.id DESC LIMIT 1) AS active_plan_name
+    FROM `devices` d
+    LEFT JOIN `users` u ON d.user_id = u.id
+    {$whereSql}
+    ORDER BY d.id DESC
+    LIMIT {$perPage} OFFSET {$offset}
+";
 
-        if ($selectedKey !== '') {
-            $identity = [];
-            $identityValues = [];
-            foreach (['id', 'device_uid', 'system_id'] as $column) {
-                if (admin_column_exists($pdo, $deviceTable, $column)) {
-                    $identity[] = 'd.`' . $column . '` = ?';
-                    $identityValues[] = $selectedKey;
-                }
-            }
-            if ($identity) {
-                $selectedStmt = $pdo->prepare($deviceSelect . ' WHERE (' . implode(' OR ', $identity) . ') LIMIT 1');
-                $selectedStmt->execute($identityValues);
-                $selectedDevice = $selectedStmt->fetch(PDO::FETCH_ASSOC) ?: null;
-            }
-        }
-    } catch (Throwable $e) {
-        error_log('Admin device query failed: ' . $e->getMessage());
-        $pageError = 'Device records could not be loaded. Check the server error log for the database error.';
-    }
-}
+$stmt = $pdo->prepare($sql);
+$stmt->execute($params);
+$deviceRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $deviceRowsHtml = '';
-foreach ($deviceRows as $device) {
-    $deviceId = (string) ($device['system_id'] ?? ($device['device_uid'] ?? ($device['device_id'] ?? ($device['id'] ?? 'N/A'))));
-    $deviceKey = (string) ($device['id'] ?? $deviceId);
-    $deviceName = (string) ($device['name'] ?? ($device['device_name'] ?? 'Unnamed device'));
-    $email = (string) ($device['owner_email'] ?? ($device['email'] ?? ($device['user_email'] ?? 'N/A')));
-    $isOnline = !empty($device['is_online']);
-    $status = (string) ($device['status'] ?? ($isOnline ? 'online' : 'offline'));
-    $statusClass = in_array(strtolower($status), ['online', 'active'], true) ? 'active' : (in_array(strtolower($status), ['offline', 'inactive'], true) ? 'inactive' : strtolower($status));
-    $registered = (string) ($device['created_at'] ?? 'N/A');
-    $lastSeen = (string) ($device['last_seen_at'] ?? ($device['last_seen'] ?? 'N/A'));
-    $subscriptions = $subscriptionTable ? $relatedRows($subscriptionTable, $device, 1) : [];
-    $currentSubscription = $subscriptions[0] ?? [];
-    $planName = (string) ($currentSubscription['plan_name'] ?? ($currentSubscription['plan'] ?? 'No subscription'));
-    $subscriptionStatus = (string) ($currentSubscription['status'] ?? '');
-    if (isset($currentSubscription['plan_id']) && $planTable && admin_column_exists($pdo, $planTable, 'id') && admin_column_exists($pdo, $planTable, 'name')) {
-        $planStmt = $pdo->prepare('SELECT `name` FROM `plans` WHERE `id` = ? LIMIT 1');
-        $planStmt->execute([(int) $currentSubscription['plan_id']]);
-        $planName = (string) ($planStmt->fetchColumn() ?: $planName);
-    }
-    $expiry = (string) ($currentSubscription['expiry_date'] ?? ($device['expiry_date'] ?? 'N/A'));
-    $recharge = (string) ($currentSubscription['recharge_date'] ?? ($currentSubscription['created_at'] ?? 'N/A'));
-    if ($subscriptionStatus !== '') {
-        $planName .= ' (' . $subscriptionStatus . ')';
-    }
-    $deviceRowsHtml .= '<tr>'
-        . '<td style="max-width:120px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . htmlspecialchars($deviceId, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($deviceId, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td style="max-width:150px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td style="max-width:150px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . htmlspecialchars($email, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($email, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td><span class="status-badge status-' . htmlspecialchars($statusClass, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars(strtoupper($status), ENT_QUOTES, 'UTF-8') . '</span></td>'
-        . '<td style="max-width:150px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . htmlspecialchars($planName, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($planName, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td>' . htmlspecialchars($recharge, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td>' . htmlspecialchars($expiry, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td style="max-width:100px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . htmlspecialchars($lastSeen, ENT_QUOTES, 'UTF-8') . '">' . htmlspecialchars($lastSeen, ENT_QUOTES, 'UTF-8') . '</td>'
-        . '<td><div class="mini-actions"><a class="outline-button" href="' . htmlspecialchars(admin_url('devices.php', ['view' => $deviceKey]), ENT_QUOTES, 'UTF-8') . '">View Details</a> <a class="outline-button" href="' . htmlspecialchars(admin_url('devices.php', ['subscription' => $deviceKey]), ENT_QUOTES, 'UTF-8') . '">Subscription</a></div></td>'
-        . '</tr>';
-}
-if ($deviceRowsHtml === '') {
-    $deviceRowsHtml = '<tr><td colspan="9" class="empty-state">' . ($deviceTable ? 'No remote devices found.' : 'The existing devices table is unavailable.') . '</td></tr>';
-}
+if (!empty($deviceRows)) {
+    foreach ($deviceRows as $dev) {
+        $id = (int) $dev['id'];
+        $sysId = htmlspecialchars((string) ($dev['system_id'] ?? ($dev['device_uid'] ?? 'ID#' . $id)), ENT_QUOTES, 'UTF-8');
+        $name = htmlspecialchars((string) ($dev['name'] ?? 'Unnamed device'), ENT_QUOTES, 'UTF-8');
+        $owner = htmlspecialchars((string) ($dev['owner_name'] ?? ($dev['owner_email'] ?? 'Unassigned')), ENT_QUOTES, 'UTF-8');
+        $isOnline = !empty($dev['is_online']);
+        $statusBadge = $isOnline ? '<span class="status-badge status-active">Online</span>' : '<span class="status-badge status-inactive">Offline</span>';
+        $plan = htmlspecialchars((string) ($dev['active_plan_name'] ?? 'No Subscription'), ENT_QUOTES, 'UTF-8');
+        $os = htmlspecialchars((string) ($dev['os_type'] ?? 'Windows'), ENT_QUOTES, 'UTF-8');
+        $ip = htmlspecialchars((string) ($dev['ip_address'] ?? '—'), ENT_QUOTES, 'UTF-8');
+        $lastSeen = admin_time_ago($dev['last_seen_at'] ?? null);
+        $viewUrl = htmlspecialchars(admin_url('devices.php', ['view' => $id]), ENT_QUOTES, 'UTF-8');
 
-$detailsHtml = '';
-if ($selectedDevice) {
-    $deviceId = (string) ($selectedDevice['system_id'] ?? ($selectedDevice['device_uid'] ?? ($selectedDevice['id'] ?? 'N/A')));
-    $deviceName = (string) ($selectedDevice['name'] ?? ($selectedDevice['device_name'] ?? 'Unnamed device'));
-    $email = (string) ($selectedDevice['owner_email'] ?? ($selectedDevice['email'] ?? 'N/A'));
-    $created = (string) ($selectedDevice['created_at'] ?? 'N/A');
-    $lastSeen = (string) ($selectedDevice['last_seen_at'] ?? ($selectedDevice['last_seen'] ?? 'N/A'));
-    $deviceStatus = (string) ($selectedDevice['status'] ?? (!empty($selectedDevice['is_online']) ? 'online' : 'offline'));
-    $subscriptions = $subscriptionTable ? $relatedRows($subscriptionTable, $selectedDevice) : [];
-    $subscriptionIds = array_values(array_filter(array_map(static fn($row) => $row['id'] ?? null, $subscriptions), static fn($id) => $id !== null));
-    $currentSubscription = $subscriptions[0] ?? [];
-    $planName = (string) ($currentSubscription['plan_name'] ?? ($currentSubscription['plan'] ?? 'N/A'));
-    if (isset($currentSubscription['plan_id']) && $planTable && admin_column_exists($pdo, $planTable, 'id') && admin_column_exists($pdo, $planTable, 'name')) {
-        $planStmt = $pdo->prepare('SELECT `name` FROM `plans` WHERE `id` = ? LIMIT 1');
-        $planStmt->execute([(int) $currentSubscription['plan_id']]);
-        $planName = (string) ($planStmt->fetchColumn() ?: $planName);
+        $deviceRowsHtml .= "<tr>
+            <td><code>{$sysId}</code></td>
+            <td><strong>{$name}</strong></td>
+            <td>{$owner}</td>
+            <td>{$statusBadge}</td>
+            <td>{$plan}</td>
+            <td>{$os}</td>
+            <td><small><code>{$ip}</code></small></td>
+            <td><small>{$lastSeen}</small></td>
+            <td><a class=\"outline-button\" href=\"{$viewUrl}\">View Details</a></td>
+        </tr>";
     }
-    $history = $historyTable ? $relatedRows($historyTable, $selectedDevice, 20, $subscriptionIds) : [];
-    $payments = $paymentTable ? $relatedRows($paymentTable, $selectedDevice, 20, $subscriptionIds) : [];
-    $expiry = (string) ($currentSubscription['expiry_date'] ?? 'N/A');
-    $daysRemaining = 'N/A';
-    if ($expiry !== 'N/A' && ($expiryTimestamp = strtotime($expiry)) !== false) {
-        $daysRemaining = (string) (int) ceil(($expiryTimestamp - strtotime('today')) / 86400);
-    }
-    $subscriptionStatus = (string) ($currentSubscription['status'] ?? 'No subscription');
-    $historyHtml = '';
-    foreach ($history as $item) {
-        $historyHtml .= '<tr><td>' . htmlspecialchars((string) ($item['action'] ?? ($item['status'] ?? 'N/A')), ENT_QUOTES, 'UTF-8') . '</td><td>' . htmlspecialchars((string) ($item['start_date'] ?? ($item['created_at'] ?? 'N/A')), ENT_QUOTES, 'UTF-8') . '</td><td>' . htmlspecialchars((string) ($item['expiry_date'] ?? 'N/A'), ENT_QUOTES, 'UTF-8') . '</td><td>' . htmlspecialchars((string) ($item['payment_reference'] ?? 'N/A'), ENT_QUOTES, 'UTF-8') . '</td></tr>';
-    }
-    if ($historyHtml === '') {
-        $historyHtml = '<tr><td colspan="4" class="empty-state">No subscription history found.</td></tr>';
-    }
-    $paymentHtml = '';
-    foreach ($payments as $payment) {
-        $paymentHtml .= '<tr><td>' . htmlspecialchars((string) ($payment['created_at'] ?? 'N/A'), ENT_QUOTES, 'UTF-8') . '</td><td>' . htmlspecialchars((string) ($payment['amount'] ?? 'N/A'), ENT_QUOTES, 'UTF-8') . '</td><td>' . htmlspecialchars((string) ($payment['status'] ?? 'N/A'), ENT_QUOTES, 'UTF-8') . '</td><td>' . htmlspecialchars((string) ($payment['payment_reference'] ?? 'N/A'), ENT_QUOTES, 'UTF-8') . '</td></tr>';
-    }
-    if ($paymentHtml === '') {
-        $paymentHtml = '<tr><td colspan="4" class="empty-state">No payment records found.</td></tr>';
-    }
-
-    $formatDate = static function(string $d): string {
-        if ($d === 'N/A' || $d === '') return 'N/A';
-        $time = strtotime($d);
-        return $time ? date('M j, Y g:i A', $time) : 'N/A';
-    };
-
-    $detailsHtml = '<div style="margin-bottom: 24px;"><a href="' . htmlspecialchars(admin_url('devices.php'), ENT_QUOTES, 'UTF-8') . '" class="outline-button">← Back to Devices</a></div>'
-        . '<div class="section"><div class="section-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">'
-        . '<div><h2 style="margin:0 0 4px; font-size:1.4rem;">' . htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') . '</h2>'
-        . '<div style="color:var(--muted); font-size:0.9rem;">' . htmlspecialchars($email, ENT_QUOTES, 'UTF-8') . '</div></div>'
-        . '<div style="text-align:right;"><span class="status-badge status-' . htmlspecialchars($deviceStatus === 'online' ? 'active' : 'inactive', ENT_QUOTES, 'UTF-8') . '" style="margin-bottom:6px;">' . htmlspecialchars(strtoupper($deviceStatus), ENT_QUOTES, 'UTF-8') . '</span>'
-        . '<div style="color:var(--muted); font-size:0.85rem;">Device ID: <strong>' . htmlspecialchars($deviceId, ENT_QUOTES, 'UTF-8') . '</strong></div></div>'
-        . '</div>'
-        . '<div class="detail-panels">'
-        . '<div class="detail-panel"><h4>DEVICE INFORMATION</h4>'
-        . '<div class="detail-row"><span>Device ID</span><strong>' . htmlspecialchars($deviceId, ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Device Name</span><strong>' . htmlspecialchars($deviceName, ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Email</span><strong>' . htmlspecialchars($email, ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Status</span><strong>' . htmlspecialchars(strtoupper($deviceStatus), ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Registered</span><strong>' . htmlspecialchars($formatDate($created), ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Last Seen</span><strong>' . htmlspecialchars($formatDate($lastSeen), ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '</div>'
-        . '<div class="detail-panel"><h4>SUBSCRIPTION</h4>'
-        . '<div class="detail-row"><span>Plan</span><strong>' . htmlspecialchars($planName, ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Start Date</span><strong>' . htmlspecialchars($formatDate((string) ($currentSubscription['created_at'] ?? 'N/A')), ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Expiry Date</span><strong>' . htmlspecialchars($formatDate($expiry), ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Status</span><strong>' . htmlspecialchars($subscriptionStatus, ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '<div class="detail-row"><span>Days Remaining</span><strong>' . htmlspecialchars($daysRemaining, ENT_QUOTES, 'UTF-8') . '</strong></div>'
-        . '</div>'
-        . '</div>'
-        . '<div class="section-header"><h3>ACTIONS</h3></div><div style="padding:16px 20px;">';
-
-    $csrfToken = htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8');
-    $planOptions = '<option value="">-- Select a Plan --</option>';
-    if ($planTable) {
-        $pStmt = $pdo->query('SELECT * FROM `plans` WHERE `status` = "active"');
-        foreach ($pStmt->fetchAll(PDO::FETCH_ASSOC) as $pRow) {
-            $planOptions .= '<option value="' . (int)$pRow['id'] . '">' . htmlspecialchars($pRow['name'], ENT_QUOTES, 'UTF-8') . ' (₹' . number_format((float)$pRow['price'], 2) . ' for ' . (int)$pRow['duration_days'] . ' days)</option>';
-        }
-    }
-
-    $detailsHtml .= '<form method="POST" style="display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap;">'
-        . '<input type="hidden" name="csrf_token" value="' . $csrfToken . '">'
-        . '<input type="hidden" name="assign_plan" value="1">'
-        . '<input type="hidden" name="device_id" value="' . htmlspecialchars($deviceId, ENT_QUOTES, 'UTF-8') . '">'
-        . '<div class="field"><label>Assign New Plan</label><select name="plan_id" required>' . $planOptions . '</select></div>'
-        . '<button type="submit" class="button">Assign Plan</button>'
-        . '</form></div></div>';
-} elseif ($selectedKey !== '') {
-    $detailsHtml = '<div style="margin-bottom: 24px;"><a href="' . htmlspecialchars(admin_url('devices.php'), ENT_QUOTES, 'UTF-8') . '" class="outline-button">← Back to Devices</a></div><div class="section"><div class="empty-state" style="padding: 60px 20px;"><h3>Device Not Found</h3><p style="color:var(--muted); margin-top:8px;">The requested device does not exist or has been removed.</p></div></div>';
-}
-
-$pageErrorHtml = $pageError !== '' ? '<div class="flash error">' . htmlspecialchars($pageError, ENT_QUOTES, 'UTF-8') . '</div>' : '';
-$devicesUrl = htmlspecialchars(admin_url('devices.php'), ENT_QUOTES, 'UTF-8');
-$searchValue = htmlspecialchars($search, ENT_QUOTES, 'UTF-8');
-$statusOptions = '';
-foreach (['all' => 'All statuses', 'online' => 'Online', 'offline' => 'Offline'] as $value => $label) {
-    $statusOptions .= '<option value="' . $value . '"' . ($statusFilter === $value ? ' selected' : '') . '>' . $label . '</option>';
-}
-$subscriptionOptions = '';
-foreach (['all' => 'All subscriptions', 'active' => 'Active', 'expired' => 'Expired', 'expiring_soon' => 'Expiring soon', 'none' => 'No subscription'] as $value => $label) {
-    $subscriptionOptions .= '<option value="' . $value . '"' . ($subscriptionFilter === $value ? ' selected' : '') . '>' . $label . '</option>';
-}
-$paginationHtml = '';
-for ($i = 1; $i <= $totalPages; $i++) {
-    $paginationHtml .= '<a class="page-btn ' . ($i === $page ? 'current' : '') . '" href="' . htmlspecialchars(admin_url('devices.php', ['page' => $i, 'status' => $statusFilter, 'subscription_status' => $subscriptionFilter, 'q' => $search]), ENT_QUOTES, 'UTF-8') . '">' . $i . '</a>';
-}
-
-if ($selectedKey !== '') {
-    $body = $pageErrorHtml . $detailsHtml;
 } else {
-    $body = $pageErrorHtml . '
-    <div class="section">
-        <div class="section-header">
-            <h3>Remote Devices</h3>
-            <form method="get" action="' . $devicesUrl . '" class="filters" id="devicesFilterForm">
-                <input type="search" name="q" id="searchInput" value="' . $searchValue . '" placeholder="Search ID, name, or email">
-                <select name="status" id="statusSelect">' . $statusOptions . '</select>
-                <select name="subscription_status" id="subscriptionSelect">' . $subscriptionOptions . '</select>
-                <button class="button" type="submit">Filter</button>
-                ' . (($search !== '' || $statusFilter !== 'all' || $subscriptionFilter !== 'all') ? '<a href="' . $devicesUrl . '" class="ghost-button" style="color:var(--muted); text-decoration:none; padding:8px; display:inline-flex; align-items:center;">Clear Filters</a>' : '') . '
-            </form>
-        </div>
-        <div style="margin-bottom: 12px; font-size: 0.85rem; color: var(--muted);">Showing ' . count($deviceRows) . ' of ' . $totalRows . ' device' . ($totalRows !== 1 ? 's' : '') . '</div>
-        <div style="overflow:auto"><table><thead><tr><th>Device ID</th><th>Device Name</th><th>Email / Owner</th><th>Status</th><th>Subscription</th><th>Recharge Date</th><th>Expiry Date</th><th>Last Seen</th><th>Actions</th></tr></thead><tbody>' . $deviceRowsHtml . '</tbody></table></div>
-        <div class="pagination">' . $paginationHtml . '</div>
-    </div>
-    <script>
-        (function() {
-            var form = document.getElementById("devicesFilterForm");
-            var searchInput = document.getElementById("searchInput");
-            var statusSelect = document.getElementById("statusSelect");
-            var subscriptionSelect = document.getElementById("subscriptionSelect");
-            var timeout = null;
-
-            if (!form) return;
-
-            function submitForm() {
-                // If inputs are empty/default, we can just navigate to base URL, but form submit is fine.
-                form.submit();
-            }
-
-            // Auto-submit on select change
-            if (statusSelect) statusSelect.addEventListener("change", submitForm);
-            if (subscriptionSelect) subscriptionSelect.addEventListener("change", submitForm);
-
-            // Debounced auto-submit on typing
-            if (searchInput) {
-                searchInput.addEventListener("input", function() {
-                    clearTimeout(timeout);
-                    timeout = setTimeout(submitForm, 500);
-                });
-            }
-        })();
-    </script>';
+    $deviceRowsHtml = '<tr><td colspan="9" class="empty-state">No matching remote devices found.</td></tr>';
 }
+
+$devicesUrl = htmlspecialchars(admin_url('devices.php'), ENT_QUOTES, 'UTF-8');
+$queryParams = array_filter([
+    'q' => $search !== '' ? $search : null,
+    'status' => $statusFilter !== 'all' ? $statusFilter : null,
+]);
+
+$paginationHtml = admin_pagination($totalMatchingDevices, $perPage, $page, 'devices.php', $queryParams);
+
+$statusOptions = '';
+foreach (['all' => 'All Statuses', 'online' => 'Online', 'offline' => 'Offline'] as $v => $l) {
+    $statusOptions .= '<option value="' . $v . '"' . ($statusFilter === $v ? ' selected' : '') . '>' . $l . '</option>';
+}
+
+$searchSafe = htmlspecialchars($search, ENT_QUOTES, 'UTF-8');
+
+$body = <<<HTML
+<!-- Fleet Summary KPI Cards -->
+<div class="card-grid">
+    <div class="card">
+        <span class="label">Total Fleet Devices</span>
+        <p class="value">{$kpiTotal}</p>
+        <div class="trend">Registered device endpoints</div>
+    </div>
+    <div class="card">
+        <span class="label">Online Now</span>
+        <p class="value" style="color:#16a34a;">{$kpiOnline}</p>
+        <div class="trend">Actively connected / responsive</div>
+    </div>
+    <div class="card">
+        <span class="label">Offline Devices</span>
+        <p class="value" style="color:#6b7280;">{$kpiOffline}</p>
+        <div class="trend">Currently disconnected</div>
+    </div>
+    <div class="card">
+        <span class="label">Assigned to Owner</span>
+        <p class="value">{$kpiAssigned}</p>
+        <div class="trend">Associated with a user account</div>
+    </div>
+</div>
+
+<!-- Search & Filter Bar -->
+<div class="filter-bar">
+    <form method="GET" action="{$devicesUrl}" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; width:100%;">
+        <div class="filter-group">
+            <input type="text" name="q" value="{$searchSafe}" placeholder="Search name, system ID, IP, or owner..." class="filter-input" style="min-width:280px;">
+        </div>
+        <div class="filter-group">
+            <select name="status" class="filter-select">
+                {$statusOptions}
+            </select>
+        </div>
+        <button type="submit" class="filter-btn">Filter</button>
+        <a href="{$devicesUrl}" class="filter-reset">Reset</a>
+    </form>
+</div>
+
+<!-- Devices Table -->
+<div class="section">
+    <div class="section-header">
+        <h3>Remote Devices</h3>
+        <span class="kpi-pill">{$totalMatchingDevices} Devices Found</span>
+    </div>
+    <div style="overflow:auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>System ID</th>
+                    <th>Device Name</th>
+                    <th>Owner</th>
+                    <th>Status</th>
+                    <th>Active Plan</th>
+                    <th>OS</th>
+                    <th>IP Address</th>
+                    <th>Last Seen</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {$deviceRowsHtml}
+            </tbody>
+        </table>
+    </div>
+    {$paginationHtml}
+</div>
+HTML;
 
 echo admin_render_page('Remote Devices', 'devices', $body);

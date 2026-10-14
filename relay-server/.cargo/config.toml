@@ -1,0 +1,9 @@
+[target.x86_64-unknown-linux-gnu]
+linker = "C:\\cargo-target\\tools\\zig-linker.exe"
+ar = "C:\\cargo-target\\tools\\zig-ar.exe"
+
+[env]
+CC_x86_64-unknown-linux-gnu = "C:\\cargo-target\\tools\\zig-linker.exe"
+CC_x86_64_unknown_linux_gnu = "C:\\cargo-target\\tools\\zig-linker.exe"
+AR_x86_64-unknown-linux-gnu = "C:\\cargo-target\\tools\\zig-ar.exe"
+AR_x86_64_unknown_linux_gnu = "C:\\cargo-target\\tools\\zig-ar.exe"

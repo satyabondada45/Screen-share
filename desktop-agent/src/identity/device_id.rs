@@ -55,6 +55,32 @@ fn default_server_bind_addr() -> String {
 
 const LEGACY_RELAY_ADDR: &str = "34.229.20.54:9001";
 const CURRENT_RELAY_ADDR: &str = "34.207.168.24:9001";
+pub const DEFAULT_BACKEND_URL: &str = "https://friendssoftwaresolutions.in/DeskStream/api";
+pub const DEFAULT_PIN: &str = "123456";
+
+pub fn resolve_backend_url(
+    saved_backend: Option<&str>,
+    env_backend_url: Option<&str>,
+) -> String {
+    if let Some(env_url) = env_backend_url {
+        let trimmed = env_url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    match saved_backend {
+        Some(url)
+            if url.trim().is_empty()
+                || url.contains("/Screen%20Share/backend/api")
+                || url.contains("34.207.168.24")
+                || url.contains("34.229.20.54") =>
+        {
+            DEFAULT_BACKEND_URL.to_string()
+        }
+        Some(url) => url.trim().to_string(),
+        None => DEFAULT_BACKEND_URL.to_string(),
+    }
+}
 
 fn resolve_relay_addr(
     saved_relay: Option<&str>,
@@ -154,16 +180,13 @@ impl AgentConfig {
                         dirty = true;
                     }
 
-                    // Apply env override for backend URL
-                    if let Some(env_val) = &env_backend_url {
-                        if cfg.backend_url != *env_val {
-                            cfg.backend_url = env_val.clone();
-                            dirty = true;
-                        }
-                    } else if cfg.backend_url.is_empty() {
-                        // Derive backend from relay host if not explicitly configured
-                        let host_ip = cfg.relay_addr.split(':').next().unwrap_or("127.0.0.1");
-                        cfg.backend_url = format!("http://{}/Screen%20Share/backend/api", host_ip);
+                    // Apply env override or resolve backend URL
+                    let configured_backend = resolve_backend_url(
+                        Some(&cfg.backend_url),
+                        env_backend_url.as_deref(),
+                    );
+                    if cfg.backend_url != configured_backend {
+                        cfg.backend_url = configured_backend;
                         dirty = true;
                     }
 
@@ -209,10 +232,10 @@ impl AgentConfig {
         let config_relay = resolved_relay;
 
         // Resolve backend URL for new config
-        let config_backend = env_backend_url.clone().unwrap_or_else(|| {
-            let host_ip = config_relay.split(':').next().unwrap_or("127.0.0.1");
-            format!("http://{}/Screen%20Share/backend/api", host_ip)
-        });
+        let config_backend = resolve_backend_url(
+            None,
+            env_backend_url.as_deref(),
+        );
 
         // Determine environment
         let config_env = if env_relay_url.is_some() && !env_relay_url.as_deref().unwrap_or("").contains("localhost") {
@@ -246,7 +269,7 @@ impl AgentConfig {
         config
     }
 
-    fn try_read_config(path_str: &str) -> Option<Self> {
+    pub fn try_read_config(path_str: &str) -> Option<Self> {
         if path_str.is_empty() || !Path::new(path_str).exists() {
             return None;
         }
@@ -256,7 +279,7 @@ impl AgentConfig {
         serde_json::from_str::<AgentConfig>(&contents).ok()
     }
 
-    fn canonical_config_path() -> Option<PathBuf> {
+    pub fn canonical_config_path() -> Option<PathBuf> {
         let base_dir = env::var("LOCALAPPDATA")
             .or_else(|_| env::var("APPDATA"))
             .or_else(|_| env::var("USERPROFILE"))
@@ -264,6 +287,43 @@ impl AgentConfig {
         let deskstream_dir = Path::new(&base_dir).join("DeskStream");
         let _ = fs::create_dir_all(&deskstream_dir);
         Some(deskstream_dir.join("agent_config.json"))
+    }
+
+    pub fn load_current() -> Option<Self> {
+        Self::canonical_config_path().and_then(|p| Self::try_read_config(p.to_str().unwrap_or_default()))
+    }
+
+    /// Resolves the effective PIN according to precedence:
+    /// 1. SCREENSHARE_DEVICE_PIN environment variable (if non-empty)
+    /// 2. Latest saved PIN from canonical agent_config.json
+    /// 3. In-memory self.pin
+    pub fn get_effective_pin(&self) -> String {
+        Self::resolve_pin(
+            env::var("SCREENSHARE_DEVICE_PIN").ok().as_deref(),
+            Self::load_current().as_ref().map(|c| c.pin.as_str()),
+            &self.pin,
+        )
+    }
+
+    /// Helper for resolving PIN precedence deterministically.
+    pub fn resolve_pin(env_pin: Option<&str>, saved_pin: Option<&str>, memory_pin: &str) -> String {
+        if let Some(env_p) = env_pin {
+            let trimmed = env_p.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        if let Some(saved_p) = saved_pin {
+            let trimmed = saved_p.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        let mem_trimmed = memory_pin.trim();
+        if !mem_trimmed.is_empty() {
+            return mem_trimmed.to_string();
+        }
+        DEFAULT_PIN.to_string()
     }
 
     /// Saves config strictly to canonical appdata directory.
@@ -392,7 +452,7 @@ pub fn generate_deterministic_system_id(device_uuid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_relay_addr, CURRENT_RELAY_ADDR, LEGACY_RELAY_ADDR};
+    use super::*;
 
     #[test]
     fn new_install_uses_source_default() {
@@ -497,6 +557,82 @@ mod tests {
                 CURRENT_RELAY_ADDR
             ),
             configured_relay
+        );
+    }
+
+    #[test]
+    fn backend_url_defaults_to_production_hostinger_endpoint() {
+        assert_eq!(
+            resolve_backend_url(None, None),
+            DEFAULT_BACKEND_URL
+        );
+        assert_eq!(
+            resolve_backend_url(Some(""), None),
+            DEFAULT_BACKEND_URL
+        );
+    }
+
+    #[test]
+    fn backend_url_migrates_legacy_and_relay_ip_paths() {
+        assert_eq!(
+            resolve_backend_url(Some("http://34.207.168.24/Screen%20Share/backend/api"), None),
+            DEFAULT_BACKEND_URL
+        );
+        assert_eq!(
+            resolve_backend_url(Some("http://127.0.0.1/Screen%20Share/backend/api"), None),
+            DEFAULT_BACKEND_URL
+        );
+    }
+
+    #[test]
+    fn backend_url_preserves_custom_and_respects_env_override() {
+        let custom = "https://custom.deskstream.io/api";
+        assert_eq!(
+            resolve_backend_url(Some(custom), None),
+            custom
+        );
+        let env_override = "https://staging.deskstream.io/api";
+        assert_eq!(
+            resolve_backend_url(Some(custom), Some(env_override)),
+            env_override
+        );
+    }
+
+    #[test]
+    fn pin_resolution_precedence() {
+        // 1. Env var takes precedence over saved and in-memory
+        assert_eq!(
+            AgentConfig::resolve_pin(Some("123456"), Some("654321"), "999999"),
+            "123456"
+        );
+        // 2. Whitespace env var falls back to saved
+        assert_eq!(
+            AgentConfig::resolve_pin(Some("   "), Some("654321"), "999999"),
+            "654321"
+        );
+        // 3. Unset env var falls back to saved
+        assert_eq!(
+            AgentConfig::resolve_pin(None, Some("654321"), "999999"),
+            "654321"
+        );
+        // 4. Whitespace saved falls back to in-memory
+        assert_eq!(
+            AgentConfig::resolve_pin(None, Some("   "), "999999"),
+            "999999"
+        );
+        // 5. Unset env and unset saved falls back to in-memory
+        assert_eq!(
+            AgentConfig::resolve_pin(None, None, "999999"),
+            "999999"
+        );
+        // 6. If all are empty, falls back to DEFAULT_PIN
+        assert_eq!(
+            AgentConfig::resolve_pin(None, None, ""),
+            DEFAULT_PIN
+        );
+        assert_eq!(
+            AgentConfig::resolve_pin(None, None, "   "),
+            DEFAULT_PIN
         );
     }
 }

@@ -33,14 +33,45 @@ function admin_render_page(string $title, string $pageKey, string $contentHtml, 
         ],
     ];
 
+    // Live sidebar dynamic badges
+    $badges = [
+        'devices' => 0,
+        'sessions' => 0,
+        'connections' => 0,
+        'support' => 0,
+    ];
+    try {
+        $badgePdo = admin_db();
+        if (admin_table_exists($badgePdo, 'devices') && admin_column_exists($badgePdo, 'devices', 'is_online')) {
+            $badges['devices'] = (int) $badgePdo->query('SELECT COUNT(*) FROM `devices` WHERE `is_online` = 1')->fetchColumn();
+        }
+        if (admin_table_exists($badgePdo, 'sessions') && admin_column_exists($badgePdo, 'sessions', 'status')) {
+            $badges['sessions'] = (int) $badgePdo->query('SELECT COUNT(*) FROM `sessions` WHERE `status` = "active"')->fetchColumn();
+        }
+        if (admin_table_exists($badgePdo, 'connection_requests') && admin_column_exists($badgePdo, 'connection_requests', 'status')) {
+            $badges['connections'] = (int) $badgePdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE `status` = "pending"')->fetchColumn();
+        }
+        if (admin_table_exists($badgePdo, 'support_tickets') && admin_column_exists($badgePdo, 'support_tickets', 'status')) {
+            $badges['support'] = (int) $badgePdo->query('SELECT COUNT(*) FROM `support_tickets` WHERE `status` = "open"')->fetchColumn();
+        }
+    } catch (Throwable $e) {
+        // Fallback silently if db query fails
+    }
+
     $navHtml = '';
     foreach ($navGroups as $groupLabel => $items) {
         $navHtml .= '<div class="nav-group"><span class="nav-group-label">' . htmlspecialchars($groupLabel, ENT_QUOTES, 'UTF-8') . '</span>';
         foreach ($items as $item) {
             $isActive = $pageKey === $item['key'];
+            $badgeCount = $badges[$item['key']] ?? 0;
+            $badgeHtml = '';
+            if ($badgeCount > 0) {
+                $badgeHtml = '<span class="nav-badge' . ($item['key'] === 'devices' ? ' nav-badge-green' : '') . '">' . $badgeCount . '</span>';
+            }
             $navHtml .= '<a class="nav-link' . ($isActive ? ' active' : '') . '" href="' . htmlspecialchars(admin_url($item['url']), ENT_QUOTES, 'UTF-8') . '">'
                 . '<span class="nav-icon">' . $item['icon'] . '</span>'
                 . '<span class="nav-label">' . htmlspecialchars($item['label'], ENT_QUOTES, 'UTF-8') . '</span>'
+                . $badgeHtml
                 . ($isActive ? '<span class="nav-active-dot"></span>' : '')
                 . '</a>';
         }
@@ -817,9 +848,240 @@ function admin_render_page(string $title, string $pageKey, string $contentHtml, 
             .card { padding: 14px 16px; }
         }
 
-        /* ── prefers-reduced-motion ─────────────────────────────────────  */
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after { transition-duration: 0ms !important; }
+        /* ── Sidebar Nav Badges ────────────────────────────────────────── */
+        .nav-badge {
+            margin-left: auto;
+            background: rgba(255, 255, 255, 0.12);
+            color: #fff;
+            font-size: 0.6875rem;
+            font-weight: 700;
+            padding: 2px 7px;
+            border-radius: 999px;
+            line-height: 1;
+        }
+        .nav-badge.nav-badge-green {
+            background: rgba(22, 163, 74, 0.25);
+            color: #4ade80;
+            border: 1px solid rgba(74, 222, 128, 0.3);
+        }
+
+        /* ── Sort Headers ─────────────────────────────────────────────── */
+        .sort-header {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: inherit;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .sort-header:hover {
+            color: var(--accent);
+        }
+        .sort-header.is-sorted {
+            color: var(--accent);
+        }
+        .sort-arrow {
+            font-size: 0.85em;
+            color: var(--accent);
+        }
+
+        /* ── Filter Bar ───────────────────────────────────────────────── */
+        .filter-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+            background: var(--surface);
+            padding: 12px 16px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+        }
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .filter-input {
+            border: 1px solid var(--border);
+            background: var(--bg);
+            border-radius: var(--radius-sm);
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            min-width: 200px;
+            transition: border-color var(--transition);
+        }
+        .filter-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            background: var(--surface);
+        }
+        .filter-select {
+            border: 1px solid var(--border);
+            background: var(--bg);
+            border-radius: var(--radius-sm);
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+        .filter-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .filter-btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity var(--transition);
+        }
+        .filter-btn:hover { opacity: 0.9; }
+        .filter-reset {
+            color: var(--text-muted);
+            font-size: 0.825rem;
+            text-decoration: underline;
+            padding: 6px 8px;
+        }
+        .filter-reset:hover { color: var(--text-primary); }
+
+        /* ── Pagination Bar ───────────────────────────────────────────── */
+        .pagination-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            padding: 16px 20px;
+            border-top: 1px solid var(--border);
+            background: var(--surface);
+            border-bottom-left-radius: var(--radius-md);
+            border-bottom-right-radius: var(--radius-md);
+        }
+        .pagination-info {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+        }
+        .pagination-links {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .pagination-btn {
+            min-width: 32px;
+            height: 32px;
+            padding: 0 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-secondary);
+            font-size: 0.8125rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: background var(--transition), color var(--transition), border-color var(--transition);
+        }
+        .pagination-btn:hover:not(.disabled) {
+            background: var(--bg);
+            color: var(--text-primary);
+            border-color: var(--text-muted);
+        }
+        .pagination-btn.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+        }
+        .pagination-btn.disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .pagination-ellipsis {
+            padding: 0 6px;
+            color: var(--text-muted);
+        }
+
+        /* ── Charts & Visualizations ──────────────────────────────────── */
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        .chart-card {
+            background: var(--surface);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .chart-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+        .chart-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .chart-subtitle {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+        .chart-container {
+            width: 100%;
+            overflow-x: auto;
+        }
+        .chart-svg {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-subtle);
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        /* ── Quick KPI Pill ──────────────────────────────────────────── */
+        .kpi-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: var(--bg);
+            border: 1px solid var(--border);
         }
     </style>
 </head>

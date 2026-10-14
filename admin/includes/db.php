@@ -316,3 +316,158 @@ function admin_logged_in_user(): ?array
         'email' => $_SESSION['admin_user_email'] ?? '',
     ];
 }
+
+function admin_log_action(PDO $pdo, string $action, ?string $details = null, ?int $userId = null): void
+{
+    try {
+        if (!admin_table_exists($pdo, 'audit_logs')) {
+            return;
+        }
+        $adminId = $userId ?? ($_SESSION['admin_user_id'] ?? null);
+        $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+        $stmt = $pdo->prepare('INSERT INTO `audit_logs` (`user_id`, `action`, `details`, `ip_address`, `created_at`) VALUES (?, ?, ?, ?, NOW())');
+        $stmt->execute([$adminId, $action, $details, $ip]);
+    } catch (Throwable $e) {
+        error_log('admin_log_action failed: ' . $e->getMessage());
+    }
+}
+
+function admin_pagination(int $total, int $perPage, int $currentPage, string $baseUrl, array $queryParams = []): string
+{
+    $totalPages = (int) ceil(max(1, $total) / max(1, $perPage));
+    if ($totalPages <= 1) {
+        return '';
+    }
+
+    $currentPage = max(1, min($currentPage, $totalPages));
+    $html = '<div class="pagination-bar">';
+    $from = (($currentPage - 1) * $perPage) + 1;
+    $to = min($currentPage * $perPage, $total);
+    $html .= '<span class="pagination-info">Showing <strong>' . $from . '</strong> to <strong>' . $to . '</strong> of <strong>' . $total . '</strong> records</span>';
+    $html .= '<div class="pagination-links">';
+
+    // Previous
+    if ($currentPage > 1) {
+        $prevParams = array_merge($queryParams, ['page' => $currentPage - 1]);
+        $html .= '<a class="pagination-btn" href="' . htmlspecialchars(admin_url($baseUrl, $prevParams), ENT_QUOTES, 'UTF-8') . '">&larr; Prev</a>';
+    } else {
+        $html .= '<span class="pagination-btn disabled">&larr; Prev</span>';
+    }
+
+    // Page window
+    $startPage = max(1, $currentPage - 2);
+    $endPage = min($totalPages, $currentPage + 2);
+    if ($startPage > 1) {
+        $firstParams = array_merge($queryParams, ['page' => 1]);
+        $html .= '<a class="pagination-btn" href="' . htmlspecialchars(admin_url($baseUrl, $firstParams), ENT_QUOTES, 'UTF-8') . '">1</a>';
+        if ($startPage > 2) {
+            $html .= '<span class="pagination-ellipsis">&hellip;</span>';
+        }
+    }
+
+    for ($p = $startPage; $p <= $endPage; $p++) {
+        $pageParams = array_merge($queryParams, ['page' => $p]);
+        $activeClass = ($p === $currentPage) ? ' active' : '';
+        $html .= '<a class="pagination-btn' . $activeClass . '" href="' . htmlspecialchars(admin_url($baseUrl, $pageParams), ENT_QUOTES, 'UTF-8') . '">' . $p . '</a>';
+    }
+
+    if ($endPage < $totalPages) {
+        if ($endPage < $totalPages - 1) {
+            $html .= '<span class="pagination-ellipsis">&hellip;</span>';
+        }
+        $lastParams = array_merge($queryParams, ['page' => $totalPages]);
+        $html .= '<a class="pagination-btn" href="' . htmlspecialchars(admin_url($baseUrl, $lastParams), ENT_QUOTES, 'UTF-8') . '">' . $totalPages . '</a>';
+    }
+
+    // Next
+    if ($currentPage < $totalPages) {
+        $nextParams = array_merge($queryParams, ['page' => $currentPage + 1]);
+        $html .= '<a class="pagination-btn" href="' . htmlspecialchars(admin_url($baseUrl, $nextParams), ENT_QUOTES, 'UTF-8') . '">Next &rarr;</a>';
+    } else {
+        $html .= '<span class="pagination-btn disabled">Next &rarr;</span>';
+    }
+
+    $html .= '</div></div>';
+    return $html;
+}
+
+function admin_sort_header(string $column, string $label, string $currentSort, string $currentDir, string $baseUrl, array $queryParams = []): string
+{
+    $isSorted = ($currentSort === $column);
+    $nextDir = ($isSorted && strtolower($currentDir) === 'asc') ? 'desc' : 'asc';
+    $arrow = '';
+    if ($isSorted) {
+        $arrow = (strtolower($currentDir) === 'asc') ? ' &uarr;' : ' &darr;';
+    }
+    $urlParams = array_merge($queryParams, ['sort' => $column, 'dir' => $nextDir, 'page' => 1]);
+    $url = htmlspecialchars(admin_url($baseUrl, $urlParams), ENT_QUOTES, 'UTF-8');
+    return '<a href="' . $url . '" class="sort-header' . ($isSorted ? ' is-sorted' : '') . '">' . htmlspecialchars($label, ENT_QUOTES, 'UTF-8') . '<span class="sort-arrow">' . $arrow . '</span></a>';
+}
+
+function admin_format_duration(?string $start, ?string $end): string
+{
+    if (!$start) {
+        return '—';
+    }
+    $startTime = strtotime($start);
+    if ($startTime === false) {
+        return '—';
+    }
+    $endTime = $end ? strtotime($end) : time();
+    if ($endTime === false || $endTime < $startTime) {
+        return '—';
+    }
+    $diff = $endTime - $startTime;
+    if ($diff < 60) {
+        return $diff . 's';
+    }
+    if ($diff < 3600) {
+        $m = floor($diff / 60);
+        $s = $diff % 60;
+        return $m . 'm ' . $s . 's';
+    }
+    $h = floor($diff / 3600);
+    $m = floor(($diff % 3600) / 60);
+    return $h . 'h ' . $m . 'm';
+}
+
+function admin_format_bytes($bytes, int $precision = 2): string
+{
+    $bytes = (float) $bytes;
+    if ($bytes <= 0) {
+        return '0 B';
+    }
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $i = floor(log($bytes, 1024));
+    $i = min($i, count($units) - 1);
+    return round($bytes / pow(1024, $i), $precision) . ' ' . $units[$i];
+}
+
+function admin_time_ago(?string $datetime): string
+{
+    if (!$datetime) {
+        return 'Never';
+    }
+    $ts = strtotime($datetime);
+    if ($ts === false) {
+        return 'Never';
+    }
+    $diff = time() - $ts;
+    if ($diff < 0) {
+        return 'Just now';
+    }
+    if ($diff < 60) {
+        return $diff . 's ago';
+    }
+    if ($diff < 3600) {
+        return floor($diff / 60) . 'm ago';
+    }
+    if ($diff < 86400) {
+        return floor($diff / 3600) . 'h ago';
+    }
+    if ($diff < 604800) {
+        return floor($diff / 86400) . 'd ago';
+    }
+    return date('d M Y', $ts);
+}
+

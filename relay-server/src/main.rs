@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use reqwest::Url;
@@ -53,7 +53,7 @@ macro_rules! println {
 
 macro_rules! eprintln {
     ($($arg:tt)*) => {
-        relay_log!($($arg)*);
+        relay_log!($($arg)*)
     };
 }
 
@@ -110,6 +110,7 @@ const REVERSE_REQUEST_PACKET_TYPE: u8 = 30;
 const REVERSE_ACK_PACKET_TYPE: u8 = 31;
 const DEVICE_ID_LENGTH: usize = 9;
 const VIEWER_AUTH_HASH_LENGTH: usize = 32;
+const MAX_BACKEND_RESPONSE_BYTES: u64 = 4096;
 
 type PresenceQueue = (std::sync::mpsc::SyncSender<String>, Arc<Mutex<HashMap<String, ()>>>);
 static BACKEND_PRESENCE_QUEUE: OnceLock<PresenceQueue> = OnceLock::new();
@@ -194,6 +195,14 @@ fn initial_packet_type(bytes_peeked: usize, peek: &[u8]) -> Option<u8> {
         return None;
     }
     peek.first().copied()
+}
+
+fn is_http_get_prefix(bytes_peeked: usize, peek: &[u8]) -> bool {
+    if bytes_peeked == 0 {
+        return false;
+    }
+    let prefix_len = bytes_peeked.min(4);
+    b"GET ".starts_with(&peek[..prefix_len])
 }
 
 fn is_health_check(stream: &TcpStream) -> std::io::Result<bool> {
@@ -1273,6 +1282,34 @@ fn validate_presence_response(
     Ok(())
 }
 
+fn sanitized_backend_response_body(body: &str) -> String {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(body)
+    else {
+        return "non_json_or_unrecognized_body".to_string();
+    };
+
+    let status = match fields.get("status").and_then(serde_json::Value::as_str) {
+        Some("success") => "success",
+        Some("error") => "error",
+        _ => "unknown",
+    };
+    let message = match fields
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    {
+        Some(message) if message.eq_ignore_ascii_case("unauthorized") => "unauthorized",
+        Some(message) if message.eq_ignore_ascii_case("forbidden") => "forbidden",
+        Some(message) if message.starts_with("Method not allowed") => "method_not_allowed",
+        Some(message) if message.starts_with("Missing system_id") => "missing_device_identifier",
+        Some(message) if message.eq_ignore_ascii_case("Heartbeat received.") => "heartbeat_received",
+        Some(_) => "unrecognized_message_omitted",
+        None => "not_provided",
+    };
+
+    format!(r#"{{"status":"{status}","message":"{message}"}}"#)
+}
+
 fn send_backend_presence(
     client: &Client,
     base_url: &Url,
@@ -1280,17 +1317,31 @@ fn send_backend_presence(
 ) -> Result<(), String> {
     let endpoint = heartbeat_endpoint(base_url)?;
     let response = client
-        .post(endpoint)
+        .post(endpoint.clone())
         .json(&serde_json::json!({ "system_id": session_id }))
         .send()
-        .map_err(|error| format!("request failed: {error}"))?;
+        .map_err(|error| format!("endpoint={} method=POST request failed: {error}", endpoint.path()))?;
     let status = response.status();
+    let mut body_bytes = Vec::new();
+    response
+        .take(MAX_BACKEND_RESPONSE_BYTES)
+        .read_to_end(&mut body_bytes)
+        .map_err(|_| format!("endpoint={} HTTP {status} response body unavailable", endpoint.path()))?;
+    let body = String::from_utf8_lossy(&body_bytes);
     if !status.is_success() {
-        return validate_presence_response(status, serde_json::Value::Null);
+        return Err(format!(
+            "endpoint={} method=POST HTTP {} sanitized_body={}",
+            endpoint.path(),
+            status,
+            sanitized_backend_response_body(&body)
+        ));
     }
-    let body = response
-        .json::<serde_json::Value>()
-        .map_err(|_| "backend returned malformed JSON".to_string())?;
+    let body = serde_json::from_str::<serde_json::Value>(&body).map_err(|_| {
+        format!(
+            "endpoint={} HTTP {status} sanitized_body=malformed_json_omitted",
+            endpoint.path()
+        )
+    })?;
     validate_presence_response(status, body)
 }
 
@@ -1779,7 +1830,7 @@ fn handle_websocket_viewer(stream: TcpStream, hosts: ClientMap) {
     println!("[WS] OPEN");
     println!("[AUTH] Authentication message received");
     println!("[AUTH] Target ID = {}", session_id);
-    println!("[AUTH] Token present = YES");
+    println!("[AUTH] Session request token present in relay handshake = NO");
 
     println!("[AUTH] Received viewer authentication");
     println!("[RELAY][WS] Viewer requested device = {}", session_id);
@@ -1919,15 +1970,40 @@ fn main() {
         println!("[RELAY] Waiting for authentication...");
 
         let _ = stream.set_nodelay(true);
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+
         let mut peek = [0u8; 14];
-        let bytes_peeked = match stream.peek(&mut peek) {
-            Ok(bytes_peeked) => bytes_peeked,
-            Err(e) => {
-                eprintln!("[Relay] Failed to inspect connection from {}: {:?}", peer, e);
-                let _ = stream.shutdown(Shutdown::Both);
-                continue;
+        let mut bytes_peeked = 0;
+        let peek_start = Instant::now();
+        while peek_start.elapsed() < Duration::from_secs(5) {
+            match stream.peek(&mut peek) {
+                Ok(0) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(n) => {
+                    bytes_peeked = n;
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    eprintln!("[Relay] Failed to inspect connection from {}: {:?}", peer, e);
+                    let _ = stream.shutdown(Shutdown::Both);
+                    break;
+                }
             }
-        };
+        }
+
+        if bytes_peeked == 0 {
+            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            println!("[RELAY][HANDSHAKE] timestamp={} peer={} event=CLIENT_TIMEOUT_BEFORE_INIT", now_ms, peer);
+            println!("[Relay] Client closed before sending an initial packet: {}", peer);
+            let _ = stream.shutdown(Shutdown::Both);
+            continue;
+        }
+
         let connection_type = match initial_packet_type(bytes_peeked, &peek) {
             None => {
                 println!("[Relay] Client closed before sending an initial packet: {}", peer);
@@ -1937,7 +2013,7 @@ fn main() {
             Some(connection_type) => connection_type,
         };
 
-        if connection_type == b'G' {
+        if is_http_get_prefix(bytes_peeked, &peek) {
             match is_health_check(&stream) {
                 Ok(true) => {
                     println!("[RELAY][HEALTH] peer={} result=ok", peer);
@@ -1946,7 +2022,15 @@ fn main() {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    println!(
+                        "[RELAY][WS] event=VIEWER_WEBSOCKET_ACCEPTED peer={}",
+                        peer
+                    );
+                    let hosts_clone = Arc::clone(&hosts);
+                    thread::spawn(move || handle_websocket_viewer(stream, hosts_clone));
+                    continue;
+                }
                 Err(error) => {
                     eprintln!(
                         "[RELAY][HEALTH] peer={} result=probe_error error={}",
@@ -1973,21 +2057,32 @@ fn main() {
             }
 
             1 => {
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                println!("[RELAY][HANDSHAKE] timestamp={} peer={} role=HOST initial_type=1 bytes_peeked={}", now_ms, peer, bytes_peeked);
                 println!("[Relay] Connection identified as HOST");
                 thread::spawn(move || handle_host(stream, hosts_clone));
             }
 
             2 => {
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                println!("[RELAY][HANDSHAKE] timestamp={} peer={} role=TCP_VIEWER initial_type=2 bytes_peeked={}", now_ms, peer, bytes_peeked);
                 println!("[Relay] Connection identified as TCP VIEWER");
                 thread::spawn(move || handle_viewer(stream, hosts_clone));
             }
 
             71 => {
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                println!("[RELAY][HANDSHAKE] timestamp={} peer={} role=WEBSOCKET initial_type=71 bytes_peeked={}", now_ms, peer, bytes_peeked);
                 println!("[Relay] Connection identified as WEBSOCKET");
                 thread::spawn(move || handle_websocket_viewer(stream, hosts_clone));
             }
 
             _ => {
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                eprintln!(
+                    "[RELAY][HANDSHAKE] timestamp={} peer={} error=UNKNOWN_CONNECTION_TYPE type={} initial_byte=0x{:02x} bytes_peeked={}",
+                    now_ms, peer, connection_type, peek[0], bytes_peeked
+                );
                 eprintln!("[Relay] Unknown initial connection type: {}", connection_type);
                 let _ = stream.shutdown(Shutdown::Both);
             }
@@ -2040,7 +2135,7 @@ mod tests {
     ) -> (Url, thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let base_url = Url::parse(&format!("http://{address}/DeskStream/api")).unwrap();
+        let base_url = Url::parse(&format!("http://{address}/DeskStream/api/")).unwrap();
         let status = status.to_string();
         let body = body.to_string();
         let server = thread::spawn(move || {
@@ -2145,19 +2240,20 @@ mod tests {
 
     #[test]
     fn backend_url_uses_scheme_defaults_and_optional_host_port_overrides() {
-        let url = resolve_backend_url(
+        for backend_url in [
             "https://friendssoftwaresolutions.in/DeskStream/api",
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(url.scheme(), "https");
-        assert_eq!(url.host_str(), Some("friendssoftwaresolutions.in"));
-        assert_eq!(url.port_or_known_default(), Some(443));
-        assert_eq!(
-            heartbeat_endpoint(&url).unwrap().path(),
-            "/DeskStream/api/devices/heartbeat.php"
-        );
+            "https://friendssoftwaresolutions.in/DeskStream/api/",
+            "https://friendssoftwaresolutions.in/DeskStream/api///",
+        ] {
+            let url = resolve_backend_url(backend_url, None, None).unwrap();
+            assert_eq!(url.scheme(), "https");
+            assert_eq!(url.host_str(), Some("friendssoftwaresolutions.in"));
+            assert_eq!(url.port_or_known_default(), Some(443));
+            assert_eq!(
+                heartbeat_endpoint(&url).unwrap().path(),
+                "/DeskStream/api/devices/heartbeat.php"
+            );
+        }
 
         let overridden =
             resolve_backend_url("http://localhost/api", Some("127.0.0.1"), Some("8080"))
@@ -2227,7 +2323,7 @@ mod tests {
         let (base_url, server) = start_mock_backend("200 OK", "not-json", Duration::ZERO);
         assert!(send_backend_presence(&client, &base_url, "705004256")
             .unwrap_err()
-            .contains("malformed JSON"));
+            .contains("malformed_json_omitted"));
         server.join().unwrap();
     }
 
@@ -2314,6 +2410,16 @@ mod tests {
         let mut trailing = packet;
         trailing.push(0);
         assert!(parse_websocket_viewer_handshake(&trailing).is_err());
+    }
+
+    #[test]
+    fn browser_websocket_upgrade_is_detected_from_http_get() {
+        let request = b"GET / HTTP/1.1\r\nUpgrade: websocket\r\n";
+        assert!(is_http_get_prefix(request.len(), request));
+        assert!(is_http_get_prefix(1, b"G"));
+        assert!(is_http_get_prefix(3, b"GET"));
+        assert!(!is_http_get_prefix(4, b"POST"));
+        assert!(!is_http_get_prefix(0, b""));
     }
 
     #[test]
@@ -2451,7 +2557,42 @@ mod tests {
 
         let request = String::from_utf8(server.join().unwrap()).unwrap();
         assert!(request.starts_with("POST /DeskStream/api/devices/heartbeat.php HTTP/1.1\r\n"));
-        assert!(request.ends_with(r#"{"system_id":"705004256"}"#));
+        let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(headers.lines().any(|line| {
+            line.split_once(':')
+                .map(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-type")
+                        && value.trim().eq_ignore_ascii_case("application/json")
+                })
+                .unwrap_or(false)
+        }));
+        assert!(!headers
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("authorization:")));
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload, serde_json::json!({"system_id": "705004256"}));
+    }
+
+    #[test]
+    fn backend_heartbeat_reports_and_redacts_http_403_responses() {
+        let (url, server) = mock_backend(
+            "403 Forbidden",
+            r#"{"status":"error","message":"Forbidden","token":"secret-token","password":"secret-password"}"#,
+            Duration::ZERO,
+        );
+        let error = send_backend_presence(
+            &test_http_client(Duration::from_secs(2)),
+            &url,
+            "705004256",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("method=POST HTTP 403"));
+        assert!(error.contains(r#"sanitized_body={"status":"error","message":"forbidden"}"#));
+        assert!(!error.contains("secret-token"));
+        assert!(!error.contains("secret-password"));
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(request.starts_with("POST /DeskStream/api/devices/heartbeat.php HTTP/1.1\r\n"));
     }
 
     #[test]
@@ -2465,7 +2606,7 @@ mod tests {
         let (url, server) = mock_backend("200 OK", "not-json", Duration::ZERO);
         assert!(send_backend_presence(&test_http_client(Duration::from_secs(2)), &url, "705004256")
             .unwrap_err()
-            .contains("malformed JSON"));
+            .contains("malformed_json_omitted"));
         let _ = server.join().unwrap();
 
         let (url, server) = mock_backend(
@@ -2477,6 +2618,26 @@ mod tests {
             .unwrap_err()
             .contains("did not update"));
         let _ = server.join().unwrap();
+    }
+
+    #[test]
+    fn backend_error_logging_omits_unrecognized_response_details() {
+        assert_eq!(
+            sanitized_backend_response_body(
+                r#"{"status":"error","message":"Forbidden","token":"secret"}"#
+            ),
+            r#"{"status":"error","message":"forbidden"}"#
+        );
+        assert_eq!(
+            sanitized_backend_response_body(
+                r#"{"status":"error","message":"SQL error for device 542157504"}"#
+            ),
+            r#"{"status":"error","message":"unrecognized_message_omitted"}"#
+        );
+        assert_eq!(
+            sanitized_backend_response_body("<html>Cloudflare request denied</html>"),
+            "non_json_or_unrecognized_body"
+        );
     }
 
     #[test]

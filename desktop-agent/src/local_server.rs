@@ -292,6 +292,32 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 continue;
             }
 
+            if path == "/desktop-api/session/authorize_request" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let token = payload.get("request_token").and_then(|v| v.as_str()).unwrap_or("");
+                let requester_id = payload.get("requester_system_id").and_then(|v| v.as_str()).unwrap_or("");
+
+                if !token.is_empty() {
+                    crate::status::record_approved_session(token, requester_id);
+                }
+
+                let response = Response::from_string("{\"success\":true}")
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
             if path == "/desktop-api/session/chat" && request.method() == &tiny_http::Method::Post {
                 let trace_id = request
                     .headers()

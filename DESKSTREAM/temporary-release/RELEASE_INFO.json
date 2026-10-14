@@ -1,0 +1,28 @@
+{
+  "project": "DeskStream",
+  "version": "1.1.3",
+  "release_type": "temporary_development_release",
+  "build_timestamp_utc": "2026-10-13T08:04:45Z",
+  "signing_status": {
+    "is_production_signed": false,
+    "is_self_signed": false,
+    "authenticode_status": "NotSigned",
+    "smart_app_control_compliant": false,
+    "smart_screen_warning_expected": true
+  },
+  "artifacts": [
+    {
+      "file_name": "DeskStream.exe",
+      "format": "PE32+ executable (x86-64)",
+      "sha256": "926D3FC7B3E880C4EAFB3769191ADA64CC46DEDA0B545AA7CD429DB80EDD72C4",
+      "bytes": 7927808
+    },
+    {
+      "file_name": "DeskStream-Setup-x64-development.exe",
+      "format": "NSIS installer",
+      "sha256": "7DCCDDF7C8B25ACB015E157AE406407CF72EA4C4148BF607259AAF912FAF4638",
+      "bytes": 3659173
+    }
+  ],
+  "security_notes": "Temporary development artifacts are intentionally unsigned. Do not install untrusted root certs or weaken Windows Smart App Control."
+}

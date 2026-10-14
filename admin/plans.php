@@ -43,7 +43,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'toggle' && isset($_GET['id'])
 }
 
 // Handle Form Submission (Create or Edit)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['plan_submit'])) {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['plan_submit'])) {
     if (!admin_verify_csrf_token($_POST['csrf_token'] ?? null)) {
         admin_set_flash('error', 'Invalid request token. Please refresh and try again.');
     } else {
@@ -206,16 +206,26 @@ try {
     error_log("Plans list query error: " . $e->getMessage());
 }
 
+// KPI Counters
+$kpiTotalPlans = count($rows);
+$kpiActivePlans = count(array_filter($rows, fn($r) => strtolower($r['status'] ?? '') === 'active'));
+$kpiInactivePlans = $kpiTotalPlans - $kpiActivePlans;
+$kpiTotalSubscribers = (int) ($pdo->query('SELECT COUNT(*) FROM `subscriptions` WHERE status = "active"')->fetchColumn() ?: 0);
+
 $csrfToken = htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8');
 
-$rowHtml = '<tr><td colspan="7" class="empty-state">No plans found.</td></tr>';
+$rowHtml = '<tr><td colspan="8" class="empty-state">No plans found.</td></tr>';
 if (!empty($rows)) {
     $rowHtml = '';
+    $subCountStmt = $pdo->prepare('SELECT COUNT(*) FROM `subscriptions` WHERE `plan_id` = ? AND LOWER(`status`) = "active"');
     foreach ($rows as $row) {
         $pId = (int)$row['id'];
         $status = strtolower((string)($row['status'] ?? 'active'));
         $statusUpper = strtoupper($status);
         $features = !empty($row['features']) ? json_decode($row['features'], true) : [];
+
+        $subCountStmt->execute([$pId]);
+        $activeSubsCount = (int) $subCountStmt->fetchColumn();
         
         $durationUnit = $row['duration_unit'] ?? 'days';
         $durationValue = (int)($row['duration_value'] ?? $row['duration_days'] ?? 0);
@@ -249,6 +259,7 @@ if (!empty($rows)) {
         $rowHtml .= '<td>₹' . number_format((float)($row['price'] ?? 0), 2) . '</td>';
         $rowHtml .= '<td>' . htmlspecialchars($durationDisplay) . '</td>';
         $rowHtml .= '<td>' . (int)($row['concurrent_sessions'] ?? 1) . ' session(s)</td>';
+        $rowHtml .= '<td><span class="kpi-pill"><strong>' . $activeSubsCount . '</strong> active</span></td>';
         $rowHtml .= '<td>' . $recordBadge . ' &nbsp; ' . $reverseBadge . ' &nbsp; ' . $qualityBadge . '</td>';
         $rowHtml .= '<td><span class="status-badge status-' . $status . '">' . htmlspecialchars($statusUpper) . '</span></td>';
         $rowHtml .= '<td><div class="mini-actions">';
@@ -278,11 +289,47 @@ $canRecordChecked = (!isset($editPlan) || !empty($featuresDecoded['recording']))
 $canReverseChecked = (!isset($editPlan) || !empty($featuresDecoded['reverse_control'])) ? 'checked' : '';
 $qualityVal = $featuresDecoded['max_quality'] ?? 'full';
 
+$unitOptions = '<option value="days"' . ($unitVal === 'days' ? ' selected' : '') . '>Days</option>'
+             . '<option value="months"' . ($unitVal === 'months' ? ' selected' : '') . '>Months</option>'
+             . '<option value="years"' . ($unitVal === 'years' ? ' selected' : '') . '>Years</option>'
+             . '<option value="unlimited"' . ($unitVal === 'unlimited' ? ' selected' : '') . '>Unlimited (No Expiry)</option>';
+
+$statusOptions = '<option value="active"' . ($statusVal === 'active' ? ' selected' : '') . '>Active</option>'
+               . '<option value="inactive"' . ($statusVal === 'inactive' ? ' selected' : '') . '>Inactive</option>';
+
+$qualityOptions = '<option value="full"' . ($qualityVal === 'full' ? ' selected' : '') . '>Full Quality (Unrestricted)</option>'
+                . '<option value="1080p"' . ($qualityVal === '1080p' ? ' selected' : '') . '>1080p Max</option>'
+                . '<option value="720p"' . ($qualityVal === '720p' ? ' selected' : '') . '>720p Max (Restricted)</option>';
+
 $cancelBtn = $editPlan 
     ? '<a class="outline-button" href="' . htmlspecialchars(admin_url('plans.php'), ENT_QUOTES, 'UTF-8') . '" style="margin-left:8px;">Cancel</a>' 
     : '';
 
 $body = <<<HTML
+<!-- Plans KPI Summary Cards -->
+<div class="card-grid">
+    <div class="card">
+        <span class="label">Configured Plans</span>
+        <p class="value">{$kpiTotalPlans}</p>
+        <div class="trend">All subscription tiers</div>
+    </div>
+    <div class="card">
+        <span class="label">Active Plans</span>
+        <p class="value" style="color:#16a34a;">{$kpiActivePlans}</p>
+        <div class="trend">Available for assignment</div>
+    </div>
+    <div class="card">
+        <span class="label">Inactive Plans</span>
+        <p class="value" style="color:#6b7280;">{$kpiInactivePlans}</p>
+        <div class="trend">Decommissioned tiers</div>
+    </div>
+    <div class="card">
+        <span class="label">Active Subscribers</span>
+        <p class="value" style="color:#c0392b;">{$kpiTotalSubscribers}</p>
+        <div class="trend">Users currently on active plans</div>
+    </div>
+</div>
+
 <div class="section">
     <div class="section-header">
         <h3>Subscription Plans</h3>
@@ -298,6 +345,7 @@ $body = <<<HTML
                     <th>Price</th>
                     <th>Duration</th>
                     <th>Sessions</th>
+                    <th>Subscribers</th>
                     <th>Entitlements</th>
                     <th>Status</th>
                     <th>Actions</th>
@@ -333,18 +381,7 @@ $body = <<<HTML
                 <div class="field">
                     <label>Duration Unit</label>
                     <select name="duration_unit" id="duration_unit" onchange="toggleDurationInput()">
-                        <option value="days"HTML;
-if ($unitVal === 'days') $body .= ' selected';
-$body .= <<<HTML>Days</option>
-                        <option value="months"HTML;
-if ($unitVal === 'months') $body .= ' selected';
-$body .= <<<HTML>Months</option>
-                        <option value="years"HTML;
-if ($unitVal === 'years') $body .= ' selected';
-$body .= <<<HTML>Years</option>
-                        <option value="unlimited"HTML;
-if ($unitVal === 'unlimited') $body .= ' selected';
-$body .= <<<HTML>Unlimited (No Expiry)</option>
+                        {$unitOptions}
                     </select>
                 </div>
                 <div class="field" id="duration_value_container">
@@ -362,26 +399,13 @@ $body .= <<<HTML>Unlimited (No Expiry)</option>
                 <div class="field">
                     <label>Status</label>
                     <select name="status">
-                        <option value="active"HTML;
-if ($statusVal === 'active') $body .= ' selected';
-$body .= <<<HTML>Active</option>
-                        <option value="inactive"HTML;
-if ($statusVal === 'inactive') $body .= ' selected';
-$body .= <<<HTML>Inactive</option>
+                        {$statusOptions}
                     </select>
                 </div>
                 <div class="field">
                     <label>Streaming Quality Limit</label>
                     <select name="max_quality">
-                        <option value="full"HTML;
-if ($qualityVal === 'full') $body .= ' selected';
-$body .= <<<HTML>Full Quality (Unrestricted)</option>
-                        <option value="1080p"HTML;
-if ($qualityVal === '1080p') $body .= ' selected';
-$body .= <<<HTML>1080p Max</option>
-                        <option value="720p"HTML;
-if ($qualityVal === '720p') $body .= ' selected';
-$body .= <<<HTML>720p Max (Restricted)</option>
+                        {$qualityOptions}
                     </select>
                 </div>
                 <div class="field" style="display:flex; align-items:center; gap:20px; padding-top:24px;">

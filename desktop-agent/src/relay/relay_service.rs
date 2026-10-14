@@ -194,7 +194,7 @@ fn handle_incoming_connection(
 }
 
 fn handle_host(mut stream: TcpStream, hosts: ClientMap, stats_hosts: Arc<AtomicU64>) {
-    let peer_addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
+    let _peer_addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown".to_string());
 
     let mut id_buf = [0u8; 32];
     let n = match stream.peek(&mut id_buf) {

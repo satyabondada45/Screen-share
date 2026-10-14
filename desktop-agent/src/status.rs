@@ -750,6 +750,81 @@ pub fn take_manual_reconnect_request() -> bool {
     MANUAL_RECONNECT_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+#[derive(Clone, Debug)]
+pub struct ApprovedSession {
+    pub token_hash: [u8; 32],
+    pub token: String,
+    pub requester_id: String,
+    pub expires_at: Instant,
+    pub consumed: Arc<AtomicBool>,
+}
+
+static APPROVED_SESSIONS: OnceLock<Mutex<Vec<ApprovedSession>>> = OnceLock::new();
+
+fn get_approved_sessions() -> &'static Mutex<Vec<ApprovedSession>> {
+    APPROVED_SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn record_approved_session(token: &str, requester_id: &str) {
+    use sha2::{Digest, Sha256};
+    let token = token.trim();
+    if token.is_empty() {
+        return;
+    }
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    let now = Instant::now();
+    let expires_at = now + Duration::from_secs(60);
+
+    if let Ok(mut list) = get_approved_sessions().lock() {
+        list.retain(|s| s.expires_at > now && !s.consumed.load(Ordering::SeqCst));
+        list.push(ApprovedSession {
+            token_hash: hash,
+            token: token.to_string(),
+            requester_id: requester_id.to_string(),
+            expires_at,
+            consumed: Arc::new(AtomicBool::new(false)),
+        });
+    }
+}
+
+pub fn check_and_consume_approved_session(supplied_hash: &[u8; 32]) -> bool {
+    if supplied_hash.iter().all(|&b| b == 0) {
+        return false;
+    }
+
+    let now = Instant::now();
+    if let Ok(mut list) = get_approved_sessions().lock() {
+        list.retain(|s| s.expires_at > now);
+
+        for session in list.iter() {
+            if session.expires_at > now {
+                let diff = session
+                    .token_hash
+                    .iter()
+                    .zip(supplied_hash.iter())
+                    .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+
+                if diff == 0 {
+                    if session
+                        .consumed
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn clear_approved_sessions() {
+    if let Ok(mut list) = get_approved_sessions().lock() {
+        list.clear();
+    }
+}
+
 /// Called whenever a heartbeat packet is sent/received so the GUI can show the
 /// "Last heartbeat" relative time.
 pub fn touch_heartbeat() {
@@ -781,6 +856,7 @@ pub fn set_session_active(active: bool) {
 #[cfg(test)]
 mod tests {
     use super::{
+        check_and_consume_approved_session, clear_approved_sessions, record_approved_session,
         session_audio_enabled, set_session_audio_enabled, HeartbeatHealth, HeartbeatReceive,
         HeartbeatTracker, SessionChatHistory, CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START,
         CHAT_TYPING_STOP, HEARTBEAT_MISS_LIMIT,
@@ -880,4 +956,32 @@ mod tests {
         assert!(session_audio_enabled());
         set_session_audio_enabled(false);
     }
+
+    #[test]
+    fn approved_session_workflow_accepts_and_prevents_replay() {
+        use sha2::{Digest, Sha256};
+        clear_approved_sessions();
+        let token = "test-token-abcdef123456";
+        let valid_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let invalid_hash: [u8; 32] = Sha256::digest(b"wrong-token").into();
+        let zero_hash = [0u8; 32];
+
+        // 1. Unapproved token rejected
+        assert!(!check_and_consume_approved_session(&valid_hash));
+        assert!(!check_and_consume_approved_session(&zero_hash));
+
+        // 2. Record approval
+        record_approved_session(token, "987654321");
+
+        // 3. Invalid and zero hashes still rejected
+        assert!(!check_and_consume_approved_session(&invalid_hash));
+        assert!(!check_and_consume_approved_session(&zero_hash));
+
+        // 4. Valid hash accepted on first attempt
+        assert!(check_and_consume_approved_session(&valid_hash));
+
+        // 5. Replay attempt rejected (single-use consumption)
+        assert!(!check_and_consume_approved_session(&valid_hash));
+    }
 }
+

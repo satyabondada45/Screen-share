@@ -73,6 +73,16 @@ fn compute_sha256(input: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+// FIXED: empty PIN → 32 zero bytes (protocol empty-auth); non-empty → raw SHA-256.
+fn build_viewer_auth_hash(pin: &str) -> [u8; 32] {
+    let pin = pin.trim();
+    if pin.is_empty() {
+        [0u8; 32]
+    } else {
+        compute_sha256(pin)
+    }
+}
+
 /* ============================================================
    BYTE READERS
    ============================================================ */
@@ -685,7 +695,7 @@ fn main() {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
     let pin = env::var("CONNECT_PIN").unwrap_or_default();
-    let auth_hash = compute_sha256(&pin);
+    let auth_hash = build_viewer_auth_hash(&pin);
 
     let mut connect_packet = Vec::with_capacity(1 + target_id.len() + 32);
     connect_packet.push(2);
@@ -1471,7 +1481,7 @@ fn main() {
 
         if window.is_none() || last_window_width != width || last_window_height != height {
             println!("[Viewer] Creating display for {}x{}", width, height);
-            window = None;
+            drop(window.take());
             let window_width = width.min(1600);
             let window_height = height.min(900);
             let mut options = WindowOptions::default();

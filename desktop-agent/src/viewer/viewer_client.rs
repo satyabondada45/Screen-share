@@ -19,6 +19,17 @@ fn compute_sha256(input: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+// FIXED: empty PIN must send the protocol empty-auth token (32 zero bytes),
+// not SHA-256(""). Non-empty PIN sends the raw 32-byte SHA-256 digest.
+fn build_viewer_auth_hash(pin: &str) -> [u8; 32] {
+    let pin = pin.trim();
+    if pin.is_empty() {
+        [0u8; 32]
+    } else {
+        compute_sha256(pin)
+    }
+}
+
 fn read_exact_interruptible(stream: &mut TcpStream, buffer: &mut [u8], connected: &AtomicBool) -> io::Result<()> {
     let mut offset = 0;
     while offset < buffer.len() {
@@ -130,7 +141,7 @@ pub fn start_remote_viewer(relay_addr: &str, target_system_id: &str, pin: &str) 
             }
         };
 
-        let auth_hash = compute_sha256(&pin_str);
+        let auth_hash = build_viewer_auth_hash(&pin_str);
         let id_bytes = clean_id.as_bytes();
         let mut handshake = Vec::with_capacity(1 + id_bytes.len() + 32);
         handshake.push(2u8);
@@ -143,8 +154,16 @@ pub fn start_remote_viewer(relay_addr: &str, target_system_id: &str, pin: &str) 
         }
 
         let mut status = [0u8; 1];
-        if stream.read_exact(&mut status).is_err() || status[0] != 2 {
-            eprintln!("[Viewer] Connection rejected or host offline (status: {:?})", status);
+        if stream.read_exact(&mut status).is_err() {
+            eprintln!("[Viewer] AUTH_RELAY_DISCONNECTED while waiting for auth response");
+            return;
+        }
+        if status[0] == 3 || status[0] == 0 {
+            eprintln!("[Viewer] AUTH_SESSION_REJECTED (status={})", status[0]);
+            return;
+        }
+        if status[0] != 2 {
+            eprintln!("[Viewer] AUTH_PROTOCOL_MISMATCH unexpected status={}", status[0]);
             return;
         }
 

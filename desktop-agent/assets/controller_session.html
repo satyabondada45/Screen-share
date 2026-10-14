@@ -4154,8 +4154,26 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
         /* ============================================================
-           INITIALIZATION PACKET
+           INITIALIZATION PACKET & HOST APPROVAL AUTHENTICATION
         ============================================================ */
+
+        let viewerAuthHash = null;
+
+        async function requestViewerAuthHash() {
+            const token = SESSION_PARAMS.get('token') || SESSION_PARAMS.get('request_token') || SESSION_PARAMS.get('session_token');
+            if (!token || !token.trim()) {
+                throw new Error("APPROVAL_TOKEN_REQUIRED");
+            }
+            if (!window.crypto || !window.crypto.subtle) {
+                throw new Error("CRYPTO_UNAVAILABLE");
+            }
+
+            const digest = await window.crypto.subtle.digest(
+                "SHA-256",
+                new TextEncoder().encode(token.trim())
+            );
+            return new Uint8Array(digest);
+        }
 
         function sendInitializationPacket() {
             if (!isSocketOpen()) {
@@ -4165,21 +4183,28 @@ window.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            const cleanId = String(DEVICE_ID).replace(/[^0-9a-zA-Z_\-]/g, '');
-            if (!DEVICE_ID || !cleanId) {
+            const cleanId = String(DEVICE_ID).replace(/[^0-9]/g, '');
+            if (!DEVICE_ID || !cleanId || cleanId.length !== 9) {
                 authTrace('A_AUTH_FAILURE', {
                     reason: "missing_or_invalid_target_id"
+                });
+                setHud("INVALID TARGET ID");
+                return;
+            }
+            if (!(viewerAuthHash instanceof Uint8Array) || viewerAuthHash.length !== 32) {
+                authTrace('A_AUTH_FAILURE', {
+                    reason: "invalid_hash_format"
                 });
                 setHud("AUTHENTICATION FAILED");
                 return;
             }
             const idBytes = new TextEncoder().encode(cleanId);
 
-            // Protocol: [1 byte Type = 2] + [N bytes System ID] + [32 bytes Auth Hash]
+            // Protocol: [1 byte Type = 2] + [9 bytes System ID] + [32 bytes Auth Hash]
             const pkt = new Uint8Array(1 + idBytes.length + 32);
             pkt[0] = 2;
             pkt.set(idBytes, 1);
-            // [1 + idBytes.length .. end] is 32 bytes of zeros for default pin/auth
+            pkt.set(viewerAuthHash, 1 + idBytes.length);
 
             authTrace('A_AUTH_PACKET_SEND_START', {
                 packet_type: "2",
@@ -4416,7 +4441,17 @@ window.addEventListener('DOMContentLoaded', () => {
                 // this prevents the DISCONNECTED state from showing immediately on startup.
                 if (!sessionWasEstablished && !websocketAuthenticated) {
                     console.warn('[SESSION DEBUG] ws.onclose: session never established — skipping stopWebStream to avoid false disconnect UI');
-                    setHud("AUTHENTICATION FAILED");
+                    let failHud = "AUTHENTICATION FAILED";
+                    if (event.reason === "Agent not found") {
+                        failHud = "TARGET HOST UNAVAILABLE";
+                    } else if (event.reason === "Rejected") {
+                        failHud = "REQUEST REJECTED BY HOST";
+                    } else if (event.reason === "Agent dropped") {
+                        failHud = "HOST DISCONNECTED";
+                    } else if (event.code === 1008) {
+                        failHud = "SESSION AUTHORIZATION INVALID";
+                    }
+                    setHud(failHud);
                     return;
                 }
                 stopWebStream();
@@ -4485,6 +4520,22 @@ window.addEventListener('DOMContentLoaded', () => {
 
                 return;
 
+            }
+
+            try {
+                viewerAuthHash = await requestViewerAuthHash();
+            } catch (error) {
+                viewerAuthHash = null;
+                const reason = error && error.message === "APPROVAL_TOKEN_REQUIRED"
+                    ? "token_required"
+                    : "hash_generation_failed";
+                console.error(`[AUTH] result=failed reason=${reason}`);
+                setHud(reason === "token_required" ? "HOST APPROVAL REQUIRED" : "AUTHENTICATION UNAVAILABLE");
+                return;
+            }
+            if (!viewerAuthHash) {
+                setHud("AUTHENTICATION CANCELLED");
+                return;
             }
 
 

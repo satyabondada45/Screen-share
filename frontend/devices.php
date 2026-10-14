@@ -314,11 +314,12 @@ function formatDeviceId($id) {
                 alert('Please enter a valid remote device ID.');
                 return;
             }
-            window.location.href = `remote/session.php?id=${rawId}`;
+            window.location.href = `../dashboard.php?connect=${encodeURIComponent(rawId)}`;
         }
 
         function initiateConnection(uid) {
-            window.location.href = `remote/session.php?id=${uid}`;
+            const cleanId = String(uid).replace(/[^0-9]/g, '');
+            window.location.href = `../dashboard.php?connect=${encodeURIComponent(cleanId)}`;
         }
 
         async function fetchDevices() {
