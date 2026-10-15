@@ -269,7 +269,7 @@
                         <polyline points="13 2 13 9 20 9"></polyline>
                     </svg> File Transfer
                 </button>
-                <button class="floating-btn" id="bMicBtn" type="button" title="Microphone" onclick="if(window.ipc){window.ipc.postMessage('toggle_b_mic');} toggleBOptions(event);">
+                <button class="floating-btn" id="bMicBtn" type="button" title="Microphone" onclick="if(typeof toggleBSessionMic === 'function'){toggleBSessionMic();} else if(window.ipc){window.ipc.postMessage('toggle_b_mic');} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                         <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
                         <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
@@ -281,7 +281,7 @@
                         <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
                     </svg> Screen Fit
                 </button>
-                <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(window.ipc){window.ipc.postMessage('request_b_reverse');} toggleBOptions(event);">
+                <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(typeof requestBSessionReverse === 'function'){requestBSessionReverse();} else if(window.ipc){window.ipc.postMessage('request_b_reverse');} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                         <path d="M5 12h14M12 5l7 7-7 7"></path>
                     </svg> Reverse
@@ -528,9 +528,6 @@
                 if (event) event.stopPropagation();
                 const menu = document.getElementById('optionsMenu');
                 if (menu) menu.style.display = 'none';
-                if (window.ipc) {
-                    try { window.ipc.postMessage('disconnect_b'); } catch(e) {}
-                }
                 if (typeof window.deskStreamEndAnySession === 'function') {
                     window.deskStreamEndAnySession('END_SESSION_BUTTON');
                 } else if (typeof disconnectBSession === 'function') {
@@ -575,6 +572,9 @@
         let _bSessionChatPollRunning = false;
         let _bSessionTypingPollRunning = false;
         let _bSessionEndedDialogShown = false;
+        let _bNativeOverlaySessionToken = Number(
+            new URLSearchParams(window.location.search).get('overlay_session')
+        ) || null;
         // Grace-period counter: require in_session=false for 2+ consecutive watchdog ticks
         // before dismissing the session. This prevents false-positives during the brief
         // relay TCP handshake window when in_session briefly reads false immediately after start.
@@ -595,6 +595,24 @@
         let _bReverseDecisionPollRunning = false;
         let _bReverseAnswerInFlight = false;
         let _bChatTraceSequence = 0;
+
+        function findDesktopHost() {
+            let current = window;
+            while (current) {
+                try {
+                    if (current.__deskstreamDesktop
+                        && typeof current.ipc?.postMessage === 'function') {
+                        return current;
+                    }
+                    if (current === current.parent) break;
+                    current = current.parent;
+                } catch (error) {
+                    console.warn('[SESSION UI] Could not access the desktop host frame:', error);
+                    return null;
+                }
+            }
+            return null;
+        }
 
         function isCurrentBSession(generation) {
             return _bSessionActive && generation === _bSessionGeneration;
@@ -667,13 +685,26 @@
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.add('b-session-active');
-            const isNativeHostApp = Boolean(window.ipc && !window.location.search.includes('overlay=1'));
+            const desktopHost = findDesktopHost();
+            const pageParams = new URLSearchParams(window.location.search);
+            const isNativeOverlay = pageParams.get('overlay') === '1';
+            const isNativeHostApp = Boolean(desktopHost && !isNativeOverlay);
             if (isNativeHostApp) {
                 // In native desktop agent, the separate transparent overlay window is the sole floating control.
                 // Keep the in-DOM clone inside the main dashboard hidden to prevent duplicate floating controls.
                 const overlay = document.getElementById('bSessionOverlay');
                 if (overlay) overlay.style.display = 'none';
-                try { window.ipc.postMessage('open_overlay'); } catch(e) {}
+                const currentToken = Number(desktopHost.__deskstreamBOverlaySession);
+                if (desktopHost.__deskstreamBOverlayOpen && Number.isSafeInteger(currentToken)) {
+                    _bNativeOverlaySessionToken = currentToken;
+                } else {
+                    const nextToken = (Number(desktopHost.__deskstreamBOverlayGeneration) || 0) + 1;
+                    desktopHost.__deskstreamBOverlayGeneration = nextToken;
+                    desktopHost.__deskstreamBOverlaySession = nextToken;
+                    desktopHost.__deskstreamBOverlayOpen = true;
+                    _bNativeOverlaySessionToken = nextToken;
+                    desktopHost.ipc.postMessage(`open_overlay:${nextToken}`);
+                }
             } else {
                 // Standalone overlay window or browser fallback mode: show the in-DOM floating control.
                 const overlay = document.getElementById('bSessionOverlay');
@@ -734,9 +765,20 @@
         }
 
         function _dismissBSessionOverlay() {
-            if (window.ipc) {
-                try { window.ipc.postMessage('close_overlay'); } catch(e) {}
+            const desktopHost = findDesktopHost();
+            const pageParams = new URLSearchParams(window.location.search);
+            const isNativeOverlay = pageParams.get('overlay') === '1';
+            const sessionToken = _bNativeOverlaySessionToken
+                || Number(pageParams.get('overlay_session'))
+                || null;
+            if (desktopHost && sessionToken
+                && (desktopHost.__deskstreamBOverlaySession === sessionToken || isNativeOverlay)) {
+                if (desktopHost.__deskstreamBOverlaySession === sessionToken) {
+                    desktopHost.__deskstreamBOverlayOpen = false;
+                }
+                desktopHost.ipc.postMessage(`close_overlay:${sessionToken}`);
             }
+            _bNativeOverlaySessionToken = null;
             if (!_bSessionActive) return;
             _bSessionActive = false;
             _bSessionGeneration++;

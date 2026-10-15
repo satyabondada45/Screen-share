@@ -18,6 +18,30 @@ use wry::WebViewBuilder;
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
 
+const IPC_INITIALIZATION_SCRIPT: &str = r#"
+    window.__deskstreamDesktop = true;
+    window.ipc = {
+        postMessage: function (message) {
+            try {
+                if (window.chrome && window.chrome.webview) {
+                    window.chrome.webview.postMessage(String(message));
+                    return;
+                }
+            } catch (error) {
+                console.error('[DeskStream IPC]', error);
+            }
+        }
+    };
+"#;
+
+fn destroy_overlay(window: &mut Option<Window>, webview: &mut Option<wry::WebView>) {
+    drop(webview.take());
+    if let Some(window) = window.take() {
+        let _ = window.set_visible(false);
+        drop(window);
+    }
+}
+
 #[allow(dead_code)]
 fn center_window_on_primary_monitor(window: &Window) {
     let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) else {
@@ -85,13 +109,13 @@ fn url_with_overlay_parameter(url: &str) -> String {
     overlay_url
 }
 
-fn controller_overlay_url(controller_url: &str) -> String {
+fn controller_overlay_url(controller_url: &str, session_token: u64) -> String {
     let base = if let Some(idx) = controller_url.rfind('/') {
         &controller_url[..=idx]
     } else {
         controller_url
     };
-    format!("{base}remote_session.html?overlay=1")
+    format!("{base}remote_session.html?overlay=1&overlay_session={session_token}")
 }
 
 /// Runs the WebView application on the main thread.
@@ -133,32 +157,18 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let webview = builder
         .with_devtools(false)
         .with_ipc_handler(move |message| {
-            if let Err(error) = proxy_main.send_event(message.into_body()) {
+            if let Err(error) = proxy_main.send_event(format!("main:{}", message.into_body())) {
                 eprintln!("[WEBVIEW IPC] Failed to forward message to the main thread: {error}");
             }
         })
-        .with_initialization_script(
-            r#"
-                window.__deskstreamDesktop = true;
-                window.ipc = {
-                    postMessage: function (message) {
-                        try {
-                            if (window.chrome && window.chrome.webview) {
-                                window.chrome.webview.postMessage(String(message));
-                                return;
-                            }
-                        } catch (error) {
-                            console.error('[DeskStream IPC]', error);
-                        }
-                    }
-                };
-            "#,
-        )
+        .with_initialization_script(IPC_INITIALIZATION_SCRIPT)
         .build(&window)
         .expect("Failed to create WebView2 — is Microsoft Edge WebView2 Runtime installed?");
 
     let mut overlay_window: Option<Window> = None;
     let mut overlay_webview: Option<wry::WebView> = None;
+    let mut active_overlay_token: Option<u64> = None;
+    let mut last_overlay_token = 0_u64;
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -169,7 +179,13 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
         }
 
         match event {
-            Event::UserEvent(request) => match request.trim_matches('"') {
+            Event::UserEvent(request) => {
+                let request = request.trim_matches('"');
+                let (source, request_body) =
+                    request.split_once(':').unwrap_or(("main", request));
+                let (command, argument) = request_body.split_once(':').unwrap_or((request_body, ""));
+                let requested_overlay_token = argument.parse::<u64>().ok();
+                match command {
                 "minimize" => window.set_minimized(true),
                 "maximize" => {
                     if !window.is_maximized() {
@@ -180,7 +196,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                     window.set_maximized(!window.is_maximized());
                 }
                 "send_file" | "send_folder" => {
-                    let selection = if request.trim_matches('"') == "send_folder" {
+                    let selection = if command == "send_folder" {
                         rfd::FileDialog::new().pick_folder().map(|path| vec![path])
                     } else {
                         rfd::FileDialog::new().pick_files()
@@ -229,8 +245,33 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                     }
                 }
                 "open_overlay" => {
-                    if overlay_webview.is_none() {
-                        let url = controller_overlay_url(&controller_url);
+                    if source != "main" {
+                        eprintln!("[SESSION UI] Ignoring overlay creation request from {source}");
+                    } else if requested_overlay_token
+                        .is_some_and(|token| token == active_overlay_token.unwrap_or_default())
+                        && overlay_webview.is_some()
+                        && overlay_window.is_some()
+                    {
+                        if let Some(overlay_window) = &overlay_window {
+                            overlay_window.set_visible(true);
+                        }
+                    } else if requested_overlay_token
+                        .is_some_and(|token| token <= last_overlay_token)
+                    {
+                        eprintln!("[SESSION UI] Ignoring stale overlay session request");
+                    } else if requested_overlay_token.is_none()
+                        && overlay_webview.is_some()
+                        && overlay_window.is_some()
+                    {
+                        if let Some(overlay_window) = &overlay_window {
+                            overlay_window.set_visible(true);
+                        }
+                    } else {
+                        destroy_overlay(&mut overlay_window, &mut overlay_webview);
+                        let token = requested_overlay_token.unwrap_or_else(|| {
+                            last_overlay_token.saturating_add(1)
+                        });
+                        let url = controller_overlay_url(&controller_url, token);
                         let overlay_win = match WindowBuilder::new()
                             .with_title("DeskStream Overlay")
                             .with_inner_size(LogicalSize::new(360_u32, 320_u32))
@@ -273,13 +314,14 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             .with_devtools(false)
                             .with_ipc_handler(move |message| {
                                 if let Err(error) =
-                                    proxy_overlay.send_event(message.into_body())
+                                    proxy_overlay.send_event(format!("overlay:{}", message.into_body()))
                                 {
                                     eprintln!(
                                         "[WEBVIEW IPC] Failed to forward overlay message: {error}"
                                     );
                                 }
                             })
+                            .with_initialization_script(IPC_INITIALIZATION_SCRIPT)
                             .build(&overlay_win)
                         {
                             Ok(overlay) => overlay,
@@ -291,58 +333,87 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
 
                         overlay_window = Some(overlay_win);
                         overlay_webview = Some(overlay);
+                        active_overlay_token = Some(token);
+                        last_overlay_token = last_overlay_token.max(token);
                     }
                 }
                 "close_overlay" => {
-                    if let Some(win) = overlay_window.take() {
-                        win.set_visible(false);
+                    if let Some(token) = requested_overlay_token {
+                        if active_overlay_token == Some(token) {
+                            destroy_overlay(&mut overlay_window, &mut overlay_webview);
+                            active_overlay_token = None;
+                        } else {
+                            eprintln!("[SESSION UI] Ignoring stale overlay close request");
+                        }
+                    } else {
+                        destroy_overlay(&mut overlay_window, &mut overlay_webview);
+                        active_overlay_token = None;
                     }
-                    overlay_webview = None;
                 }
                 "drag_overlay" => {
-                    if let Some(overlay) = &overlay_window {
-                        if let Err(error) = overlay.drag_window() {
-                            eprintln!("[SESSION UI] Failed to drag overlay: {error}");
+                    if source == "overlay" {
+                        if let Some(overlay) = &overlay_window {
+                            if let Err(error) = overlay.drag_window() {
+                                eprintln!("[SESSION UI] Failed to drag overlay: {error}");
+                            }
                         }
                     }
                 }
-                "toggle_b_chat" => {
-                    let _ = webview.evaluate_script(
-                        "if(typeof toggleBSessionChat === 'function') toggleBSessionChat();",
-                    );
-                }
-                "toggle_b_mic" => {
-                    let target_webview = overlay_webview.as_ref().unwrap_or(&webview);
-                    if let Err(error) = target_webview.evaluate_script(
-                        "if(typeof toggleBSessionMic === 'function') toggleBSessionMic();",
-                    ) {
-                        eprintln!("[SESSION UI] Failed to toggle microphone: {error}");
+                "toggle_b_chat" | "toggle_b_mic" | "request_b_reverse" => {
+                    let target_webview = if source == "overlay" {
+                        overlay_webview.as_ref()
+                    } else {
+                        Some(&webview)
+                    };
+                    let script = match command {
+                        "toggle_b_chat" => "if(typeof toggleBSessionChat === 'function') toggleBSessionChat();",
+                        "toggle_b_mic" => "if(typeof toggleBSessionMic === 'function') toggleBSessionMic();",
+                        "request_b_reverse" => "if(typeof requestBSessionReverse === 'function') requestBSessionReverse();",
+                        _ => unreachable!(),
+                    };
+                    if let Some(target_webview) = target_webview {
+                        if let Err(error) = target_webview.evaluate_script(script) {
+                            eprintln!("[SESSION UI] Failed to dispatch {command} to {source} WebView: {error}");
+                        }
+                    } else {
+                        eprintln!("[SESSION UI] Cannot dispatch {command}: {source} WebView is unavailable");
                     }
-                }
-                "request_b_reverse" => {
-                    let _ = webview.evaluate_script(
-                        "if(typeof requestBSessionReverse === 'function') requestBSessionReverse();",
-                    );
                 }
                 "disconnect_b" => {
-                    if let Some(win) = overlay_window.take() {
-                        win.set_visible(false);
+                    let target_webview = if source == "overlay" {
+                        overlay_webview.as_ref()
+                    } else {
+                        Some(&webview)
+                    };
+                    if let Some(target_webview) = target_webview {
+                        if let Err(error) = target_webview.evaluate_script(
+                            "if(typeof handleBSessionDisconnectClick === 'function') handleBSessionDisconnectClick(); else if(typeof window.deskStreamEndAnySession === 'function') window.deskStreamEndAnySession('END_SESSION_BUTTON'); else if(typeof disconnectBSession === 'function') disconnectBSession(null, 'END_SESSION_BUTTON');",
+                        ) {
+                            eprintln!("[SESSION UI] Failed to dispatch disconnect to {source} WebView: {error}");
+                        }
+                    } else {
+                        eprintln!("[SESSION UI] Cannot disconnect: {source} WebView is unavailable");
                     }
-                    overlay_webview = None;
-                    let _ = webview.evaluate_script(
-                        "console.info('[DISCONNECT CALLER TRACE] source=END_SESSION_BUTTON timestamp=' + new Date().toISOString() + ' mode=B'); if(typeof window.deskStreamEndAnySession === 'function') { window.deskStreamEndAnySession('END_SESSION_BUTTON'); } else if(typeof disconnectBSession === 'function') { disconnectBSession(null, 'END_SESSION_BUTTON'); }",
-                    );
                 }
                 _ => {}
-            },
+                }
+            }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                if window_id == window.id() {
-                    overlay_webview = None;
-                    overlay_window = None;
+                if overlay_window.as_ref().is_some_and(|overlay| overlay.id() == window_id) {
+                    if let Some(overlay) = &overlay_webview {
+                        if let Err(error) = overlay.evaluate_script(
+                            "if(typeof handleBSessionDisconnectClick === 'function') handleBSessionDisconnectClick(); else if(typeof disconnectBSession === 'function') disconnectBSession(null, 'OVERLAY_WINDOW_CLOSED');",
+                        ) {
+                            eprintln!("[SESSION UI] Failed to end session after overlay close: {error}");
+                        }
+                    }
+                } else if window_id == window.id() {
+                    destroy_overlay(&mut overlay_window, &mut overlay_webview);
+                    active_overlay_token = None;
                     quit.store(true, Ordering::Relaxed);
                     *control_flow = ControlFlow::Exit;
                 }
