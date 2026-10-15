@@ -77,7 +77,7 @@ const OVERLAY_INITIALIZATION_SCRIPT: &str = r#"
 
 fn resize_overlay(window: &Window, layout: &str) {
     let (width, height) = match layout {
-        "menu" => (220_u32, 280_u32),
+        "menu" => (220_u32, 220_u32),
         "chat" => (360_u32, 460_u32),
         "panel" => (380_u32, 460_u32),
         _ => (48_u32, 40_u32),
@@ -89,11 +89,88 @@ fn resize_overlay(window: &Window, layout: &str) {
 
     if let Some(position) = previous_position {
         let right = position.x.saturating_add(previous_size.width as i32);
-        window.set_outer_position(PhysicalPosition::new(
+        let requested = PhysicalPosition::new(
             right.saturating_sub(target_size.width as i32),
             position.y,
-        ));
+        );
+        #[cfg(target_os = "windows")]
+        set_overlay_position_clamped(window, requested);
+        #[cfg(not(target_os = "windows"))]
+        window.set_outer_position(requested);
     }
+}
+
+fn clamp_overlay_position(
+    requested: (i32, i32),
+    size: (u32, u32),
+    work_area: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let max_x = work_area.2.saturating_sub(size.0.min(i32::MAX as u32) as i32);
+    let max_y = work_area.3.saturating_sub(size.1.min(i32::MAX as u32) as i32);
+    (
+        requested.0.clamp(work_area.0, max_x.max(work_area.0)),
+        requested.1.clamp(work_area.1, max_y.max(work_area.1)),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn set_overlay_position_clamped(window: &Window, requested: PhysicalPosition<i32>) -> bool {
+    use windows_sys::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        },
+    };
+
+    let size = window.outer_size();
+    let monitor_point = POINT {
+        x: requested.x.saturating_add((size.width / 2).min(i32::MAX as u32) as i32),
+        y: requested.y.saturating_add((size.height / 2).min(i32::MAX as u32) as i32),
+    };
+    let monitor = unsafe { MonitorFromPoint(monitor_point, MONITOR_DEFAULTTONEAREST) };
+    if monitor == 0 {
+        eprintln!("[SESSION UI] Could not find a monitor for overlay positioning");
+        return false;
+    }
+
+    let mut monitor_info: MONITORINFO = unsafe { std::mem::zeroed() };
+    monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+        eprintln!("[SESSION UI] Could not read monitor work area for overlay positioning");
+        return false;
+    }
+
+    let work = monitor_info.rcWork;
+    let (x, y) = clamp_overlay_position(
+        (requested.x, requested.y),
+        (size.width, size.height),
+        (work.left, work.top, work.right, work.bottom),
+    );
+    window.set_outer_position(PhysicalPosition::new(x, y));
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn move_overlay_by_drag_delta(
+    window: &Window,
+    origin: PhysicalPosition<i32>,
+    dx: f64,
+    dy: f64,
+) -> bool {
+    if !dx.is_finite() || !dy.is_finite() {
+        eprintln!("[SESSION UI] Ignoring invalid overlay drag delta");
+        return false;
+    }
+    let scale = window.scale_factor();
+    let physical_dx = (dx * scale).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    let physical_dy = (dy * scale).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    set_overlay_position_clamped(
+        window,
+        PhysicalPosition::new(
+            origin.x.saturating_add(physical_dx),
+            origin.y.saturating_add(physical_dy),
+        ),
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -294,6 +371,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let mut active_overlay_token: Option<u64> = None;
     let mut last_overlay_token = 0_u64;
     let mut active_overlay_layout = "idle";
+    let mut overlay_drag_origin: Option<PhysicalPosition<i32>> = None;
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -420,6 +498,12 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             let window_size = overlay_win.outer_size();
                             let x = origin.x + (monitor_size.width as i32 - window_size.width as i32 - 24).max(0);
                             let y = origin.y + 24;
+                            #[cfg(target_os = "windows")]
+                            set_overlay_position_clamped(
+                                &overlay_win,
+                                PhysicalPosition::new(x, y),
+                            );
+                            #[cfg(not(target_os = "windows"))]
                             overlay_win.set_outer_position(PhysicalPosition::new(x, y));
                         }
 
@@ -471,6 +555,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             destroy_overlay(&mut overlay_window, &mut overlay_webview);
                             active_overlay_token = None;
                             active_overlay_layout = "idle";
+                            overlay_drag_origin = None;
                         } else {
                             eprintln!("[SESSION UI] Ignoring stale overlay close request");
                         }
@@ -478,6 +563,43 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         destroy_overlay(&mut overlay_window, &mut overlay_webview);
                         active_overlay_token = None;
                         active_overlay_layout = "idle";
+                        overlay_drag_origin = None;
+                    }
+                }
+                "overlay_drag_start" => {
+                    if source == "overlay" {
+                        overlay_drag_origin = overlay_window
+                            .as_ref()
+                            .and_then(|overlay| overlay.outer_position().ok());
+                        #[cfg(not(target_os = "windows"))]
+                        if let Some(overlay) = &overlay_window {
+                            if let Err(error) = overlay.drag_window() {
+                                eprintln!("[SESSION UI] Failed to drag overlay: {error}");
+                            }
+                        }
+                    }
+                }
+                "overlay_drag_move" => {
+                    if source == "overlay" {
+                        let parsed_delta = argument.split_once(',').and_then(|(dx, dy)| {
+                            Some((dx.parse::<f64>().ok()?, dy.parse::<f64>().ok()?))
+                        });
+                        match (overlay_drag_origin, parsed_delta, overlay_window.as_ref()) {
+                            (Some(origin), Some((dx, dy)), Some(overlay)) => {
+                                #[cfg(target_os = "windows")]
+                                if !move_overlay_by_drag_delta(overlay, origin, dx, dy) {
+                                    eprintln!("[SESSION UI] Overlay could not be moved within the monitor work area");
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                let _ = (overlay, origin, dx, dy);
+                            }
+                            _ => eprintln!("[SESSION UI] Ignoring invalid or stale overlay drag update"),
+                        }
+                    }
+                }
+                "overlay_drag_end" => {
+                    if source == "overlay" {
+                        overlay_drag_origin = None;
                     }
                 }
                 "drag_overlay" => {
@@ -528,6 +650,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         destroy_overlay(&mut overlay_window, &mut overlay_webview);
                         active_overlay_token = None;
                         active_overlay_layout = "idle";
+                        overlay_drag_origin = None;
                         window.set_minimized(false);
                         window.set_visible(true);
                         let script = format!(
@@ -833,7 +956,19 @@ mod icon_tests {
 
 #[cfg(test)]
 mod controller_url_tests {
-    use super::{controller_dashboard_url, url_with_overlay_parameter};
+    use super::{clamp_overlay_position, controller_dashboard_url, url_with_overlay_parameter};
+
+    #[test]
+    fn overlay_position_is_clamped_to_the_monitor_work_area() {
+        assert_eq!(
+            clamp_overlay_position((900, 700), (220, 220), (0, 0, 1000, 800)),
+            (780, 580)
+        );
+        assert_eq!(
+            clamp_overlay_position((-1600, -900), (48, 40), (-1600, -900, 0, 0)),
+            (-1600, -900)
+        );
+    }
 
     #[test]
     fn direct_session_urls_are_routed_to_the_controller_dashboard() {

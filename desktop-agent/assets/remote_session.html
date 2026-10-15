@@ -95,6 +95,11 @@
             border-color: #fca5a5;
         }
 
+        .floating-btn.mic-enabled {
+            color: #15803d;
+            border-color: #86efac;
+        }
+
         #bSessionOverlay {
             display: none;
         }
@@ -283,12 +288,15 @@
                         <polyline points="13 2 13 9 20 9"></polyline>
                     </svg> File Transfer
                 </button>
-                <button class="floating-btn" id="bMicBtn" type="button" title="Microphone" onclick="if(typeof toggleBSessionMic === 'function'){toggleBSessionMic();} else if(window.ipc){window.ipc.postMessage('toggle_b_mic');} toggleBOptions(event);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                <button class="floating-btn mic-muted" id="bMicBtn" type="button"
+                    title="Enable microphone" aria-label="Enable microphone" aria-pressed="false"
+                    onclick="if(typeof toggleBSessionMic === 'function'){toggleBSessionMic();} else if(window.ipc){window.ipc.postMessage('toggle_b_mic');} toggleBOptions(event);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
                         <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
                         <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
                         <line x1="12" y1="19" x2="12" y2="22"></line>
-                    </svg> Mic
+                        <path id="bMicMutedSlash" d="m4 4 16 16" style="display:inline;"></path>
+                    </svg>
                 </button>
                 <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(typeof requestBSessionReverse === 'function'){requestBSessionReverse();} else if(window.ipc){window.ipc.postMessage('request_b_reverse');} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -315,10 +323,14 @@
             let dragState = null;
             let dragController = null;
             let overlayDragController = null;
+            let suppressNextOverlayClick = false;
             const handle = document.getElementById('optionsToggleBtn');
 
             const stopDrag = () => {
                 const pointerId = dragState?.pointerId;
+                if (dragState?.native && window.ipc?.postMessage) {
+                    window.ipc.postMessage('overlay_drag_end');
+                }
                 dragState = null;
                 if (dragController) {
                     dragController.abort();
@@ -335,15 +347,12 @@
                 if (!handle || overlayDragController) return;
                 overlayDragController = new AbortController();
 
-                const healthEl = document.getElementById('bSessionHealth');
-                if (healthEl) {
-                    healthEl.style.cursor = 'move';
-                    healthEl.addEventListener('pointerdown', event => {
-                        if (window.location.search.includes('overlay=1') && window.ipc) {
-                            window.ipc.postMessage('drag_overlay');
-                        }
-                    }, { signal: overlayDragController.signal });
-                }
+                overlay.addEventListener('click', event => {
+                    if (!suppressNextOverlayClick) return;
+                    suppressNextOverlayClick = false;
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                }, { capture: true, signal: overlayDragController.signal });
 
                 handle.addEventListener('pointerdown', event => {
                     if (event.target.closest('#optionsMenu')) return;
@@ -368,12 +377,17 @@
                         if (!dragState.isDragging && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
                             dragState.isDragging = true;
                             if (window.location.search.includes('overlay=1') && window.ipc) {
-                                window.ipc.postMessage('drag_overlay');
-                                stopDrag();
-                                return;
+                                dragState.native = true;
+                                suppressNextOverlayClick = true;
+                                window.ipc.postMessage('overlay_drag_start');
                             }
                         }
                         if (dragState.isDragging) {
+                            if (dragState.native) {
+                                window.ipc.postMessage(`overlay_drag_move:${dx},${dy}`);
+                                moveEvent.preventDefault();
+                                return;
+                            }
                             const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth);
                             const maxTop = Math.max(0, window.innerHeight - overlay.offsetHeight);
                             const left = Math.min(Math.max(0, dragState.originLeft + dx), maxLeft);
@@ -386,14 +400,21 @@
                     }, { signal });
                     const finishPointer = pointerEvent => {
                         if (pointerEvent.pointerId !== dragState?.pointerId) return;
+                        if (pointerEvent.type === 'pointercancel') suppressNextOverlayClick = false;
                         stopDrag();
                     };
                     window.addEventListener('pointerup', finishPointer, { signal });
                     window.addEventListener('pointercancel', finishPointer, { signal });
-                    window.addEventListener('blur', stopDrag, { signal, once: true });
+                    window.addEventListener('blur', () => {
+                        suppressNextOverlayClick = false;
+                        stopDrag();
+                    }, { signal, once: true });
                     handle.addEventListener('lostpointercapture', stopDrag, { signal, once: true });
                 }, { signal: overlayDragController.signal });
-                window.addEventListener('blur', stopDrag, { signal: overlayDragController.signal });
+                window.addEventListener('blur', () => {
+                    suppressNextOverlayClick = false;
+                    stopDrag();
+                }, { signal: overlayDragController.signal });
             };
 
             const cancelOverlayDrag = () => {
@@ -731,7 +752,7 @@
             _bLocalChatTyping = false;
             _bRemoteChatTyping = false;
             _bSessionMicEnabled = false;
-            document.getElementById('bMicBtn').textContent = 'Mic Off';
+            renderBSessionMicState(false);
             _bReverseRequestOutstanding = false;
             const disconnectButton = document.getElementById('bDisconnectBtn');
             if (disconnectButton) {
@@ -868,7 +889,7 @@
                 }).catch(error => console.error('[MIC] Failed to stop microphone:', error));
             }
             _bSessionMicEnabled = false;
-            document.getElementById('bMicBtn').textContent = 'Mic Off';
+            renderBSessionMicState(false);
             _bReverseRequestOutstanding = false;
             document.getElementById('bReversePermissionDialog').style.display = 'none';
             const disconnectButton = document.getElementById('bDisconnectBtn');
@@ -1372,6 +1393,18 @@
         let _bSessionMicEnabled = false;
         let _bReverseRequestOutstanding = false;
 
+        function renderBSessionMicState(enabled) {
+            const button = document.getElementById('bMicBtn');
+            if (!button) return;
+            button.classList.toggle('mic-enabled', enabled);
+            button.classList.toggle('mic-muted', !enabled);
+            button.setAttribute('aria-pressed', String(enabled));
+            button.setAttribute('aria-label', enabled ? 'Mute microphone' : 'Enable microphone');
+            button.title = enabled ? 'Mute microphone' : 'Enable microphone';
+            const slash = document.getElementById('bMicMutedSlash');
+            if (slash) slash.style.display = enabled ? 'none' : 'inline';
+        }
+
         async function toggleBSessionMic() {
             if (!_bSessionActive || _bSessionDisconnecting) return;
             const nextEnabled = !_bSessionMicEnabled;
@@ -1387,7 +1420,7 @@
                     throw new Error(await response.text() || `HTTP ${response.status}`);
                 }
                 _bSessionMicEnabled = nextEnabled;
-                if (button) button.textContent = nextEnabled ? 'Mic On' : 'Mic Off';
+                renderBSessionMicState(nextEnabled);
             } catch (error) {
                 console.error('[MIC] Failed to update microphone capture:', error);
                 showToast(`Microphone update failed: ${error.message || 'check audio device permissions'}`);

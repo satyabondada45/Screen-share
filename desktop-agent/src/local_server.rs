@@ -281,9 +281,19 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         continue;
                     }
                 };
-                let view_screen = payload.get("view_screen").and_then(|v| v.as_bool()).unwrap_or(true);
-                let control_input = payload.get("control_input").and_then(|v| v.as_bool()).unwrap_or(true);
-                let file_transfer = payload.get("file_transfer").and_then(|v| v.as_bool()).unwrap_or(true);
+                let (Some(view_screen), Some(control_input), Some(file_transfer)) = (
+                    payload.get("view_screen").and_then(serde_json::Value::as_bool),
+                    payload.get("control_input").and_then(serde_json::Value::as_bool),
+                    payload.get("file_transfer").and_then(serde_json::Value::as_bool),
+                ) else {
+                    let _ = request.respond(
+                        Response::from_string(
+                            "view_screen, control_input, and file_transfer must be booleans",
+                        )
+                        .with_status_code(400),
+                    );
+                    continue;
+                };
 
                 crate::status::set_session_perm_view_screen(view_screen);
                 crate::status::set_session_perm_control_input(control_input);
@@ -311,13 +321,62 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 let token = payload.get("request_token").and_then(|v| v.as_str()).unwrap_or("");
                 let requester_id = payload.get("requester_system_id").and_then(|v| v.as_str()).unwrap_or("");
 
-                if !token.is_empty() {
-                    crate::status::record_approved_session(token, requester_id);
+                if token.trim().is_empty()
+                    || requester_id.len() != 9
+                    || !requester_id.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    let _ = request.respond(
+                        Response::from_string("request_token and a valid requester_system_id are required")
+                            .with_status_code(400),
+                    );
+                    continue;
                 }
+                match crate::status::record_approved_session(token, requester_id) {
+                    Ok(()) => {
+                        let response = Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                    }
+                }
+                continue;
+            }
 
-                let response = Response::from_string("{\"success\":true}")
-                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
-                let _ = request.respond(response);
+            if path == "/desktop-api/session/revoke_request" && request.method() == &tiny_http::Method::Post {
+                let mut body = Vec::new();
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                    continue;
+                }
+                let payload: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error.to_string()).with_status_code(400));
+                        continue;
+                    }
+                };
+                let token = payload
+                    .get("request_token")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if token.trim().is_empty() {
+                    let _ = request.respond(
+                        Response::from_string("request_token is required").with_status_code(400),
+                    );
+                    continue;
+                }
+                match crate::status::revoke_approved_session(token) {
+                    Ok(_) => {
+                        let response = Response::from_string("{\"success\":true}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                    }
+                }
                 continue;
             }
 

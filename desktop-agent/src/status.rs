@@ -412,9 +412,6 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
     SESSION_REMOTE_TYPING.store(false, Ordering::Release);
     SESSION_AUDIO_ENABLED.store(false, Ordering::Release);
     SESSION_AUDIO_CAPTURE_AVAILABLE.store(false, Ordering::Release);
-    SESSION_PERM_VIEW_SCREEN.store(true, Ordering::Release);
-    SESSION_PERM_CONTROL_INPUT.store(true, Ordering::Release);
-    SESSION_PERM_FILE_TRANSFER.store(true, Ordering::Release);
     SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
     SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
     SESSION_REVERSE_DECISION.store(0, Ordering::Release);
@@ -433,12 +430,10 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
             .lock()
             .map_err(|_| "accepted file lock poisoned".to_string())?
             .clear();
-        SESSION_FILE_PROGRESS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .map_err(|_| "file progress lock poisoned".to_string())?
-            .clear();
     } else {
+        SESSION_PERM_VIEW_SCREEN.store(true, Ordering::Release);
+        SESSION_PERM_CONTROL_INPUT.store(true, Ordering::Release);
+        SESSION_PERM_FILE_TRANSFER.store(true, Ordering::Release);
         let pending_responses = SESSION_FILE_RESPONSES
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
@@ -775,26 +770,47 @@ fn get_approved_sessions() -> &'static Mutex<Vec<ApprovedSession>> {
     APPROVED_SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-pub fn record_approved_session(token: &str, requester_id: &str) {
+pub fn record_approved_session(token: &str, requester_id: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     let token = token.trim();
     if token.is_empty() {
-        return;
+        return Err("approval token is empty".to_string());
     }
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let now = Instant::now();
     let expires_at = now + Duration::from_secs(60);
 
-    if let Ok(mut list) = get_approved_sessions().lock() {
-        list.retain(|s| s.expires_at > now && !s.consumed.load(Ordering::SeqCst));
-        list.push(ApprovedSession {
-            token_hash: hash,
-            token: token.to_string(),
-            requester_id: requester_id.to_string(),
-            expires_at,
-            consumed: Arc::new(AtomicBool::new(false)),
-        });
+    let mut list = get_approved_sessions()
+        .lock()
+        .map_err(|_| "approved session lock poisoned".to_string())?;
+    list.retain(|session| {
+        session.expires_at > now
+            && !session.consumed.load(Ordering::SeqCst)
+            && session.token_hash != hash
+    });
+    list.push(ApprovedSession {
+        token_hash: hash,
+        token: token.to_string(),
+        requester_id: requester_id.to_string(),
+        expires_at,
+        consumed: Arc::new(AtomicBool::new(false)),
+    });
+    Ok(())
+}
+
+pub fn revoke_approved_session(token: &str) -> Result<bool, String> {
+    use sha2::{Digest, Sha256};
+    let token = token.trim();
+    if token.is_empty() {
+        return Ok(false);
     }
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    let mut list = get_approved_sessions()
+        .lock()
+        .map_err(|_| "approved session lock poisoned".to_string())?;
+    let previous_len = list.len();
+    list.retain(|session| session.token_hash != hash);
+    Ok(list.len() != previous_len)
 }
 
 pub fn check_and_consume_approved_session(supplied_hash: &[u8; 32]) -> bool {
@@ -867,10 +883,14 @@ pub fn set_session_active(active: bool) {
 mod tests {
     use super::{
         check_and_consume_approved_session, clear_approved_sessions, record_approved_session,
-        session_audio_enabled, set_session_audio_enabled, HeartbeatHealth, HeartbeatReceive,
-        HeartbeatTracker, SessionChatHistory, CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START,
-        CHAT_TYPING_STOP, HEARTBEAT_MISS_LIMIT,
+        revoke_approved_session,
+        session_audio_enabled, session_perm_control_input, session_perm_file_transfer,
+        session_perm_view_screen, set_session_audio_enabled, set_session_perm_control_input,
+        set_session_perm_file_transfer, set_session_perm_view_screen, set_session_writer,
+        HeartbeatHealth, HeartbeatReceive, HeartbeatTracker, SessionChatHistory,
+        CHAT_TYPING_PACKET_TYPE, CHAT_TYPING_START, CHAT_TYPING_STOP, HEARTBEAT_MISS_LIMIT,
     };
+    use std::sync::mpsc::sync_channel;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -968,11 +988,32 @@ mod tests {
     }
 
     #[test]
+    fn selected_session_permissions_survive_session_writer_initialization() {
+        set_session_perm_view_screen(false);
+        set_session_perm_control_input(false);
+        set_session_perm_file_transfer(false);
+
+        let (writer, _reader) = sync_channel(1);
+        set_session_writer(Some(writer)).expect("session writer should initialize");
+
+        assert!(!session_perm_view_screen());
+        assert!(!session_perm_control_input());
+        assert!(!session_perm_file_transfer());
+
+        set_session_writer(None).expect("session writer should clear");
+        assert!(session_perm_view_screen());
+        assert!(session_perm_control_input());
+        assert!(session_perm_file_transfer());
+    }
+
+    #[test]
     fn approved_session_workflow_accepts_and_prevents_replay() {
         use sha2::{Digest, Sha256};
         clear_approved_sessions();
         let token = "test-token-abcdef123456";
         let valid_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        assert!(!revoke_approved_session(token).unwrap());
+        assert!(!check_and_consume_approved_session(&valid_hash));
         let invalid_hash: [u8; 32] = Sha256::digest(b"wrong-token").into();
         let zero_hash = [0u8; 32];
 
@@ -980,8 +1021,14 @@ mod tests {
         assert!(!check_and_consume_approved_session(&valid_hash));
         assert!(!check_and_consume_approved_session(&zero_hash));
 
+        // Revoking a prepared approval prevents the relay handshake from consuming it.
+        record_approved_session(token, "987654321").unwrap();
+        assert!(revoke_approved_session(token).unwrap());
+        assert!(!check_and_consume_approved_session(&valid_hash));
+
         // 2. Record approval
-        record_approved_session(token, "987654321");
+        record_approved_session(token, "987654321").unwrap();
+        record_approved_session(token, "987654321").unwrap();
 
         // 3. Invalid and zero hashes still rejected
         assert!(!check_and_consume_approved_session(&invalid_hash));
@@ -992,5 +1039,6 @@ mod tests {
 
         // 5. Replay attempt rejected (single-use consumption)
         assert!(!check_and_consume_approved_session(&valid_hash));
+        assert!(revoke_approved_session(token).unwrap());
     }
 }

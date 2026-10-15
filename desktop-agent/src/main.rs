@@ -5308,7 +5308,8 @@ mod session_feature_tests {
         assert!(!check_and_consume_approved_session(&zero_hash));
 
         // 2. Host approves request
-        record_approved_session(token, "requester-device-999");
+        record_approved_session(token, "requester-device-999")
+            .expect("approved session should be recorded");
 
         // 3. Unapproved and zero hashes rejected
         assert!(!check_and_consume_approved_session(&unapproved_hash));

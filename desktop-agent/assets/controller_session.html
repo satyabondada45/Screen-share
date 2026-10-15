@@ -1842,16 +1842,10 @@ window.updateMaximizeIcon = updateMaximizeIcon;
         ============================================================ */
 
         async function toggleAudio() {
-            isAudioEnabled = !isAudioEnabled;
             const audioBtn = document.getElementById("audioBtn");
-            if (isAudioEnabled) {
-                if (audioBtn) {
-                    audioBtn.textContent = "🔊 Mute Audio";
-                    audioBtn.classList.remove("btn-secondary");
-                    audioBtn.classList.add("btn-warning");
-                }
+            if (!isAudioEnabled) {
                 try {
-                    if (!audioCtx) {
+                    if (!audioCtx || audioCtx.state === "closed") {
                         audioCtx = new (window.AudioContext || window.webkitAudioContext)({
                             latencyHint: "interactive",
                             sampleRate: 48000
@@ -1860,17 +1854,41 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                     if (audioCtx.state === "suspended") {
                         await audioCtx.resume();
                     }
+                    if (audioCtx.state !== "running") {
+                        throw new Error(`Audio output context is ${audioCtx.state}`);
+                    }
+                    isAudioEnabled = true;
+                    if (audioBtn) {
+                        audioBtn.textContent = "🔊 Mute Audio";
+                        audioBtn.classList.remove("btn-secondary");
+                        audioBtn.classList.add("btn-warning");
+                    }
                 } catch (error) {
                     console.error("[AUDIO] Init error:", error);
+                    isAudioEnabled = false;
+                    if (audioBtn) {
+                        audioBtn.textContent = "🔈 Listen Audio";
+                        audioBtn.classList.remove("btn-warning");
+                        audioBtn.classList.add("btn-secondary");
+                    }
                 }
             } else {
+                isAudioEnabled = false;
+                stopScheduledAudio();
                 if (audioBtn) {
                     audioBtn.textContent = "🔈 Listen Audio";
                     audioBtn.classList.remove("btn-warning");
                     audioBtn.classList.add("btn-secondary");
                 }
-                nextAudioTime = 0;
             }
+        }
+
+        function stopScheduledAudio() {
+            for (const source of activeAudioNodes) {
+                try { source.stop(); } catch (error) { /* Already stopped. */ }
+            }
+            activeAudioNodes = [];
+            nextAudioTime = 0;
         }
 
         async function toggleMicrophone() {
@@ -3537,7 +3555,11 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             }
 
             if (audioCtx.state === "suspended") {
-                audioCtx.resume().catch(console.error);
+                audioCtx.resume().catch(error => {
+                    isAudioEnabled = false;
+                    stopScheduledAudio();
+                    console.error("[AUDIO] Could not resume session output:", error);
+                });
             }
 
             const frames = Math.floor(floatArray.length / channels);
@@ -4739,6 +4761,11 @@ window.updateMaximizeIcon = updateMaximizeIcon;
         function stopWebStream() {
             releaseAllKeys();
             isStreaming = false;
+            stopMicrophone();
+            stopScheduledAudio();
+            if (audioCtx && audioCtx.state === "running") {
+                audioCtx.suspend().catch(error => console.error("[AUDIO] Could not suspend session output:", error));
+            }
             stopLocalChatTyping();
             setRemoteChatTyping(false);
             stopRenderLoop();

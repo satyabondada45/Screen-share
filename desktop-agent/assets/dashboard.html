@@ -1919,10 +1919,10 @@
             </div>
             <div class="remember-choice-wrapper">
                 <label class="remember-checkbox-label">
-                    <input type="checkbox" id="rememberChoiceCheck">
+                    <input type="checkbox" id="rememberChoiceCheck" disabled title="Per-device permission preferences are not available">
                     Remember my choice for this device
                 </label>
-                <div class="remember-subtext">You can change this later in Settings &gt; Security</div>
+                <div class="remember-subtext">Permissions apply to this session only.</div>
             </div>
         </div>
     </div>
@@ -2460,14 +2460,17 @@
             deviceRefreshInProgress = false;
         }
 
+        let _incomingRequestPollInFlight = false;
         async function checkIncoming() {
-            if (!currentHostUid || !isAuthenticated) return;
+            if (!currentHostUid || !isAuthenticated || _incomingRequestPollInFlight) return;
+            _incomingRequestPollInFlight = true;
             try {
                 const res = await fetch(`${BACKEND}/api/connections/incoming.php?system_id=${encodeURIComponent(currentHostUid)}`, { credentials: 'include' });
+                if (!res.ok) throw new Error(`Incoming request check failed: HTTP ${res.status}`);
                 const data = await res.json();
+                const overlay = document.getElementById('incomingModalOverlay');
                 if (data.has_request && data.request) {
                     const req = data.request;
-                    const overlay = document.getElementById('incomingModalOverlay');
                     if (autoAcceptingReverseToken && req.request_token === autoAcceptingReverseToken) return;
                     if (approvedReverseRequesterId && Date.now() > approvedReverseExpiresAt) {
                         approvedReverseRequesterId = null;
@@ -2476,16 +2479,30 @@
                     if (approvedReverseRequesterId
                         && req.requester_system_id === approvedReverseRequesterId) {
                         currentRequestToken = req.request_token;
+                        currentRequesterId = req.requester_system_id || '';
                         autoAcceptingReverseToken = req.request_token;
                         currentRequesterName = req.requester_name || 'Remote User';
+                        setIncomingPermissionChoices();
                         acceptConnection();
                         return;
                     }
-                    if (!overlay.classList.contains('open')) {
-                        promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token, req);
+                    if (_connectionDecisionInFlight) return;
+                    if (overlay.classList.contains('open') && currentRequestToken === req.request_token) return;
+                    if (overlay.classList.contains('open')) {
+                        closeModal();
                     }
+                    promptIncomingModal(req.requester_name || 'Remote User', req.requester_system_id, req.requester_ip || '—', 'Just now', req.request_token, req);
+                } else if (overlay.classList.contains('open')
+                    && currentRequestToken
+                    && !_connectionDecisionInFlight) {
+                    closeModal();
+                    showToast('The incoming connection request expired.');
                 }
-            } catch (e) { }
+            } catch (error) {
+                console.warn('[SESSION] Could not refresh incoming connection request:', error);
+            } finally {
+                _incomingRequestPollInFlight = false;
+            }
         }
 
         // ── UI helpers ───────────────────────────────────────────────
@@ -2872,6 +2889,13 @@
         // ── Incoming modal ───────────────────────────────────────────
         let currentRequesterName = 'Remote User';
         let currentRequesterId = '';
+        let _connectionDecisionInFlight = false;
+        function setIncomingPermissionChoices(permissions = {}) {
+            document.getElementById('permViewScreen').checked = permissions.view_screen !== false;
+            document.getElementById('permControlInput').checked = permissions.control_input !== false;
+            document.getElementById('permFileTransfer').checked = permissions.file_transfer !== false;
+        }
+
         function promptIncomingModal(name, remoteId, ip, time, token, reqData) {
             currentRequesterName = name || 'Remote User';
             currentRequesterId = remoteId || '';
@@ -2886,6 +2910,7 @@
             const denyBtn = document.getElementById('modalDenyBtn');
             if (acceptBtn) acceptBtn.disabled = false;
             if (denyBtn) denyBtn.disabled = false;
+            _connectionDecisionInFlight = false;
 
             // Initialize toggle switches from request data (default to true if missing)
             if (document.getElementById('permViewScreen')) {
@@ -2906,33 +2931,59 @@
         function closeModal() {
             const overlay = document.getElementById('incomingModalOverlay');
             overlay.classList.remove('open');
-            setTimeout(() => { overlay.style.display = 'none'; }, 300);
+            setTimeout(() => {
+                if (!overlay.classList.contains('open')) overlay.style.display = 'none';
+            }, 300);
             currentRequestToken = null;
             currentRequesterId = '';
+            _connectionDecisionInFlight = false;
         }
 
         function handleBackdropClick(e) {
-            if (e.target === document.getElementById('incomingModalOverlay')) closeModal();
+            if (!_connectionDecisionInFlight
+                && e.target === document.getElementById('incomingModalOverlay')) closeModal();
         }
 
         async function denyConnection() {
+            if (_connectionDecisionInFlight) return;
             const acceptBtn = document.getElementById('modalAcceptBtn');
             const denyBtn = document.getElementById('modalDenyBtn');
+            const requestToken = currentRequestToken;
+            if (!requestToken) {
+                showToast('This connection request has expired. Please wait for a new request.');
+                closeModal();
+                return;
+            }
+            _connectionDecisionInFlight = true;
             if (acceptBtn) acceptBtn.disabled = true;
             if (denyBtn) denyBtn.disabled = true;
 
-            if (currentRequestToken) {
-                try {
-                    await fetch(`${BACKEND}/api/connections/reject.php`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ request_token: currentRequestToken, target_system_id: currentHostUid }),
-                        credentials: 'include'
-                    });
-                } catch (e) { }
+            try {
+                const response = await fetch(`${BACKEND}/api/connections/reject.php`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ request_token: requestToken, target_system_id: currentHostUid }),
+                    credentials: 'include'
+                });
+                if (response.status === 404 || response.status === 409) {
+                    showToast('The incoming connection request expired before it could be denied.');
+                    closeModal();
+                    return;
+                }
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const result = await response.json();
+                if (result.status !== 'success') {
+                    throw new Error(result.message || 'The request was not rejected.');
+                }
+                showToast('Connection denied');
+                closeModal();
+            } catch (error) {
+                console.error('[SESSION] Could not reject incoming connection:', error);
+                _connectionDecisionInFlight = false;
+                if (acceptBtn) acceptBtn.disabled = false;
+                if (denyBtn) denyBtn.disabled = false;
+                showToast('Could not deny the connection request. Check your connection and try again.');
             }
-            showToast('Connection denied');
-            closeModal();
         }
 
         // Tracks the pending post-accept session poll so it can be cancelled.
@@ -2941,9 +2992,15 @@
         let _bAcceptPollInFlight = false;
 
         async function acceptConnection() {
+            if (_connectionDecisionInFlight) return;
             const requestToken = currentRequestToken;
             const isApprovedReverse = requestToken && requestToken === autoAcceptingReverseToken;
-            
+            if (!requestToken) {
+                showToast('This connection request has expired. Please wait for a new request.');
+                closeModal();
+                return;
+            }
+            _connectionDecisionInFlight = true;
             const acceptBtn = document.getElementById('modalAcceptBtn');
             const denyBtn = document.getElementById('modalDenyBtn');
             if (acceptBtn) acceptBtn.disabled = true;
@@ -2954,73 +3011,113 @@
             const fileTransfer = document.getElementById('permFileTransfer') ? document.getElementById('permFileTransfer').checked : true;
             
             try {
-                const permissionsResponse = await fetch(`${BACKEND}/desktop-api/session/permissions`, {
+                const permissionsResponse = await fetch('/desktop-api/session/permissions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ view_screen: viewScreen, control_input: controlInput, file_transfer: fileTransfer }),
-                    credentials: 'include'
                 });
                 if (!permissionsResponse.ok) {
-                    throw new Error(`HTTP ${permissionsResponse.status}`);
+                    throw new Error(`Permission update HTTP ${permissionsResponse.status}: ${await permissionsResponse.text()}`);
                 }
             } catch (error) {
                 console.error('[SESSION] Failed to set session permissions:', error);
                 showToast('Could not apply the selected session permissions.');
+                _connectionDecisionInFlight = false;
                 if (acceptBtn) acceptBtn.disabled = false;
                 if (denyBtn) denyBtn.disabled = false;
                 return;
             }
 
             let accepted = false;
-            if (requestToken) {
-                // Authorize this session on the local Rust agent immediately
-                try {
-                    await fetch('/desktop-api/session/authorize_request', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            request_token: requestToken,
-                            requester_system_id: currentRequesterId || ''
-                        })
-                    });
-                } catch (e) {
-                    console.warn('[AUTH] Could not notify local agent of approval:', e);
+            const requesterId = currentRequesterId;
+            try {
+                const authorizeResponse = await fetch('/desktop-api/session/authorize_request', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        request_token: requestToken,
+                        requester_system_id: requesterId
+                    })
+                });
+                if (!authorizeResponse.ok) {
+                    throw new Error(`Local authorization HTTP ${authorizeResponse.status}: ${await authorizeResponse.text()}`);
                 }
+            } catch (error) {
+                console.error('[AUTH] Could not authorize the pending request on the local agent:', error);
+                showToast('The DeskStream agent could not authorize this request.');
+                _connectionDecisionInFlight = false;
+                if (acceptBtn) acceptBtn.disabled = false;
+                if (denyBtn) denyBtn.disabled = false;
+                return;
+            }
 
-                try {
-                    const res = await fetch(`${BACKEND}/api/connections/accept.php`, {
+            try {
+                const res = await fetch(`${BACKEND}/api/connections/accept.php`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ request_token: requestToken, target_system_id: currentHostUid }),
+                    credentials: 'include'
+                });
+                if (res.status === 404 || res.status === 409) {
+                    await fetch('/desktop-api/session/revoke_request', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ request_token: requestToken, target_system_id: currentHostUid }),
-                        credentials: 'include'
+                        body: JSON.stringify({ request_token: requestToken })
                     });
-                    const data = await res.json();
-                    if (data.status === 'success') {
-                        accepted = true;
-                        waitForRealBSession();
-                        if (isApprovedReverse) {
-                            autoAcceptingReverseToken = null;
-                            approvedReverseRequesterId = null;
-                            approvedReverseExpiresAt = 0;
-                        }
-                    } else if (isApprovedReverse) {
-                        autoAcceptingReverseToken = null;
-                        showToast(data.message || 'Could not start the approved reverse session');
-                    } else {
-                        showToast(data.message || 'Connection acceptance failed');
-                    }
-                } catch (error) {
-                    console.error('[SESSION] Connection acceptance failed:', error);
+                    if (isApprovedReverse) autoAcceptingReverseToken = null;
+                    showToast('The incoming connection request expired before it could be accepted.');
+                    closeModal();
+                    return;
+                }
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (data.status === 'success') {
+                    accepted = true;
+                    waitForRealBSession();
                     if (isApprovedReverse) {
                         autoAcceptingReverseToken = null;
-                        showToast('Could not start the approved reverse session');
-                    } else {
-                        showToast('Connection acceptance failed');
+                        approvedReverseRequesterId = null;
+                        approvedReverseExpiresAt = 0;
                     }
+                } else {
+                    const message = String(data.message || 'Connection acceptance failed');
+                    if (/expired|not found|no longer pending|already handled/i.test(message)) {
+                        await fetch('/desktop-api/session/revoke_request', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ request_token: requestToken })
+                        });
+                        if (isApprovedReverse) autoAcceptingReverseToken = null;
+                        showToast('The incoming connection request is no longer available.');
+                        closeModal();
+                        return;
+                    }
+                    throw new Error(message);
                 }
+            } catch (error) {
+                console.error('[SESSION] Connection acceptance failed:', error);
+                try {
+                    await fetch('/desktop-api/session/revoke_request', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ request_token: requestToken })
+                    });
+                } catch (revokeError) {
+                    console.error('[AUTH] Could not revoke the unaccepted local approval:', revokeError);
+                }
+                if (isApprovedReverse) {
+                    autoAcceptingReverseToken = null;
+                    showToast(error.message || 'Could not start the approved reverse session');
+                } else {
+                    showToast(error.message || 'Connection acceptance failed');
+                }
+                _connectionDecisionInFlight = false;
+                if (acceptBtn) acceptBtn.disabled = false;
+                if (denyBtn) denyBtn.disabled = false;
+                return;
             }
             if (!isApprovedReverse && accepted) {
-                showToast('Connection accepted — remote session starting...');
+                showToast('Connection accepted — waiting for the DeskStream agent to start the session...');
             }
             closeModal();
         }
