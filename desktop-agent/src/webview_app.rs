@@ -34,6 +34,47 @@ const IPC_INITIALIZATION_SCRIPT: &str = r#"
     };
 "#;
 
+const OVERLAY_INITIALIZATION_SCRIPT: &str = r#"
+    window.__deskstreamOverlayWindow = true;
+    (function clearOverlayDocumentBackground() {
+        const clearBackgrounds = () => {
+            if (document.documentElement) {
+                document.documentElement.style.setProperty('background', 'transparent', 'important');
+                document.documentElement.style.setProperty('background-color', 'transparent', 'important');
+            }
+            if (document.body) {
+                document.body.style.setProperty('background', 'transparent', 'important');
+                document.body.style.setProperty('background-color', 'transparent', 'important');
+                document.body.style.setProperty('margin', '0', 'important');
+            } else {
+                requestAnimationFrame(clearBackgrounds);
+            }
+        };
+        clearBackgrounds();
+    })();
+"#;
+
+fn resize_overlay(window: &Window, layout: &str) {
+    let (width, height) = match layout {
+        "menu" => (220_u32, 280_u32),
+        "chat" => (360_u32, 460_u32),
+        "panel" => (380_u32, 460_u32),
+        _ => (60_u32, 60_u32),
+    };
+    let previous_position = window.outer_position().ok();
+    let previous_size = window.outer_size();
+    let target_size = LogicalSize::new(width, height).to_physical::<u32>(window.scale_factor());
+    window.set_inner_size(LogicalSize::new(width, height));
+
+    if let Some(position) = previous_position {
+        let right = position.x.saturating_add(previous_size.width as i32);
+        window.set_outer_position(PhysicalPosition::new(
+            right.saturating_sub(target_size.width as i32),
+            position.y,
+        ));
+    }
+}
+
 fn destroy_overlay(window: &mut Option<Window>, webview: &mut Option<wry::WebView>) {
     drop(webview.take());
     if let Some(window) = window.take() {
@@ -274,11 +315,12 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         let url = controller_overlay_url(&controller_url, token);
                         let overlay_win = match WindowBuilder::new()
                             .with_title("DeskStream Overlay")
-                            .with_inner_size(LogicalSize::new(360_u32, 320_u32))
+                            .with_inner_size(LogicalSize::new(60_u32, 60_u32))
                             .with_resizable(false)
                             .with_decorations(false)
                             .with_transparent(true)
                             .with_always_on_top(true)
+                            .with_focused(false)
                             .build(target)
                         {
                             Ok(window) => window,
@@ -322,6 +364,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                                 }
                             })
                             .with_initialization_script(IPC_INITIALIZATION_SCRIPT)
+                            .with_initialization_script(OVERLAY_INITIALIZATION_SCRIPT)
                             .build(&overlay_win)
                         {
                             Ok(overlay) => overlay,
@@ -356,6 +399,13 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                             if let Err(error) = overlay.drag_window() {
                                 eprintln!("[SESSION UI] Failed to drag overlay: {error}");
                             }
+                        }
+                    }
+                }
+                "overlay_layout" => {
+                    if source == "overlay" {
+                        if let Some(overlay) = &overlay_window {
+                            resize_overlay(overlay, argument);
                         }
                     }
                 }

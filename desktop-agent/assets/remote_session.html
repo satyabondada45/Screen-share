@@ -18,6 +18,19 @@
     </script>
     <style>
         :root { --text-dark: #0f172a; }
+        html.deskstream-overlay,
+        html.deskstream-overlay body,
+        html.deskstream-overlay #bSessionUiRoot,
+        html.deskstream-overlay #bSessionUiMount {
+            background: transparent !important;
+            background-color: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+            margin: 0 !important;
+        }
+        body.deskstream-native-session-host #bSessionChatPanel {
+            display: none !important;
+        }
         /* ============================================================
            B-SIDE CONNECTED SESSION OVERLAY
         ============================================================ */
@@ -399,12 +412,13 @@
             installOverlayDrag();
 
             if (window.location.search.includes('overlay=1')) {
-                _bSessionChatPoll = setInterval(() => pollBSessionChat().catch(error => console.error('[CHAT] Overlay poll failed:', error)), 300);
+                document.documentElement.classList.add('deskstream-overlay');
                 document.documentElement.style.background = 'transparent';
                 document.documentElement.style.pointerEvents = 'none';
                 document.body.style.background = 'transparent';
                 document.body.style.pointerEvents = 'none';
                 document.body.style.overflow = 'hidden';
+                document.body.style.margin = '0';
                 
                 // Hide everything except bSessionOverlay
                 Array.from(document.body.children).forEach(child => {
@@ -416,6 +430,10 @@
 
                 const transferChoice = document.getElementById('bSessionTransferChoiceDialog');
                 if (transferChoice) overlay.appendChild(transferChoice);
+                const chatPanel = document.getElementById('bSessionChatPanel');
+                if (chatPanel) overlay.appendChild(chatPanel);
+                const health = document.getElementById('bSessionHealth');
+                if (health) health.style.display = 'none';
                 
                 overlay.style.display = 'flex';
                 overlay.style.position = 'fixed';
@@ -424,11 +442,7 @@
                 overlay.style.left = 'auto';
                 overlay.style.bottom = 'auto';
                 overlay.style.pointerEvents = 'auto';
-
-                // Try to make the window small if Wry allows it
-                try {
-                    window.resizeTo(360, 90);
-                } catch(e) {}
+                syncBOverlayLayout();
             }
         })();
 
@@ -523,6 +537,7 @@
                 const menu = document.getElementById('optionsMenu');
                 if (!menu) return;
                 menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+                syncBOverlayLayout();
             };
             window.handleBSessionDisconnectClick = function(event) {
                 if (event) event.stopPropagation();
@@ -548,12 +563,14 @@
                 const btn = document.getElementById('optionsToggleBtn');
                 if (menu && menu.style.display === 'flex' && !menu.contains(e.target) && btn && !btn.contains(e.target)) {
                     menu.style.display = 'none';
+                    syncBOverlayLayout();
                 }
             });
             window.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
                     const menu = document.getElementById('optionsMenu');
                     if (menu) menu.style.display = 'none';
+                    syncBOverlayLayout();
                 }
             });
 
@@ -612,6 +629,26 @@
                 }
             }
             return null;
+        }
+
+        function setBOverlayLayout(layout) {
+            if (new URLSearchParams(window.location.search).get('overlay') !== '1'
+                || !window.ipc?.postMessage) return;
+            try {
+                window.ipc.postMessage(`overlay_layout:${layout}`);
+            } catch (error) {
+                console.error('[SESSION UI] Failed to resize floating controls:', error);
+            }
+        }
+
+        function syncBOverlayLayout() {
+            if (document.getElementById('bSessionChatPanel')?.classList.contains('open')) {
+                setBOverlayLayout('chat');
+            } else if (document.getElementById('optionsMenu')?.style.display === 'flex') {
+                setBOverlayLayout('menu');
+            } else {
+                setBOverlayLayout('idle');
+            }
         }
 
         function isCurrentBSession(generation) {
@@ -694,6 +731,7 @@
                 // Keep the in-DOM clone inside the main dashboard hidden to prevent duplicate floating controls.
                 const overlay = document.getElementById('bSessionOverlay');
                 if (overlay) overlay.style.display = 'none';
+                document.body.classList.add('deskstream-native-session-host');
                 const currentToken = Number(desktopHost.__deskstreamBOverlaySession);
                 if (desktopHost.__deskstreamBOverlayOpen && Number.isSafeInteger(currentToken)) {
                     _bNativeOverlaySessionToken = currentToken;
@@ -942,11 +980,13 @@
             const panel = document.getElementById('bSessionChatPanel');
             panel?.classList.toggle('open');
             if (panel?.classList.contains('open')) {
+                setBOverlayLayout('chat');
                 pollBSessionChat().catch(error => console.error('[CHAT] History refresh failed:', error));
                 renderBSessionRemoteTyping();
                 document.getElementById('bSessionChatInput')?.focus();
             } else {
                 stopBSessionChatTyping();
+                syncBOverlayLayout();
             }
         }
 
@@ -1029,6 +1069,7 @@
             _bSessionChatRenderedIds.add(messageId);
             if (!message.from_local) {
                 document.getElementById('bSessionChatPanel')?.classList.add('open');
+                setBOverlayLayout('chat');
             }
             messages.scrollTop = messages.scrollHeight;
             return messageSequence;
@@ -1174,12 +1215,14 @@
                 }
 
                 dialog.style.display = 'flex';
+                setBOverlayLayout('panel');
 
                 const cleanup = () => {
                     dialog.style.display = 'none';
                     btnReject.onclick = null;
                     btnAllow.onclick = null;
                     btnAllowAll.onclick = null;
+                    syncBOverlayLayout();
                 };
 
                 const finish = choice => {
@@ -1286,10 +1329,12 @@
 
         function showBSessionTransferChoice() {
             document.getElementById('bSessionTransferChoiceDialog').style.display = 'flex';
+            setBOverlayLayout('panel');
         }
 
         function closeBSessionTransferChoice() {
             document.getElementById('bSessionTransferChoiceDialog').style.display = 'none';
+            syncBOverlayLayout();
         }
 
         function selectBSessionTransfer(kind) {
@@ -1355,6 +1400,7 @@
                 const state = await response.json();
                 if (isCurrentBSession(generation) && state.pending) {
                     document.getElementById('bReversePermissionDialog').style.display = 'flex';
+                    setBOverlayLayout('panel');
                 }
             } finally {
                 if (generation === _bSessionGeneration) _bReverseRequestPollRunning = false;
@@ -1378,6 +1424,7 @@
                     return;
                 }
                 document.getElementById('bReversePermissionDialog').style.display = 'none';
+                syncBOverlayLayout();
                 if (accepted) {
                     const healthResponse = await fetchHealth();
                     if (!isCurrentBSession(generation)) return;
