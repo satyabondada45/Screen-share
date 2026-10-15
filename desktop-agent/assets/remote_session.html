@@ -24,6 +24,7 @@
         html.deskstream-overlay #bSessionUiMount {
             background: transparent !important;
             background-color: transparent !important;
+            background-image: none !important;
             border: 0 !important;
             box-shadow: none !important;
             margin: 0 !important;
@@ -36,8 +37,8 @@
         ============================================================ */
         .floating-controls {
             position: fixed;
-            top: 20px;
-            right: 20px;
+            top: 0;
+            right: 0;
             z-index: 10000;
             background: transparent;
             border: none;
@@ -636,8 +637,32 @@
                 || !window.ipc?.postMessage) return;
             try {
                 window.ipc.postMessage(`overlay_layout:${layout}`);
+                const controls = [
+                    document.getElementById('optionsToggleBtn'),
+                    document.getElementById('optionsMenu'),
+                    document.getElementById('bSessionChatPanel'),
+                    ...[
+                        'bReversePermissionDialog',
+                        'bSessionTransferChoiceDialog',
+                        'bSessionEndedDialog',
+                        'bSessionFileApprovalDialog'
+                    ].map(id => document.getElementById(id))
+                ];
+                const rectangles = controls
+                    .filter(element => {
+                        if (!element || element.getClientRects().length === 0) return false;
+                        if (element.id === 'optionsMenu') return element.style.display === 'flex';
+                        if (element.id === 'bSessionChatPanel') return element.classList.contains('open');
+                        if (element.id === 'optionsToggleBtn') return true;
+                        return element.style.display !== 'none';
+                    })
+                    .map(element => {
+                        const rect = element.getBoundingClientRect();
+                        return `${rect.left},${rect.top},${rect.width},${rect.height}`;
+                    });
+                window.ipc.postMessage(`overlay_region:${rectangles.join(';')}`);
             } catch (error) {
-                console.error('[SESSION UI] Failed to resize floating controls:', error);
+                console.error('[SESSION UI] Failed to update floating-control bounds:', error);
             }
         }
 
@@ -649,6 +674,12 @@
             } else {
                 setBOverlayLayout('idle');
             }
+        }
+
+        if (new URLSearchParams(window.location.search).get('overlay') === '1') {
+            window.addEventListener('resize', () => {
+                requestAnimationFrame(syncBOverlayLayout);
+            });
         }
 
         function isCurrentBSession(generation) {

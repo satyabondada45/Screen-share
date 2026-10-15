@@ -14,6 +14,8 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::{Window, WindowBuilder},
 };
+#[cfg(target_os = "windows")]
+use tao::platform::windows::WindowExtWindows;
 use wry::WebViewBuilder;
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
@@ -36,21 +38,40 @@ const IPC_INITIALIZATION_SCRIPT: &str = r#"
 
 const OVERLAY_INITIALIZATION_SCRIPT: &str = r#"
     window.__deskstreamOverlayWindow = true;
-    (function clearOverlayDocumentBackground() {
-        const clearBackgrounds = () => {
+    (function prepareTransparentOverlayDocument() {
+        if (new URLSearchParams(window.location.search).get('overlay') !== '1') return;
+
+        const applyOverlayStyles = () => {
             if (document.documentElement) {
+                document.documentElement.classList.add('deskstream-overlay');
                 document.documentElement.style.setProperty('background', 'transparent', 'important');
                 document.documentElement.style.setProperty('background-color', 'transparent', 'important');
+            }
+            if (document.head && !document.getElementById('deskstream-overlay-transparent-root')) {
+                const style = document.createElement('style');
+                style.id = 'deskstream-overlay-transparent-root';
+                style.textContent = `
+                    html, body, #bSessionUiMount, #bSessionUiRoot, #bSessionOverlay {
+                        background: transparent !important;
+                        background-color: transparent !important;
+                        background-image: none !important;
+                        border: 0 !important;
+                        box-shadow: none !important;
+                    }
+                    html, body {
+                        margin: 0 !important;
+                    }
+                `;
+                document.head.appendChild(style);
             }
             if (document.body) {
                 document.body.style.setProperty('background', 'transparent', 'important');
                 document.body.style.setProperty('background-color', 'transparent', 'important');
                 document.body.style.setProperty('margin', '0', 'important');
-            } else {
-                requestAnimationFrame(clearBackgrounds);
             }
+            if (!document.head || !document.body) requestAnimationFrame(applyOverlayStyles);
         };
-        clearBackgrounds();
+        applyOverlayStyles();
     })();
 "#;
 
@@ -59,7 +80,7 @@ fn resize_overlay(window: &Window, layout: &str) {
         "menu" => (220_u32, 280_u32),
         "chat" => (360_u32, 460_u32),
         "panel" => (380_u32, 460_u32),
-        _ => (60_u32, 60_u32),
+        _ => (48_u32, 40_u32),
     };
     let previous_position = window.outer_position().ok();
     let previous_size = window.outer_size();
@@ -72,6 +93,68 @@ fn resize_overlay(window: &Window, layout: &str) {
             right.saturating_sub(target_size.width as i32),
             position.y,
         ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_overlay_input_region(window: &Window, regions: &str) {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+    };
+
+    let scale = window.scale_factor();
+    let combined_region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+    if combined_region == 0 {
+        eprintln!("[SESSION UI] Failed to allocate overlay input region");
+        return;
+    }
+
+    let mut region_count = 0;
+    for rectangle in regions.split(';') {
+        let values = rectangle
+            .split(',')
+            .map(str::parse::<f64>)
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(values) = values else {
+            continue;
+        };
+        if values.len() != 4 || values.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+
+        let left = (values[0] * scale).floor() as i32;
+        let top = (values[1] * scale).floor() as i32;
+        let right = ((values[0] + values[2]) * scale).ceil() as i32;
+        let bottom = ((values[1] + values[3]) * scale).ceil() as i32;
+        if right <= left || bottom <= top {
+            continue;
+        }
+
+        let rectangle_region = unsafe { CreateRectRgn(left, top, right, bottom) };
+        if rectangle_region == 0 {
+            eprintln!("[SESSION UI] Failed to allocate overlay control region");
+            continue;
+        }
+        let combine_result =
+            unsafe { CombineRgn(combined_region, combined_region, rectangle_region, RGN_OR) };
+        unsafe { DeleteObject(rectangle_region) };
+        if combine_result == 0 {
+            unsafe { DeleteObject(combined_region) };
+            eprintln!("[SESSION UI] Failed to combine overlay input regions");
+            return;
+        }
+        region_count += 1;
+    }
+
+    if region_count == 0 {
+        unsafe { DeleteObject(combined_region) };
+        return;
+    }
+
+    let result = unsafe { SetWindowRgn(window.hwnd(), combined_region, 1) };
+    if result == 0 {
+        unsafe { DeleteObject(combined_region) };
+        eprintln!("[SESSION UI] Failed to apply overlay input region");
     }
 }
 
@@ -210,6 +293,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
     let mut overlay_webview: Option<wry::WebView> = None;
     let mut active_overlay_token: Option<u64> = None;
     let mut last_overlay_token = 0_u64;
+    let mut active_overlay_layout = "idle";
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -315,7 +399,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         let url = controller_overlay_url(&controller_url, token);
                         let overlay_win = match WindowBuilder::new()
                             .with_title("DeskStream Overlay")
-                            .with_inner_size(LogicalSize::new(60_u32, 60_u32))
+                            .with_inner_size(LogicalSize::new(48_u32, 40_u32))
                             .with_resizable(false)
                             .with_decorations(false)
                             .with_transparent(true)
@@ -378,6 +462,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         overlay_webview = Some(overlay);
                         active_overlay_token = Some(token);
                         last_overlay_token = last_overlay_token.max(token);
+                        active_overlay_layout = "idle";
                     }
                 }
                 "close_overlay" => {
@@ -385,12 +470,14 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         if active_overlay_token == Some(token) {
                             destroy_overlay(&mut overlay_window, &mut overlay_webview);
                             active_overlay_token = None;
+                            active_overlay_layout = "idle";
                         } else {
                             eprintln!("[SESSION UI] Ignoring stale overlay close request");
                         }
                     } else {
                         destroy_overlay(&mut overlay_window, &mut overlay_webview);
                         active_overlay_token = None;
+                        active_overlay_layout = "idle";
                     }
                 }
                 "drag_overlay" => {
@@ -405,7 +492,30 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                 "overlay_layout" => {
                     if source == "overlay" {
                         if let Some(overlay) = &overlay_window {
-                            resize_overlay(overlay, argument);
+                            if active_overlay_layout != argument {
+                                resize_overlay(overlay, argument);
+                                active_overlay_layout = match argument {
+                                    "menu" => "menu",
+                                    "chat" => "chat",
+                                    "panel" => "panel",
+                                    _ => "idle",
+                                };
+                                if let Some(overlay) = &overlay_webview {
+                                    if let Err(error) = overlay.evaluate_script(
+                                        "requestAnimationFrame(() => { if (typeof syncBOverlayLayout === 'function') syncBOverlayLayout(); });",
+                                    ) {
+                                        eprintln!("[SESSION UI] Failed to refresh overlay bounds after resize: {error}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "overlay_region" => {
+                    if source == "overlay" {
+                        #[cfg(target_os = "windows")]
+                        if let Some(overlay) = &overlay_window {
+                            set_overlay_input_region(overlay, argument);
                         }
                     }
                 }
@@ -464,6 +574,7 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                 } else if window_id == window.id() {
                     destroy_overlay(&mut overlay_window, &mut overlay_webview);
                     active_overlay_token = None;
+                    active_overlay_layout = "idle";
                     quit.store(true, Ordering::Relaxed);
                     *control_flow = ControlFlow::Exit;
                 }
