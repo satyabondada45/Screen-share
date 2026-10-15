@@ -290,11 +290,6 @@
                         <line x1="12" y1="19" x2="12" y2="22"></line>
                     </svg> Mic
                 </button>
-                <button class="floating-btn" id="bScreenFitBtn" type="button" title="Screen Fit" onclick="if(typeof toggleFullscreen === 'function'){toggleFullscreen();} toggleBOptions(event);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-                        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
-                    </svg> Screen Fit
-                </button>
                 <button class="floating-btn" id="bOverlayRevBtn" type="button" title="Reverse control" onclick="if(typeof requestBSessionReverse === 'function'){requestBSessionReverse();} else if(window.ipc){window.ipc.postMessage('request_b_reverse');} toggleBOptions(event);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
                         <path d="M5 12h14M12 5l7 7-7 7"></path>
@@ -548,15 +543,6 @@
                     window.deskStreamEndAnySession('END_SESSION_BUTTON');
                 } else if (typeof disconnectBSession === 'function') {
                     disconnectBSession(null, 'END_SESSION_BUTTON');
-                }
-            };
-            window.toggleFullscreen = function() {
-                const box = document.documentElement;
-                if (!document.fullscreenElement) {
-                    if (box.requestFullscreen) box.requestFullscreen();
-                    else if (box.webkitRequestFullscreen) box.webkitRequestFullscreen();
-                } else {
-                    if (document.exitFullscreen) document.exitFullscreen();
                 }
             };
             window.addEventListener('click', (e) => {
@@ -833,7 +819,7 @@
             }), 500);
         }
 
-        function _dismissBSessionOverlay() {
+        function _dismissBSessionOverlay(closeNativeWindow = true) {
             const desktopHost = findDesktopHost();
             const pageParams = new URLSearchParams(window.location.search);
             const isNativeOverlay = pageParams.get('overlay') === '1';
@@ -845,7 +831,7 @@
                 if (desktopHost.__deskstreamBOverlaySession === sessionToken) {
                     desktopHost.__deskstreamBOverlayOpen = false;
                 }
-                desktopHost.ipc.postMessage(`close_overlay:${sessionToken}`);
+                if (closeNativeWindow) desktopHost.ipc.postMessage(`close_overlay:${sessionToken}`);
             }
             _bNativeOverlaySessionToken = null;
             if (!_bSessionActive) return;
@@ -975,9 +961,15 @@
                             if (!isCurrentBSession(generation)) return false;
                             if (health.in_session === false) {
                                 if (reverseTargetId) {
-                                    _dismissBSessionOverlay();
                                     showToast('Starting the approved reverse session...');
-                                    await startConnection(reverseTargetId);
+                                    const pageParams = new URLSearchParams(window.location.search);
+                                    if (pageParams.get('overlay') === '1' && window.ipc) {
+                                        _dismissBSessionOverlay(false);
+                                        window.ipc.postMessage(`start_reverse_connection:${reverseTargetId}`);
+                                    } else {
+                                        _dismissBSessionOverlay();
+                                        await startConnection(reverseTargetId);
+                                    }
                                 } else {
                                     showBSessionEnded();
                                 }
@@ -1381,18 +1373,27 @@
         let _bReverseRequestOutstanding = false;
 
         async function toggleBSessionMic() {
+            if (!_bSessionActive || _bSessionDisconnecting) return;
             const nextEnabled = !_bSessionMicEnabled;
-            const response = await fetch('/desktop-api/session/audio', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled: nextEnabled })
-            });
-            if (!response.ok) {
-                showToast(`Microphone update failed: ${await response.text()}`);
-                return;
+            const button = document.getElementById('bMicBtn');
+            if (button) button.disabled = true;
+            try {
+                const response = await fetch('/desktop-api/session/audio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: nextEnabled })
+                });
+                if (!response.ok) {
+                    throw new Error(await response.text() || `HTTP ${response.status}`);
+                }
+                _bSessionMicEnabled = nextEnabled;
+                if (button) button.textContent = nextEnabled ? 'Mic On' : 'Mic Off';
+            } catch (error) {
+                console.error('[MIC] Failed to update microphone capture:', error);
+                showToast(`Microphone update failed: ${error.message || 'check audio device permissions'}`);
+            } finally {
+                if (button) button.disabled = false;
             }
-            _bSessionMicEnabled = nextEnabled;
-            document.getElementById('bMicBtn').textContent = nextEnabled ? 'Mic On' : 'Mic Off';
         }
 
         async function requestBSessionReverse() {

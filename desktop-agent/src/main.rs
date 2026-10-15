@@ -852,9 +852,13 @@ where
 fn start_audio_capture(
     write_stream: std::sync::mpsc::SyncSender<Vec<u8>>,
     is_running: Arc<AtomicBool>,
-) -> Option<cpal::Stream> {
-    let device = cpal::default_host().default_input_device()?;
-    let supported_config = device.default_input_config().ok()?;
+) -> Result<cpal::Stream, String> {
+    let device = cpal::default_host()
+        .default_input_device()
+        .ok_or_else(|| "No default microphone is available".to_string())?;
+    let supported_config = device
+        .default_input_config()
+        .map_err(|error| format!("Could not read microphone configuration: {error}"))?;
     let sample_format = supported_config.sample_format();
     let stream_config: cpal::StreamConfig = supported_config.into();
     let sample_rate = stream_config.sample_rate.0;
@@ -871,14 +875,15 @@ fn start_audio_capture(
             &device, &stream_config, sample_rate, channels, write_stream, is_running,
         ),
         format => {
-            eprintln!("[Audio] Unsupported input sample format: {format:?}");
-            return None;
+            return Err(format!("Unsupported microphone sample format: {format:?}"));
         }
     }
-    .ok()?;
+    .map_err(|error| format!("Could not create microphone stream: {error}"))?;
 
-    stream.play().ok()?;
-    Some(stream)
+    stream
+        .play()
+        .map_err(|error| format!("Could not start microphone stream: {error}"))?;
+    Ok(stream)
 }
 
 // FIXED: Convert Float32 playback samples into the output device's native CPAL format.
@@ -4584,7 +4589,18 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             });
 
-                            let _audio = start_audio_capture(write_stream_audio, is_conn_audio);
+                            let _audio = match start_audio_capture(write_stream_audio, is_conn_audio) {
+                                Ok(stream) => {
+                                    crate::status::set_session_audio_capture_available(true);
+                                    println!("[Audio] Microphone capture is available for this session.");
+                                    Some(stream)
+                                }
+                                Err(error) => {
+                                    crate::status::set_session_audio_capture_available(false);
+                                    eprintln!("[Audio] Microphone capture is unavailable for this session: {error}");
+                                    None
+                                }
+                            };
 
                             let capture_handle = thread::spawn(move || {
                                 let mut screens = Screen::all().unwrap_or_default();

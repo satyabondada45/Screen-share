@@ -197,6 +197,14 @@ pub fn session_audio_enabled() -> bool {
     SESSION_AUDIO_ENABLED.load(Ordering::Acquire)
 }
 
+pub fn set_session_audio_capture_available(available: bool) {
+    SESSION_AUDIO_CAPTURE_AVAILABLE.store(available, Ordering::Release);
+}
+
+pub fn session_audio_capture_available() -> bool {
+    SESSION_AUDIO_CAPTURE_AVAILABLE.load(Ordering::Acquire)
+}
+
 pub fn set_session_perm_view_screen(allowed: bool) {
     SESSION_PERM_VIEW_SCREEN.store(allowed, Ordering::Release);
 }
@@ -311,6 +319,7 @@ static SESSION_WRITER: OnceLock<Mutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::
 static SESSION_CHAT_HISTORY: OnceLock<Mutex<SessionChatHistory>> = OnceLock::new();
 static SESSION_REMOTE_TYPING: AtomicBool = AtomicBool::new(false);
 static SESSION_AUDIO_ENABLED: AtomicBool = AtomicBool::new(false);
+static SESSION_AUDIO_CAPTURE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static SESSION_PERM_VIEW_SCREEN: AtomicBool = AtomicBool::new(true);
 static SESSION_PERM_CONTROL_INPUT: AtomicBool = AtomicBool::new(true);
 static SESSION_PERM_FILE_TRANSFER: AtomicBool = AtomicBool::new(true);
@@ -402,6 +411,7 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
     }
     SESSION_REMOTE_TYPING.store(false, Ordering::Release);
     SESSION_AUDIO_ENABLED.store(false, Ordering::Release);
+    SESSION_AUDIO_CAPTURE_AVAILABLE.store(false, Ordering::Release);
     SESSION_PERM_VIEW_SCREEN.store(true, Ordering::Release);
     SESSION_PERM_CONTROL_INPUT.store(true, Ordering::Release);
     SESSION_PERM_FILE_TRANSFER.store(true, Ordering::Release);
@@ -984,4 +994,3 @@ mod tests {
         assert!(!check_and_consume_approved_session(&valid_hash));
     }
 }
-

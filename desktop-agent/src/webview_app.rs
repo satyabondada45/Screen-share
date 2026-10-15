@@ -519,6 +519,25 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                         }
                     }
                 }
+                "start_reverse_connection" => {
+                    if source != "overlay" {
+                        eprintln!("[REVERSE] Ignoring reconnect request from {source}");
+                    } else if argument.len() != 9 || !argument.bytes().all(|byte| byte.is_ascii_digit()) {
+                        eprintln!("[REVERSE] Ignoring reconnect request with invalid peer ID");
+                    } else {
+                        destroy_overlay(&mut overlay_window, &mut overlay_webview);
+                        active_overlay_token = None;
+                        active_overlay_layout = "idle";
+                        window.set_minimized(false);
+                        window.set_visible(true);
+                        let script = format!(
+                            "if (typeof startConnection === 'function' && typeof currentHostUid === 'string' && /^\\d{{9}}$/.test(currentHostUid)) {{ startConnection('{argument}').catch(error => {{ console.error('[REVERSE] Approved handoff connection failed:', error); if (typeof showToast === 'function') showToast('Could not start the approved reverse session.'); }}); }} else {{ console.error('[REVERSE] Authenticated dashboard is not ready for the approved handoff.'); if (typeof showToast === 'function') showToast('Could not start the approved reverse session.'); }}"
+                        );
+                        if let Err(error) = webview.evaluate_script(&script) {
+                            eprintln!("[REVERSE] Failed to dispatch approved reconnect to dashboard: {error}");
+                        }
+                    }
+                }
                 "toggle_b_chat" | "toggle_b_mic" | "request_b_reverse" => {
                     let target_webview = if source == "overlay" {
                         overlay_webview.as_ref()

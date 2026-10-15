@@ -488,6 +488,24 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         continue;
                     }
                 };
+                if enabled {
+                    let in_session = crate::status::LIVE
+                        .get()
+                        .and_then(|status| status.lock().ok())
+                        .map(|status| status.in_session)
+                        .unwrap_or(false);
+                    if !in_session {
+                        let _ = request.respond(Response::from_string("No active session").with_status_code(409));
+                        continue;
+                    }
+                    if !crate::status::session_audio_capture_available() {
+                        let _ = request.respond(
+                            Response::from_string("Microphone capture is unavailable; check that a microphone is connected and permitted")
+                                .with_status_code(503),
+                        );
+                        continue;
+                    }
+                }
                 crate::status::set_session_audio_enabled(enabled);
                 let _ = request.respond(Response::from_string("{\"success\":true}")
                     .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
