@@ -194,7 +194,7 @@
             <div id="bSessionTypingIndicator" aria-live="polite">Remote user is typing…</div>
             <form id="bSessionChatForm" class="chat-input">
                 <textarea id="bSessionChatInput" maxlength="65535" autocomplete="off" placeholder="Type a message..." style="resize: none; height: 36px; padding-top: 8px; font-family: inherit; font-size: 0.9rem;"></textarea>
-                <button type="submit">Send</button>
+                <button type="submit" id="bSessionChatSubmitBtn">Send</button>
             </form>
         </section>
     <div id="bReversePermissionDialog" role="alertdialog" aria-modal="false"
@@ -286,7 +286,7 @@
                         <path d="M5 12h14M12 5l7 7-7 7"></path>
                     </svg> Reverse
                 </button>
-                <button class="floating-btn danger" id="bDisconnectBtn" type="button" title="End session" onclick="if(window.ipc){window.ipc.postMessage('disconnect_b');} toggleBOptions(event);">
+                <button class="floating-btn danger" id="bDisconnectBtn" type="button" title="End session" onclick="handleBSessionDisconnectClick(event)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16">
                         <rect x="3" y="3" width="18" height="18" rx="2"></rect>
                     </svg> End Session
@@ -325,12 +325,19 @@
             const installOverlayDrag = () => {
                 if (!handle || overlayDragController) return;
                 overlayDragController = new AbortController();
+
+                const healthEl = document.getElementById('bSessionHealth');
+                if (healthEl) {
+                    healthEl.style.cursor = 'move';
+                    healthEl.addEventListener('pointerdown', event => {
+                        if (window.location.search.includes('overlay=1') && window.ipc) {
+                            window.ipc.postMessage('drag_overlay');
+                        }
+                    }, { signal: overlayDragController.signal });
+                }
+
                 handle.addEventListener('pointerdown', event => {
                     if (event.target.closest('#optionsMenu')) return;
-                    if (window.location.search.includes('overlay=1') && window.ipc) {
-                        window.ipc.postMessage('drag_overlay');
-                        return;
-                    }
                     stopDrag();
                     const rect = overlay.getBoundingClientRect();
                     dragState = {
@@ -351,6 +358,11 @@
                         const dy = moveEvent.clientY - dragState.startY;
                         if (!dragState.isDragging && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
                             dragState.isDragging = true;
+                            if (window.location.search.includes('overlay=1') && window.ipc) {
+                                window.ipc.postMessage('drag_overlay');
+                                stopDrag();
+                                return;
+                            }
                         }
                         if (dragState.isDragging) {
                             const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth);
@@ -512,6 +524,19 @@
                 if (!menu) return;
                 menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
             };
+            window.handleBSessionDisconnectClick = function(event) {
+                if (event) event.stopPropagation();
+                const menu = document.getElementById('optionsMenu');
+                if (menu) menu.style.display = 'none';
+                if (window.ipc) {
+                    try { window.ipc.postMessage('disconnect_b'); } catch(e) {}
+                }
+                if (typeof window.deskStreamEndAnySession === 'function') {
+                    window.deskStreamEndAnySession('END_SESSION_BUTTON');
+                } else if (typeof disconnectBSession === 'function') {
+                    disconnectBSession(null, 'END_SESSION_BUTTON');
+                }
+            };
             window.toggleFullscreen = function() {
                 const box = document.documentElement;
                 if (!document.fullscreenElement) {
@@ -642,12 +667,18 @@
                 disconnectButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg> Disconnect';
             }
             document.body.classList.add('b-session-active');
-            // Show the floating controls — always, regardless of IPC availability.
-            const overlay = document.getElementById('bSessionOverlay');
-            if (overlay) overlay.style.display = 'flex';
-            window.deskStreamBInstallOverlayDrag?.();
-            if (window.ipc && !window.location.search.includes('overlay=1')) {
+            const isNativeHostApp = Boolean(window.ipc && !window.location.search.includes('overlay=1'));
+            if (isNativeHostApp) {
+                // In native desktop agent, the separate transparent overlay window is the sole floating control.
+                // Keep the in-DOM clone inside the main dashboard hidden to prevent duplicate floating controls.
+                const overlay = document.getElementById('bSessionOverlay');
+                if (overlay) overlay.style.display = 'none';
                 try { window.ipc.postMessage('open_overlay'); } catch(e) {}
+            } else {
+                // Standalone overlay window or browser fallback mode: show the in-DOM floating control.
+                const overlay = document.getElementById('bSessionOverlay');
+                if (overlay) overlay.style.display = 'flex';
+                window.deskStreamBInstallOverlayDrag?.();
             }
             // Start session timer
             _bSessionStartTime = Date.now();
@@ -669,10 +700,20 @@
             if (_bSessionWatchdog) clearInterval(_bSessionWatchdog);
             _bSessionWatchdog = setInterval(async () => {
                 try {
-                    // [SESSION DEBUG] The local agent's in_session state only reflects if WE are hosting.
-                    // Checking health.in_session === false here is invalid for a B session (client mode)
-                    // and causes a false "Session has been ended" disconnect.
-                    // Rely on session.php's websocket state or relay connection instead.
+                    const healthResponse = await fetchHealth();
+                    if (!healthResponse.ok) return;
+                    const health = await healthResponse.json();
+                    if (health && health.in_session === false) {
+                        _bSessionWatchdogMissCount++;
+                        if (_bSessionWatchdogMissCount >= 2) {
+                            clearInterval(_bSessionWatchdog);
+                            _bSessionWatchdog = null;
+                            _dismissBSessionOverlay();
+                            showBSessionEnded();
+                        }
+                    } else {
+                        _bSessionWatchdogMissCount = 0;
+                    }
                 } catch (e) { /* ignore transient fetch errors */ }
             }, 2000);
             pollBSessionChat().catch(error => {
@@ -985,18 +1026,23 @@
                 throw new Error('Remote session chat controls are missing.');
             }
 
-            chatForm.addEventListener('submit', async event => {
-                if (event) event.preventDefault();
-                if (!_bSessionActive || _bSessionDisconnecting) return;
-                const generation = _bSessionGeneration;
+            let _bSessionChatSending = false;
+
+            async function submitBSessionChat(event) {
+                if (event && event.preventDefault) event.preventDefault();
+                if (!_bSessionActive || _bSessionDisconnecting || _bSessionChatSending) return;
                 const input = document.getElementById('bSessionChatInput');
+                if (!input) return;
                 const message = input.value.trim();
                 if (!message) return;
+
+                _bSessionChatSending = true;
+                const generation = _bSessionGeneration;
                 const traceId = nextBChatTraceId();
                 console.info(`[CHAT TRACE] trace_id=${traceId} side=B direction=B_TO_A stage=UI_SEND payload_bytes=${new TextEncoder().encode(message).length}`);
                 stopBSessionChatTyping();
 
-                const submitBtn = document.querySelector('#bSessionChatForm button[type="submit"]');
+                const submitBtn = document.querySelector('#bSessionChatForm button[type="submit"]') || document.getElementById('bSessionChatSubmitBtn');
                 if (submitBtn) submitBtn.disabled = true;
 
                 try {
@@ -1025,14 +1071,23 @@
                         showToast(`Chat send error: ${error.message}`);
                     }
                 } finally {
+                    _bSessionChatSending = false;
                     if (submitBtn) submitBtn.disabled = false;
                 }
-            });
+            }
+            window.submitBSessionChat = submitBSessionChat;
+
+            chatForm.addEventListener('submit', submitBSessionChat);
             bSessionChatInput.addEventListener('input', updateBSessionChatTyping);
             bSessionChatInput.addEventListener('keydown', event => {
-                if (event.key === 'Enter' && !event.shiftKey) {
+                if (event.isComposing) return;
+                if (event.key === 'Enter') {
+                    if (event.shiftKey) {
+                        // Allow multiline text insertion on Shift+Enter
+                        return;
+                    }
                     event.preventDefault();
-                    chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                    submitBSessionChat(event);
                 }
             });
         }).catch(error => {

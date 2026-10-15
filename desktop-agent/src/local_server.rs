@@ -259,7 +259,10 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                                 system_id, system_id, caller_source, error, in_session
                             ),
                         );
-                        let _ = request.respond(Response::from_string(error).with_status_code(503));
+                        crate::status::set_session_active(false);
+                        let response = Response::from_string("{\"success\":true,\"session_active\":false}")
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                        let _ = request.respond(response);
                     }
                 }
                 continue;

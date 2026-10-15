@@ -1477,6 +1477,19 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "Cargo build release (desktop-agent)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--release",
+				"--manifest-path",
+				"desktop-agent/Cargo.toml"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

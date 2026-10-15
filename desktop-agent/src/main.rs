@@ -42,6 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // ============================================================
 
 const TARGET_FPS: u32 = 60;
+#[allow(dead_code)]
 const TARGET_BITRATE: u32 = 8_000_000;
 const FRAME_INTERVAL_MICROS: u64 = 16667; // 60 FPS ~ 16.667 ms per frame
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -210,6 +211,7 @@ fn attach_thread_to_input_desktop() {}
 // ============================================================
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn hide_console_window() {
     use windows_sys::Win32::System::Console::GetConsoleWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
@@ -260,6 +262,7 @@ macro_rules! eprintln {
 // SHA256
 // ============================================================
 
+#[allow(dead_code)]
 fn compute_sha256(input: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -595,6 +598,7 @@ fn mark_session_packet_read_failed(
 // ============================================================
 
 // FIXED: expanded VK map covering arrows, F-keys, nav cluster, and modifiers.
+#[allow(dead_code)]
 fn map_key_code(code: u32) -> Option<Key> {
     match code {
         65 => Some(Key::Unicode('a')),
@@ -2892,6 +2896,18 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                         ),
                                                     );
                                                 }
+                                                if packet_type == 99 {
+                                                    mark_session_disconnected(
+                                                        &diagnostic_system_id,
+                                                        "session_writer",
+                                                        "cloned_session_writer_stream",
+                                                        diagnostic_connected.as_ref(),
+                                                        diagnostic_in_session.as_ref(),
+                                                        false,
+                                                        "host sent session disconnect Type 99",
+                                                    );
+                                                    return false;
+                                                }
                                                 true
                                             }
                                             Err(e) => {
@@ -3000,6 +3016,9 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
 
 
 
+                                let mut sent_video_count = 0u64;
+                                let mut last_video_tx_log = Instant::now();
+
                                 while write_connected.load(Ordering::Acquire) {
                                     let mut sent_control = false;
                                     let mut error = false;
@@ -3021,6 +3040,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         .and_then(|mut q| q.pop_front());
                                     
                                     if let Some(packet) = video_packet {
+                                        sent_video_count += 1;
+                                        if sent_video_count == 1 || last_video_tx_log.elapsed() >= Duration::from_secs(2) {
+                                            println!(
+                                                "[VIDEO TX] packet_count={} bytes={}",
+                                                sent_video_count, packet.len()
+                                            );
+                                            last_video_tx_log = Instant::now();
+                                        }
                                         if !write_packet(packet) {
                                             break;
                                         }
@@ -4770,6 +4797,10 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
                             }
 
+                            let mut last_encode_log = Instant::now();
+                            let mut total_encoded_frames = 0u64;
+                            let mut total_encoded_bytes = 0u64;
+
                             while is_conn_write.load(Ordering::SeqCst) {
                                 let frame_opt = {
                                     let (lock, cvar) = &*shared_frame;
@@ -4884,8 +4915,18 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 }
 
                                 frame_number += 1;
+                                total_encoded_frames += 1;
+                                total_encoded_bytes += h264_bytes.len() as u64;
                                 let (_nal_types, _has_sps, _has_pps, has_idr) =
                                     encoder::mf_encoder::inspect_nals(&h264_bytes);
+
+                                if has_idr || last_encode_log.elapsed() >= Duration::from_secs(2) {
+                                    println!(
+                                        "[VIDEO ENCODE] frame={} is_idr={} bytes={} total_frames={} total_bytes={} enc_dim={}x{}",
+                                        frame_number, has_idr, h264_bytes.len(), total_encoded_frames, total_encoded_bytes, current_enc_width, current_enc_height
+                                    );
+                                    last_encode_log = Instant::now();
+                                }
 
                                 // FIXED: TYPE 13 layout unchanged — type + width + height + size + pts + payload.
                                 let packet_size = 21 + h264_bytes.len();

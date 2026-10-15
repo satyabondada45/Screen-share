@@ -18,6 +18,7 @@ use wry::WebViewBuilder;
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
 
+#[allow(dead_code)]
 fn center_window_on_primary_monitor(window: &Window) {
     let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) else {
         return;
@@ -82,6 +83,15 @@ fn url_with_overlay_parameter(url: &str) -> String {
         overlay_url.push_str(fragment);
     }
     overlay_url
+}
+
+fn controller_overlay_url(controller_url: &str) -> String {
+    let base = if let Some(idx) = controller_url.rfind('/') {
+        &controller_url[..=idx]
+    } else {
+        controller_url
+    };
+    format!("{base}remote_session.html?overlay=1")
 }
 
 /// Runs the WebView application on the main thread.
@@ -220,10 +230,10 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                 }
                 "open_overlay" => {
                     if overlay_webview.is_none() {
-                        let url = url_with_overlay_parameter(&controller_url);
+                        let url = controller_overlay_url(&controller_url);
                         let overlay_win = match WindowBuilder::new()
                             .with_title("DeskStream Overlay")
-                            .with_inner_size(LogicalSize::new(360_u32, 90_u32))
+                            .with_inner_size(LogicalSize::new(360_u32, 320_u32))
                             .with_resizable(false)
                             .with_decorations(false)
                             .with_transparent(true)
@@ -284,8 +294,10 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                     }
                 }
                 "close_overlay" => {
+                    if let Some(win) = overlay_window.take() {
+                        win.set_visible(false);
+                    }
                     overlay_webview = None;
-                    overlay_window = None;
                 }
                 "drag_overlay" => {
                     if let Some(overlay) = &overlay_window {
@@ -313,10 +325,12 @@ pub fn run_webview(quit: Arc<AtomicBool>, local_url: String) {
                     );
                 }
                 "disconnect_b" => {
+                    if let Some(win) = overlay_window.take() {
+                        win.set_visible(false);
+                    }
                     overlay_webview = None;
-                    overlay_window = None;
                     let _ = webview.evaluate_script(
-                        "console.info('[DISCONNECT CALLER TRACE] source=END_SESSION_BUTTON timestamp=' + new Date().toISOString() + ' mode=B'); if(typeof disconnectBSession === 'function') disconnectBSession(null, 'END_SESSION_BUTTON');",
+                        "console.info('[DISCONNECT CALLER TRACE] source=END_SESSION_BUTTON timestamp=' + new Date().toISOString() + ' mode=B'); if(typeof window.deskStreamEndAnySession === 'function') { window.deskStreamEndAnySession('END_SESSION_BUTTON'); } else if(typeof disconnectBSession === 'function') { disconnectBSession(null, 'END_SESSION_BUTTON'); }",
                     );
                 }
                 _ => {}

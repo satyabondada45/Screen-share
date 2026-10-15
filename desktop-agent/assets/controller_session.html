@@ -125,7 +125,7 @@
         }
 
         .viewer-header {
-            display: none;
+            display: flex;
             align-items: center;
             justify-content: space-between;
             background: #fff;
@@ -510,6 +510,46 @@ window.addEventListener('DOMContentLoaded', () => {
         if (wc) wc.style.display = 'none';
     }
 });
+
+function windowIconMarkup(maximized) {
+    if (maximized) {
+        return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="8" width="12" height="12" rx="2" ry="2"></rect><rect x="4" y="4" width="12" height="12" rx="2" ry="2"></rect></svg>';
+    }
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>';
+}
+
+function updateMaximizeIcon(maximized) {
+    document.querySelectorAll('.maximize-window-btn').forEach(button => {
+        button.innerHTML = windowIconMarkup(maximized);
+        button.setAttribute('title', maximized ? 'Restore' : 'Maximize');
+        button.setAttribute('aria-label', maximized ? 'Restore window' : 'Maximize window');
+    });
+}
+
+function requestWindowState() {
+    if (window.ipc) {
+        window.ipc.postMessage('get_maximize_state');
+    } else {
+        updateMaximizeIcon(false);
+    }
+}
+
+function minimizeWindow() {
+    if (window.ipc) window.ipc.postMessage('minimize');
+}
+
+function maximizeWindow() {
+    if (window.ipc) {
+        window.ipc.postMessage('toggle_maximize');
+        setTimeout(requestWindowState, 150);
+    }
+}
+
+function closeWindow() {
+    if (window.ipc) window.ipc.postMessage('close');
+}
+
+window.updateMaximizeIcon = updateMaximizeIcon;
 </script>
 
 </head>
@@ -534,7 +574,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 </div>
                 <div class="device-meta" style="font-size: 11px; color: #64748b; margin-top: 2px; display: flex; align-items: center; gap: 4px;">
                     <span>Full Control</span> <span style="color: #cbd5e1;">|</span> <span id="headerDeviceId"></span> <span style="color: #cbd5e1;">|</span>
-                    <div class="dot" style="margin-left: 2px;"></div>
+                    <div class="dot" id="headerConnDot" style="margin-left: 2px;"></div>
                     <span class="dot-text" id="headerConnText">Connecting...</span>
                     <span id="sessionHealthStatus" role="status" title="Session heartbeat details" style="margin-left: 8px; color: #64748b;">Connecting · Ping N/A</span>
                 </div>
@@ -1637,7 +1677,10 @@ window.addEventListener('DOMContentLoaded', () => {
             return chatConnectionSnapshot();
         }
 
+        let isSendingChat = false;
+
         async function sendChat() {
+            if (isSendingChat) return;
 
             const msg =
                 chatInput.value.trim();
@@ -1653,10 +1696,14 @@ window.addEventListener('DOMContentLoaded', () => {
 
             }
 
+            isSendingChat = true;
+            if (sendChatBtn) sendChatBtn.disabled = true;
+
             stopLocalChatTyping();
 
-            const connection = await waitForChatConnection();
-            if (!connection.ready) {
+            try {
+                const connection = await waitForChatConnection();
+                if (!connection.ready) {
                 sessionDebug("A_CHAT_SOCKET_NOT_READY", {
                     component: "VIEWER",
                     direction: "SEND",
@@ -1721,57 +1768,56 @@ window.addEventListener('DOMContentLoaded', () => {
                 4
             );
 
+            console.info(
+                `[CHAT SEND START] time=${Date.now()} bytes=${msgBytes.length} ` +
+                `videoPackets=${streamStats.received_packets} decodedFrames=${browserPerf.decodedFrames} ` +
+                `renderedFrames=${browserPerf.renderedFrames} lastVideoAt=${videoDiagnostics.lastPacketAt || "none"} ` +
+                `lastDecodedAt=${videoDiagnostics.lastDecodedAt || "none"} ` +
+                `lastRenderedAt=${videoDiagnostics.lastRenderedAt || "none"} ` +
+                `receiveLoopAlive=${ws.readyState === WebSocket.OPEN} ` +
+                `parserBufferBytes=${wsRxBuffer.length}`
+            );
             try {
-                console.info(
-                    `[CHAT SEND START] time=${Date.now()} bytes=${msgBytes.length} ` +
-                    `videoPackets=${streamStats.received_packets} decodedFrames=${browserPerf.decodedFrames} ` +
-                    `renderedFrames=${browserPerf.renderedFrames} lastVideoAt=${videoDiagnostics.lastPacketAt || "none"} ` +
-                    `lastDecodedAt=${videoDiagnostics.lastDecodedAt || "none"} ` +
-                    `lastRenderedAt=${videoDiagnostics.lastRenderedAt || "none"} ` +
-                    `receiveLoopAlive=${ws.readyState === WebSocket.OPEN} ` +
-                    `parserBufferBytes=${wsRxBuffer.length}`
-                );
-                try {
-                    sessionDebug("A_TYPE16_SEND", {
-                        component: "VIEWER",
-                        direction: "SEND",
-                        trace_id: traceId,
-                        message_id: messageId,
-                        connection_id: String(activeWebSocketGeneration),
-                        packet_type: "16",
-                        payload_bytes: String(msgBytes.length),
-                        packet_bytes: String(pkt.length)
-                    });
-                    console.info(`[CHAT TRACE] trace_id=${traceId} message_id=${messageId} session_id=${DEVICE_ID} side=A direction=A_TO_B stage=SOCKET_WRITE_BEGIN type=16 packet_bytes=${pkt.length}`);
-                    ws.send(pkt);
-                    console.info(`[CHAT TRACE] trace_id=${traceId} message_id=${messageId} session_id=${DEVICE_ID} side=A direction=A_TO_B stage=SOCKET_WRITE_COMPLETE type=16 packet_bytes=${pkt.length}`);
-                    logAChatDiagnostic("A_CHAT_WS_SEND_SUCCESS", {
-                        packet_type: "16",
-                        message_length: String(msgBytes.length)
-                    });
-                } catch (error) {
-                    console.error(`[CHAT TRACE] trace_id=${traceId} message_id=${messageId} session_id=${DEVICE_ID} side=A direction=A_TO_B stage=SOCKET_WRITE_ERROR type=16 error=${error.name || "Error"}`);
-                    logAChatDiagnostic("A_CHAT_WS_SEND_FAILED", {
-                        packet_type: "16",
-                        trace_id: traceId,
-                        message_length: String(msgBytes.length),
-                        error: error.name || "Error"
-                    });
-                    throw error;
-                }
-                chatVideoSnapshot = {
-                    sentAt: Date.now(),
-                    packetCountBefore: streamStats.received_packets
-                };
-                console.info(`[CHAT TYPE 16 SENT] bytes=${pkt.length} payloadBytes=${msgBytes.length}`);
+                sessionDebug("A_TYPE16_SEND", {
+                    component: "VIEWER",
+                    direction: "SEND",
+                    trace_id: traceId,
+                    message_id: messageId,
+                    connection_id: String(activeWebSocketGeneration),
+                    packet_type: "16",
+                    payload_bytes: String(msgBytes.length),
+                    packet_bytes: String(pkt.length)
+                });
+                console.info(`[CHAT TRACE] trace_id=${traceId} message_id=${messageId} session_id=${DEVICE_ID} side=A direction=A_TO_B stage=SOCKET_WRITE_BEGIN type=16 packet_bytes=${pkt.length}`);
+                ws.send(pkt);
+                console.info(`[CHAT TRACE] trace_id=${traceId} message_id=${messageId} session_id=${DEVICE_ID} side=A direction=A_TO_B stage=SOCKET_WRITE_COMPLETE type=16 packet_bytes=${pkt.length}`);
+                logAChatDiagnostic("A_CHAT_WS_SEND_SUCCESS", {
+                    packet_type: "16",
+                    message_length: String(msgBytes.length)
+                });
+            } catch (error) {
+                console.error(`[CHAT TRACE] trace_id=${traceId} message_id=${messageId} session_id=${DEVICE_ID} side=A direction=A_TO_B stage=SOCKET_WRITE_ERROR type=16 error=${error.name || "Error"}`);
+                logAChatDiagnostic("A_CHAT_WS_SEND_FAILED", {
+                    packet_type: "16",
+                    trace_id: traceId,
+                    message_length: String(msgBytes.length),
+                    error: error.name || "Error"
+                });
+                throw error;
+            }
+            chatVideoSnapshot = {
+                sentAt: Date.now(),
+                packetCountBefore: streamStats.received_packets
+            };
+            console.info(`[CHAT TYPE 16 SENT] bytes=${pkt.length} payloadBytes=${msgBytes.length}`);
 
-                chatPanel.classList.add("open");
-                appendMessage(
-                    "sent",
-                    msg
-                );
+            chatPanel.classList.add("open");
+            appendMessage(
+                "sent",
+                msg
+            );
 
-                chatInput.value = "";
+            chatInput.value = "";
 
             } catch (error) {
                 logAChatDiagnostic("A_CHAT_SEND_FAILED", {
@@ -1783,6 +1829,9 @@ window.addEventListener('DOMContentLoaded', () => {
                     error
                 );
 
+            } finally {
+                isSendingChat = false;
+                if (sendChatBtn) sendChatBtn.disabled = false;
             }
 
         }
@@ -2422,6 +2471,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 `lastRenderedAgeMs=${videoDiagnostics.lastRenderedAt ? Date.now() - videoDiagnostics.lastRenderedAt : "n/a"} ` +
                 `chatPending=${chatVideoSnapshot !== null}`
             );
+            if (videoDiagnostics.lastRenderedAt && (Date.now() - videoDiagnostics.lastRenderedAt > 3500) && currentStreamState === "DISPLAYING" && ws && ws.readyState === WebSocket.OPEN) {
+                setStreamState("STREAM_STALLED");
+            }
             browserPerf.receiveWindow = 0;
             browserPerf.decodeWindow = 0;
             browserPerf.renderWindow = 0;
@@ -2484,7 +2536,11 @@ window.addEventListener('DOMContentLoaded', () => {
                     dot.style.background = "#ef4444";
                     txt.style.color = "#ef4444";
                     txt.textContent = "Disconnected";
-                } else if (newState === "DISPLAYING" || newState === "STREAM_ACTIVE" || newState === "DECODING") {
+                } else if (newState === "STREAM_STALLED") {
+                    dot.style.background = "#f59e0b";
+                    txt.style.color = "#f59e0b";
+                    txt.textContent = "Stalled";
+                } else if (newState === "DISPLAYING" || newState === "STREAM_ACTIVE" || newState === "DECODING" || newState === "WAITING_FOR_KEYFRAME") {
                     dot.style.background = "#22c55e";
                     txt.style.color = "#22c55e";
                     txt.textContent = "Connected";
@@ -2497,27 +2553,36 @@ window.addEventListener('DOMContentLoaded', () => {
 
             switch (newState) {
                 case "CONNECTING":
-                    setHud("CONNECTING...");
+                    setHud("CONNECTING TO RELAY...");
                     break;
                 case "AUTHENTICATING":
-                    setHud("AUTHENTICATING...");
+                    setHud("WAITING FOR HOST APPROVAL...");
                     break;
                 case "AUTHENTICATED":
                 case "ONLINE":
                 case "STREAM_REQUESTED":
-                    setHud("ONLINE • REQUESTING STREAM");
+                    setHud("SESSION ESTABLISHED • WAITING FOR VIDEO STREAM");
                     break;
                 case "STREAM_ACTIVE":
-                    setHud("STREAM ACTIVE • WAITING FOR KEYFRAME");
+                    setHud("SESSION ESTABLISHED • WAITING FOR FIRST VIDEO FRAME");
                     break;
                 case "WAITING_FOR_KEYFRAME":
-                    setHud("WAITING FOR KEYFRAME (SPS/PPS/IDR)...");
+                    setHud("RECEIVING VIDEO • WAITING FOR KEYFRAME...");
                     break;
                 case "DECODING":
                     setHud("DECODING VIDEO...");
                     break;
                 case "DISPLAYING":
-                    setHud(`LIVE  • ${renderWidth || 1920}×${renderHeight || 1080}`);
+                    setHud(`LIVE • ${renderWidth || 1920}×${renderHeight || 1080}`);
+                    break;
+                case "STREAM_STALLED":
+                    setHud("VIDEO STREAM STALLED • RECOVERING...");
+                    break;
+                case "DECODER_ERROR":
+                    setHud("VIDEO DECODER ERROR • RECOVERING...");
+                    break;
+                case "DISCONNECTED":
+                    setHud("SESSION DISCONNECTED");
                     break;
                 default:
                     setHud(newState);
@@ -2768,9 +2833,9 @@ window.addEventListener('DOMContentLoaded', () => {
             const payloadNals = extractAnnexBNals(dataBytes);
             const effectiveSPS = sps || payloadNals.find((nal) => (nal[0] & 0x1F) === 7) || null;
             const effectivePPS = pps || payloadNals.find((nal) => (nal[0] & 0x1F) === 8) || null;
-            const idrNal = payloadNals.find((nal) => (nal[0] & 0x1F) === 5) || null;
+            const idrNals = payloadNals.filter((nal) => (nal[0] & 0x1F) === 5);
 
-            if (!idrNal) {
+            if (idrNals.length === 0) {
                 return new Uint8Array(0);
             }
 
@@ -2778,7 +2843,7 @@ window.addEventListener('DOMContentLoaded', () => {
             const seen = new Set();
             const addIfUnique = (nal) => {
                 if (!nal || nal.length === 0) return;
-                const key = Array.from(nal).map((b) => b.toString(16).padStart(2, '0')).join('');
+                const key = Array.from(nal.subarray(0, Math.min(nal.length, 32))).map((b) => b.toString(16).padStart(2, '0')).join('');
                 if (seen.has(key)) return;
                 seen.add(key);
                 selected.push(nal);
@@ -2786,7 +2851,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
             if (effectiveSPS) addIfUnique(effectiveSPS);
             if (effectivePPS) addIfUnique(effectivePPS);
-            addIfUnique(idrNal);
+            for (const idr of idrNals) {
+                selected.push(idr);
+            }
 
             if (selected.length === 0) {
                 return new Uint8Array(0);
@@ -3249,13 +3316,16 @@ window.addEventListener('DOMContentLoaded', () => {
                     console.log(`[DECODER] configured = ${videoDecoder ? 'YES' : 'NO'}`);
                     console.log(`[DECODER] configure() starting`);
                     try {
-                        videoDecoder.configure({
+                        const decoderConfig = {
                             codec: codecString,
                             codedWidth: width,
                             codedHeight: height,
-                            description: avccDescription,
                             optimizeForLatency: true
-                        });
+                        };
+                        if (avccDescription && avccDescription.length >= 7) {
+                            decoderConfig.description = avccDescription;
+                        }
+                        videoDecoder.configure(decoderConfig);
                         console.log(`[VIDEO DECODER CONFIGURED]\nstate=${videoDecoder.state}\ncodec=${codecString}\nwidth=${width}\nheight=${height}`);
                         console.log(`[DECODER] configure() completed (state = ${videoDecoder.state})`);
                         decoderState = DecoderState.WAITING_FOR_KEYFRAME;
@@ -4039,6 +4109,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         lastViewerRxPacket = `type=${type} bytes=1`;
                         sessionDebug('A_SESSION_APPROVED', { result: 'TYPE1' });
                         console.log("[WS] Session approved by host.");
+                        startSessionHeartbeat();
                         setStreamState("STREAM_ACTIVE");
                         authTrace('A_AUTH_CONNECTED_STATE', {
                             connection_id: String(connectionGeneration),
@@ -4059,6 +4130,7 @@ window.addEventListener('DOMContentLoaded', () => {
                         });
                         lastViewerRxPacket = `type=${type} bytes=1`;
                         notifyParentSessionConnected();
+                        startSessionHeartbeat();
                         setStreamState("STREAM_ACTIVE");
                         authTrace('A_AUTH_CONNECTED_STATE', {
                             connection_id: String(connectionGeneration),
@@ -5905,7 +5977,12 @@ window.addEventListener('DOMContentLoaded', () => {
         if (chatInput) {
             chatInput.addEventListener("input", updateLocalChatTyping);
             chatInput.addEventListener("keydown", event => {
+                if (event.isComposing) return;
                 if (event.key === "Enter") {
+                    if (event.shiftKey) {
+                        return;
+                    }
+                    event.preventDefault();
                     sendChat();
                 }
             });

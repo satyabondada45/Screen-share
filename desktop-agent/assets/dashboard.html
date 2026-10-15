@@ -32,6 +32,9 @@
             --shadow-subtle: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
             --shadow-card: 0 4px 6px -1px rgba(0, 0, 0, 0.03), 0 2px 4px -2px rgba(0, 0, 0, 0.03);
             --shadow-modal: 0 25px 50px -12px rgba(15, 23, 42, 0.25);
+        }
+
+        .controller-session-layer {
             position: fixed;
             inset: 0;
             z-index: 1000;
@@ -2339,7 +2342,11 @@
                 const hasLiveBSession = Boolean(data && data.in_session === true);
                 const bSession = window.deskStreamBSession;
                 if (hasLiveBSession && bSession && !bSession.isActive) {
-                    bSession.enter();
+                    if (Object.keys(activeSessions).length === 0) {
+                        bSession.enter();
+                    }
+                } else if (!hasLiveBSession && bSession && bSession.isActive) {
+                    bSession.dismiss();
                 }
             } catch (e) {
                 _agentHealthFailures++;
@@ -3330,6 +3337,9 @@
             if (currentActiveTab === targetId) {
                 currentActiveTab = 'dashboard';
             }
+            if (window.ipc) {
+                try { window.ipc.postMessage('close_overlay'); } catch (e) {}
+            }
             fetchAllDevices();
         }
 
@@ -3339,6 +3349,26 @@
                 closeSessionTab(currentActiveTab);
             }
         }
+
+        // Authoritative shared session termination function for both Host and Controller sessions
+        window.deskStreamEndAnySession = function(source = 'END_SESSION_BUTTON') {
+            console.info('[DESKSTREAM] deskStreamEndAnySession invoked source=' + source);
+            if (typeof activeSessions === 'object' && activeSessions) {
+                const targetIds = Object.keys(activeSessions);
+                for (const targetId of targetIds) {
+                    closeSessionTab(targetId);
+                }
+            }
+            if (typeof endActiveSession === 'function') {
+                endActiveSession();
+            }
+            if (typeof disconnectBSession === 'function') {
+                disconnectBSession(null, source);
+            }
+            if (window.ipc) {
+                try { window.ipc.postMessage('close_overlay'); } catch (e) {}
+            }
+        };
         window.addEventListener('message', function (e) {
             if (e.origin !== window.location.origin) return;
             const sourceEntry = Object.entries(activeSessions).find(([, session]) =>
@@ -3350,7 +3380,10 @@
             if (e.data === 'session_connected') {
                 // Controller iframes own their stream UI; B-side state is synchronized from local health.
             } else if (e.data === 'session_ended') {
-                // B-side state is synchronized from local health and does not trust iframe messages.
+                finishClosingSessionTab(sourceTargetId, sourceSession);
+                if (window.ipc) {
+                    try { window.ipc.postMessage('close_overlay'); } catch (e) {}
+                }
             } else if (e.data && e.data.type === 'end_integrated_session') {
                 const targetId = String(e.data.targetId || sourceTargetId);
                 if (targetId !== sourceTargetId) return;
