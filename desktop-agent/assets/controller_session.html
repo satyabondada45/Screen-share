@@ -596,13 +596,21 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                     </svg>
                     File Transfer
                 </button>
-                <button class="btn" id="micBtn" onclick="toggleMicrophone()" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
+                <button class="btn btn-secondary" id="audioBtn" type="button" onclick="toggleAudio()" aria-pressed="false" title="Enable incoming session audio" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                        <line x1="23" y1="9" x2="17" y2="15"></line>
+                        <line x1="17" y1="9" x2="23" y2="15"></line>
+                    </svg>
+                    <span id="audioBtnText">Listen Audio</span>
+                </button>
+                <button class="btn" id="micBtn" onclick="toggleMicrophone()" aria-pressed="false" title="Enable microphone" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
                         <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
                         <line x1="12" y1="19" x2="12" y2="22"></line>
                     </svg>
-                    <span id="micBtnText">Mic</span>
+                    <span id="micBtnText">Mic Off</span>
                 </button>
                 <button class="btn" id="settingsBtn" onclick="toggleSettings()" style="background: transparent; border: 1px solid #cbd5e1; color: #1e293b; border-radius: 6px; padding: 4px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 60px; font-size: 10px; font-weight: 600; cursor: pointer;">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1076,7 +1084,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
         let audioCtx = null;
 
         let nextAudioTime = 0;
-        let isAudioEnabled = true;
+        let isAudioEnabled = false;
         let audioReceiverDiagnosticCount = 0;
         let audioSenderDiagnosticCount = 0;
         let activeAudioNodes = [];
@@ -1165,6 +1173,129 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             if (sessionPingRecentIds.size > 16) {
                 sessionPingRecentIds.delete(sessionPingRecentIds.values().next().value);
             }
+        }
+
+        let remoteSessionReservation = null;
+        let remoteSessionHeartbeatTimer = null;
+        let remoteSessionConcluding = false;
+
+        function getDeskStreamSessionHeaders() {
+            const headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
+            try {
+                const token = localStorage.getItem('ds_session_token');
+                if (token) {
+                    headers['X-DeskStream-Session'] = token;
+                }
+            } catch (_) {}
+            return headers;
+        }
+
+        async function reserveRemoteSession() {
+            if (remoteSessionReservation) return;
+            const requestToken = SESSION_PARAMS.get('token') || '';
+            const targetId = DEVICE_ID || SESSION_PARAMS.get('id') || '';
+            const mode = SESSION_PARAMS.get('mode') || (SESSION_MODE === 'B' ? 'reverse' : 'desktop');
+            const proposedKey = requestToken ? `${requestToken}:${crypto.randomUUID()}` : `sess_${targetId}_${Date.now()}_${crypto.randomUUID()}`;
+
+            try {
+                const response = await fetch('/api/sessions/start.php', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: getDeskStreamSessionHeaders(),
+                    body: JSON.stringify({
+                        device_id: targetId,
+                        session_key: proposedKey,
+                        request_token: requestToken,
+                        mode: mode
+                    })
+                });
+                const result = await response.json();
+                if (response.ok && result.status === 'success') {
+                    remoteSessionReservation = {
+                        sessionKey: result.session_key || proposedKey,
+                        requestToken: requestToken
+                    };
+                    console.info('[SESSION] Server session reservation established:', remoteSessionReservation.sessionKey);
+
+                    if (remoteSessionHeartbeatTimer) clearInterval(remoteSessionHeartbeatTimer);
+                    remoteSessionHeartbeatTimer = setInterval(refreshRemoteSessionReservation, 30000);
+                } else {
+                    console.warn('[SESSION] Server session reservation response not successful:', result);
+                }
+            } catch (err) {
+                console.error('[SESSION] Failed to reserve remote session with server:', err);
+            }
+        }
+
+        async function refreshRemoteSessionReservation() {
+            if (!remoteSessionReservation) return;
+            try {
+                const response = await fetch('/api/sessions/heartbeat.php', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: getDeskStreamSessionHeaders(),
+                    body: JSON.stringify({
+                        session_key: remoteSessionReservation.sessionKey,
+                        request_token: remoteSessionReservation.requestToken
+                    })
+                });
+                const result = await response.json();
+                if (!response.ok || result.status !== 'success') {
+                    console.warn('[SESSION] Server heartbeat warning:', result);
+                }
+            } catch (err) {
+                console.warn('[SESSION] Server heartbeat error:', err);
+            }
+        }
+
+        function concludeRemoteSession(reason = 'completed') {
+            if (!sessionWasEstablished) return;
+            if (remoteSessionConcluding) return;
+            remoteSessionConcluding = true;
+
+            if (remoteSessionHeartbeatTimer) {
+                clearInterval(remoteSessionHeartbeatTimer);
+                remoteSessionHeartbeatTimer = null;
+            }
+
+            const sessionKey = remoteSessionReservation ? remoteSessionReservation.sessionKey : '';
+            const requestToken = remoteSessionReservation ? remoteSessionReservation.requestToken : (SESSION_PARAMS.get('token') || '');
+            remoteSessionReservation = null;
+
+            const payload = JSON.stringify({
+                session_key: sessionKey,
+                request_token: requestToken,
+                status: reason === 'error' ? 'failed' : 'completed',
+                bandwidth_used_mb: 0
+            });
+
+            try {
+                const blob = new Blob([payload], { type: 'application/json' });
+                const sent = navigator.sendBeacon('/api/sessions/end.php', blob);
+                if (!sent) {
+                    fetch('/api/sessions/end.php', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: getDeskStreamSessionHeaders(),
+                        body: payload,
+                        keepalive: true
+                    }).catch(e => console.warn('[SESSION] Failed to conclude session:', e));
+                }
+            } catch (e) {
+                try {
+                    fetch('/api/sessions/end.php', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: getDeskStreamSessionHeaders(),
+                        body: payload,
+                        keepalive: true
+                    }).catch(e => console.warn('[SESSION] Fallback end session call failed:', e));
+                } catch (_) {}
+            }
+            console.info('[SESSION] Conclude remote session dispatched:', { sessionKey, requestToken, reason });
         }
 
         function renderSessionHealth(label, failureReason = "none") {
@@ -1842,45 +1973,41 @@ window.updateMaximizeIcon = updateMaximizeIcon;
         ============================================================ */
 
         async function toggleAudio() {
-            const audioBtn = document.getElementById("audioBtn");
-            if (!isAudioEnabled) {
-                try {
-                    if (!audioCtx || audioCtx.state === "closed") {
-                        audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-                            latencyHint: "interactive",
-                            sampleRate: 48000
-                        });
-                    }
-                    if (audioCtx.state === "suspended") {
-                        await audioCtx.resume();
-                    }
-                    if (audioCtx.state !== "running") {
-                        throw new Error(`Audio output context is ${audioCtx.state}`);
-                    }
-                    isAudioEnabled = true;
-                    if (audioBtn) {
-                        audioBtn.textContent = "🔊 Mute Audio";
-                        audioBtn.classList.remove("btn-secondary");
-                        audioBtn.classList.add("btn-warning");
-                    }
-                } catch (error) {
-                    console.error("[AUDIO] Init error:", error);
-                    isAudioEnabled = false;
-                    if (audioBtn) {
-                        audioBtn.textContent = "🔈 Listen Audio";
-                        audioBtn.classList.remove("btn-warning");
-                        audioBtn.classList.add("btn-secondary");
-                    }
-                }
-            } else {
+            if (isAudioEnabled) {
                 isAudioEnabled = false;
                 stopScheduledAudio();
-                if (audioBtn) {
-                    audioBtn.textContent = "🔈 Listen Audio";
-                    audioBtn.classList.remove("btn-warning");
-                    audioBtn.classList.add("btn-secondary");
-                }
+                renderAudioButton(false, "Enable incoming session audio");
+                return;
             }
+            try {
+                if (!audioCtx || audioCtx.state === "closed") {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                        latencyHint: "interactive"
+                    });
+                }
+                if (audioCtx.state === "suspended") {
+                    await audioCtx.resume();
+                }
+                if (audioCtx.state !== "running") {
+                    throw new Error(`Audio output context is ${audioCtx.state}`);
+                }
+                isAudioEnabled = true;
+                renderAudioButton(true, "Mute incoming session audio");
+                console.info(`[AUDIO RX] stage=playback_enabled sample_rate=${audioCtx.sampleRate} context_state=${audioCtx.state}`);
+            } catch (error) {
+                isAudioEnabled = false;
+                renderAudioButton(false, "Could not enable incoming audio; click to retry");
+                console.error("[AUDIO RX] stage=playback_enable_failed:", error);
+            }
+        }
+
+        function renderAudioButton(enabled, title) {
+            const audioBtn = document.getElementById("audioBtn");
+            if (!audioBtn) return;
+            audioBtn.setAttribute("aria-pressed", String(enabled));
+            audioBtn.title = title;
+            const text = document.getElementById("audioBtnText");
+            if (text) text.textContent = enabled ? "Mute Audio" : "Listen Audio";
         }
 
         function stopScheduledAudio() {
@@ -1898,6 +2025,8 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             }
             if (!isSocketOpen()) {
                 console.error("[MIC] Cannot enable microphone without an active session.");
+                addActivityLog("Microphone unavailable: no active session.");
+                renderMicrophoneButton(false, "Microphone unavailable: no active session");
                 return;
             }
             try {
@@ -1918,6 +2047,9 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                     sampleRate: 48000
                 });
                 await microphoneContext.resume();
+                if (microphoneContext.state !== "running") {
+                    throw new Error(`Microphone audio context is ${microphoneContext.state}`);
+                }
 
                 microphoneSource = microphoneContext.createMediaStreamSource(microphoneStream);
                 // 1024 buffer size (~21.3ms @ 48kHz) optimizes voice latency without CPU thrashing
@@ -1943,7 +2075,14 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                     packet.set(floatBytes, 11);
 
                     const tCreated = performance.now();
-                    ws.send(packet);
+                    try {
+                        ws.send(packet);
+                    } catch (error) {
+                        console.error("[MIC] Audio packet send failed:", error);
+                        addActivityLog("Microphone transmission stopped because the session connection failed.");
+                        stopMicrophone();
+                        return;
+                    }
                     const tSent = performance.now();
 
                     audioSenderDiagnosticCount = (audioSenderDiagnosticCount || 0) + 1;
@@ -1956,13 +2095,25 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                 microphoneProcessor.connect(silentOutput);
                 silentOutput.connect(microphoneContext.destination);
 
-                const micText = document.getElementById("micBtnText");
-                if (micText) micText.textContent = "Mic On";
+                renderMicrophoneButton(true, "Disable microphone");
                 console.log("[MIC] TYPE 17 microphone transmission enabled (1024-sample low-latency stream).");
             } catch (error) {
                 stopMicrophone();
+                const message = error instanceof Error ? error.message : String(error);
+                renderMicrophoneButton(false, `Microphone unavailable: ${message}`);
+                addActivityLog(`Microphone unavailable: ${message}`);
                 console.error("[MIC] Failed to enable microphone:", error);
             }
+        }
+
+        function renderMicrophoneButton(enabled, title) {
+            const micBtn = document.getElementById("micBtn");
+            if (micBtn) {
+                micBtn.setAttribute("aria-pressed", String(enabled));
+                micBtn.title = title;
+            }
+            const micText = document.getElementById("micBtnText");
+            if (micText) micText.textContent = enabled ? "Mic On" : "Mic Off";
         }
 
         function stopMicrophone() {
@@ -1980,17 +2131,41 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                 microphoneStream = null;
             }
             if (microphoneContext) {
-                void microphoneContext.close();
+                const context = microphoneContext;
                 microphoneContext = null;
+                if (context.state !== "closed") {
+                    void context.close().catch(error => {
+                        console.error("[MIC] Failed to close microphone context:", error);
+                    });
+                }
             }
-            const micText = document.getElementById("micBtnText");
-            if (micText) micText.textContent = "Mic Off";
+            renderMicrophoneButton(false, "Enable microphone");
             console.log("[MIC] Microphone stopped.");
         }
 
         function receiveReverseRequest() {
-            if (reverseRequestPending || !isSocketOpen() || !websocketAuthenticated) return;
+            if (!isSocketOpen() || !websocketAuthenticated) return;
+            if (reverseRequestPending || reverseRequestOutstanding || reverseTransitionPending) {
+                try {
+                    ws.send(new Uint8Array([31, 0]));
+                    window.parent.postMessage({
+                        type: "reverse_session_trace",
+                        stage: "SIMULTANEOUS_REQUEST_DECLINED",
+                        session_id: DEVICE_ID
+                    }, "*");
+                    console.warn(`[REVERSE TRACE] role=VIEWER direction=SEND message_type=31 request_id=not_carried_by_wire active_session_id=not_carried_by_protocol peer_system_id=${DEVICE_ID || 'unknown'} decision=0 result=simultaneous_request_declined`);
+                } catch (error) {
+                    console.error("[REVERSE] Could not decline a simultaneous reverse request:", error);
+                }
+                return;
+            }
             reverseRequestPending = true;
+            window.parent.postMessage({
+                type: "reverse_session_trace",
+                stage: "TYPE30_RECEIVED",
+                session_id: DEVICE_ID
+            }, "*");
+            console.info(`[REVERSE TRACE] role=VIEWER direction=RECV message_type=30 request_id=not_carried_by_wire active_session_id=not_carried_by_protocol peer_system_id=${DEVICE_ID || 'unknown'} result=approval_prompt_open`);
             document.getElementById("reversePermissionDialog").style.display = "flex";
         }
 
@@ -2001,6 +2176,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             try {
                 ws.send(new Uint8Array([30]));
                 reverseRequestOutstanding = true;
+                console.info(`[REVERSE TRACE] role=VIEWER direction=SEND message_type=30 request_id=not_carried_by_wire active_session_id=not_carried_by_protocol peer_system_id=${DEVICE_ID || 'unknown'} result=websocket_send_called`);
                 console.info("[REVERSE] Request sent. Waiting for the remote user to approve.");
                 addActivityLog("Reverse-control request sent.");
             } catch (error) {
@@ -2013,6 +2189,13 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             if (!reverseRequestPending || !isSocketOpen()) return;
             try {
                 ws.send(new Uint8Array([31, accepted ? 1 : 0]));
+                window.parent.postMessage({
+                    type: "reverse_session_trace",
+                    stage: accepted ? "TYPE31_ACCEPT_SENT" : "TYPE31_REJECT_SENT",
+                    session_id: DEVICE_ID,
+                    decision: accepted ? 1 : 0
+                }, "*");
+                console.info(`[REVERSE TRACE] role=VIEWER direction=SEND message_type=31 request_id=not_carried_by_wire active_session_id=not_carried_by_protocol peer_system_id=${DEVICE_ID || 'unknown'} decision=${accepted ? 1 : 0} result=websocket_send_called`);
             } catch (error) {
                 console.error("[REVERSE] Failed to send permission decision:", error);
                 return;
@@ -2022,8 +2205,14 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             if (accepted) {
                 reverseTransitionPending = true;
                 window.parent.postMessage({
-                    type: "reverse_remote_approved",
-                    requester_system_id: DEVICE_ID
+                    type: "reverse_session_trace",
+                    stage: "APPROVAL_POSTED",
+                    session_id: DEVICE_ID
+                }, "*");
+                console.info(`[REVERSE TRACE] role=VIEWER direction=LOCAL message_type=31 request_id=not_carried_by_wire active_session_id=not_carried_by_protocol peer_system_id=${DEVICE_ID || 'unknown'} result=approval_posted_to_dashboard`);
+                window.parent.postMessage({
+                    type: "reverse_handoff_initiate",
+                    target_system_id: DEVICE_ID
                 }, "*");
             }
         }
@@ -3547,24 +3736,21 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                 return;
             }
 
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-                    latencyHint: "interactive",
-                    sampleRate: sampleRate || 48000
-                });
-            }
-
-            if (audioCtx.state === "suspended") {
-                audioCtx.resume().catch(error => {
-                    isAudioEnabled = false;
-                    stopScheduledAudio();
-                    console.error("[AUDIO] Could not resume session output:", error);
-                });
+            if (!audioCtx || audioCtx.state !== "running") {
+                console.warn(`[AUDIO RX] stage=playback_unavailable enabled=${isAudioEnabled} context_state=${audioCtx ? audioCtx.state : "missing"} packet_bytes=${byteLen}`);
+                return;
             }
 
             const frames = Math.floor(floatArray.length / channels);
             if (frames <= 0 || floatArray.length % channels !== 0) {
                 return;
+            }
+            let peak = 0;
+            for (let index = 0; index < floatArray.length; index++) {
+                const sample = floatArray[index];
+                const safeSample = Number.isFinite(sample) ? Math.max(-1, Math.min(1, sample)) : 0;
+                floatArray[index] = safeSample;
+                peak = Math.max(peak, Math.abs(safeSample));
             }
 
             const audioBuffer = audioCtx.createBuffer(
@@ -3621,7 +3807,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             audioReceiverDiagnosticCount = (audioReceiverDiagnosticCount || 0) + 1;
             if (audioReceiverDiagnosticCount % 100 === 1) {
                 const queueDurationMs = Math.max(0, (nextAudioTime - curTime) * 1000);
-                console.log(`[B-AUDIO] rx: ${tRx.toFixed(2)}ms | decode: ${(tDecodeEnd - tDecodeStart).toFixed(2)}ms | scheduled_at: ${scheduledTime.toFixed(3)}s (cur: ${curTime.toFixed(3)}s) | queue_depth: ${queueDurationMs.toFixed(1)}ms | chunk_dur: ${(audioBuffer.duration * 1000).toFixed(1)}ms`);
+                console.log(`[AUDIO RX] stage=scheduled packet=${audioReceiverDiagnosticCount} sample_rate=${sampleRate} channels=${channels} frames=${frames} peak=${peak.toFixed(3)} receive_ms=${tRx.toFixed(2)} decode_ms=${(tDecodeEnd - tDecodeStart).toFixed(2)} queue_ms=${queueDurationMs.toFixed(1)} chunk_ms=${(audioBuffer.duration * 1000).toFixed(1)}`);
             }
         }
 
@@ -4091,6 +4277,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                                 ready_state: String(ws.readyState)
                             });
                             console.error("[A DISCONNECT TRACE]", { source: "TYPE99_RECEIVED", function: "ws.onmessage", thread: "main", session: DEVICE_ID, is_connected: websocketAuthenticated, is_in_session: sessionWasEstablished, timestamp: new Date().toISOString() });
+                            concludeRemoteSession("remote_ended");
                             ws.close(1000, "Remote session ended");
                             traceType99(
                                 "CLOSE_REQUEST_COMPLETE",
@@ -4123,6 +4310,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                         clearAuthenticationTimeout();
                         websocketAuthenticated = true;
                         sessionWasEstablished = true;
+                        reserveRemoteSession();
                         authTrace('A_AUTH_ACCEPTED', {
                             connection_id: String(connectionGeneration),
                             packet_type: "1",
@@ -4145,6 +4333,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                         clearAuthenticationTimeout();
                         websocketAuthenticated = true;
                         sessionWasEstablished = true;
+                        reserveRemoteSession();
                         authTrace('A_AUTH_ACCEPTED', {
                             connection_id: String(connectionGeneration),
                             packet_type: "2",
@@ -4485,6 +4674,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
 
             ws.onclose = function (event) {
                 clearAuthenticationTimeout();
+                concludeRemoteSession("connection_closed");
                 traceSessionLifecycle('WEBSOCKET_CLOSED', 'CLOSED', 'ws.onclose', diagnosticCloseReason(event.reason));
                 authTrace('A_AUTH_WEBSOCKET_CLOSED', {
                     connection_id: String(connectionGeneration),
@@ -4750,6 +4940,17 @@ window.updateMaximizeIcon = updateMaximizeIcon;
                     console.log(`[WS] state at close: isStreaming=${isStreaming} decoderState=${decoderState} videoFrameCount=${videoFrameCount} rxPackets=${browserPerf.rxPackets}`);
 
                     if (isStreaming) {
+                        if (connectionGeneration === activeWebSocketGeneration) {
+                            stopMicrophone();
+                            isAudioEnabled = false;
+                            stopScheduledAudio();
+                            renderAudioButton(false, "Enable incoming session audio");
+                            if (audioCtx && audioCtx.state === "running") {
+                                audioCtx.suspend().catch(error => {
+                                    console.error("[AUDIO RX] Could not suspend output after disconnect:", error);
+                                });
+                            }
+                        }
                         setStreamState("DISCONNECTED");
                     }
 
@@ -4762,7 +4963,9 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             releaseAllKeys();
             isStreaming = false;
             stopMicrophone();
+            isAudioEnabled = false;
             stopScheduledAudio();
+            renderAudioButton(false, "Enable incoming session audio");
             if (audioCtx && audioCtx.state === "running") {
                 audioCtx.suspend().catch(error => console.error("[AUDIO] Could not suspend session output:", error));
             }
@@ -6114,6 +6317,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
         function endSessionAndRedirect(event) {
             if (event && event.preventDefault) event.preventDefault();
             localSessionEndRequested = true;
+            concludeRemoteSession("user_requested_end");
             traceSessionLifecycle('END_REQUESTED', 'CLOSING', 'endSessionAndRedirect', 'user_requested_end');
             sessionDisconnectReason = "explicit_session_end";
             const targetId = new URLSearchParams(window.location.search).get("id");
@@ -6258,6 +6462,7 @@ window.updateMaximizeIcon = updateMaximizeIcon;
             if (controllerPageCleanupStarted) return;
             controllerPageCleanupStarted = true;
             controllerPageLeaving = true;
+            concludeRemoteSession(source || "page_exit");
             if (sessionDisconnectReason === "unknown_termination") {
                 sessionDisconnectReason = "controller_exited";
             }

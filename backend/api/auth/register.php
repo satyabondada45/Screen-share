@@ -8,7 +8,7 @@ $db = $conn ?? $pdo ?? null;
 
 if (!$db) {
     http_response_code(500);
-    header("Location: ../../../frontend/register.php?error=" . urlencode("Database connection unavailable."));
+    header("Location: /DeskStream/register.php?error=" . urlencode("Database connection unavailable."));
     exit();
 }
 
@@ -19,14 +19,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (stripos($contentType, 'application/json') !== false) {
         $jsonInput = json_decode(file_get_contents('php://input'), true);
         $username = trim($jsonInput['username'] ?? $jsonInput['name'] ?? '');
-        $email    = trim($jsonInput['email'] ?? '');
+        $email = trim($jsonInput['email'] ?? '');
         $password = $jsonInput['password'] ?? '';
-        $isJson   = true;
+        $isJson = true;
     } else {
         $username = trim($_POST['username'] ?? $_POST['name'] ?? '');
-        $email    = trim($_POST['email'] ?? '');
+        $email = trim($_POST['email'] ?? '');
         $password = $_POST['password'] ?? '';
-        $isJson   = false;
+        $isJson = false;
     }
 
     // Basic validation
@@ -36,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(["status" => "error", "message" => "All fields are required."]);
             exit();
         }
-        header("Location: ../../../frontend/register.php?error=" . urlencode("All fields are required."));
+        header("Location: /DeskStream/register.php?error=" . urlencode("All fields are required."));
         exit();
     }
 
@@ -46,7 +46,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(["status" => "error", "message" => "Invalid email format."]);
             exit();
         }
-        header("Location: ../../../frontend/register.php?error=" . urlencode("Invalid email format."));
+        header("Location: /DeskStream/register.php?error=" . urlencode("Invalid email format."));
         exit();
     }
 
@@ -62,13 +62,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(["status" => "error", "message" => "Email is already registered."]);
                 exit();
             }
-            header("Location: ../../../frontend/register.php?error=" . urlencode("Email is already registered."));
+            header("Location: /DeskStream/register.php?error=" . urlencode("Email is already registered."));
             exit();
         }
 
         // Generate a permanent unique User ID (collision-safe 9-digit)
         do {
-            $uniqueUserId = (string)random_int(100000000, 999999999);
+            $uniqueUserId = (string) random_int(100000000, 999999999);
             $check = $db->prepare("SELECT id FROM users WHERE unique_user_id = ? LIMIT 1");
             $check->execute([$uniqueUserId]);
         } while ($check->fetch());
@@ -80,28 +80,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $insert_stmt = $db->prepare("INSERT INTO users (name, username, email, password_hash, unique_user_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
         $insert_stmt->execute([$username, $username, $email, $password_hash, $uniqueUserId]);
 
-        $newUserId = (int)$db->lastInsertId();
-
-        // Assign Welcome Plan to eligible new account
-        require_once __DIR__ . '/../../services/SubscriptionService.php';
-        $welcomeSub = SubscriptionService::assignWelcomePlanIfEligible($newUserId);
-
         if ($isJson) {
             echo json_encode([
                 "status" => "success",
                 "message" => "Registration successful! Please login.",
-                "user_id" => $newUserId,
-                "unique_user_id" => $uniqueUserId,
-                "subscription" => $welcomeSub ? [
-                    "plan_name" => $welcomeSub['plan_name'],
-                    "expires_at" => $welcomeSub['expires_at']
-                ] : null
+                "user_id" => $db->lastInsertId(),
+                "unique_user_id" => $uniqueUserId
             ]);
             exit();
         }
 
         // Redirect to login with success message
-        header("Location: ../../../frontend/index.php?success=" . urlencode("Registration successful! Please login."));
+        header("Location: /DeskStream/index.php?success=" . urlencode("Registration successful! Please login."));
         exit();
 
     } catch (PDOException $e) {
@@ -110,11 +100,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(["status" => "error", "message" => "Database error: " . $e->getMessage()]);
             exit();
         }
-        header("Location: ../../../frontend/register.php?error=" . urlencode("Database error: " . $e->getMessage()));
+        header("Location: /DeskStream/register.php?error=" . urlencode("Database error: " . $e->getMessage()));
         exit();
     }
 } else {
     // If someone accesses the API file directly via GET
-    header("Location: ../../../frontend/register.php");
+    header("Location: /DeskStream/register.php");
     exit();
 }

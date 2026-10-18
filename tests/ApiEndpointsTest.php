@@ -54,30 +54,51 @@ if (($resCurrUnauth['json']['status'] ?? '') !== 'error') {
 echo "[PASS] current.php rejected unauthenticated request.\n";
 
 // 3. Test current.php authorized
-$resCurrAuth = runEndpoint(__DIR__ . '/../backend/api/subscriptions/current.php', ['user_id' => 1]);
+$resCurrAuth = runEndpoint(__DIR__ . '/../backend/api/subscriptions/current.php', ['user_id' => 1], [], ['user_id' => 1]);
 if (($resCurrAuth['json']['status'] ?? '') !== 'success' || !isset($resCurrAuth['json']['entitlements'])) {
     echo "[FAIL] current.php authorized failed: " . $resCurrAuth['stdout'] . "\n";
     exit(1);
 }
 echo "[PASS] current.php resolved entitlements for user 1 successfully.\n";
 
-// 4. Test features.php
-$resFeatures = runEndpoint(__DIR__ . '/../backend/api/subscriptions/features.php', ['user_id' => 1]);
+// 4. Test that callers cannot request another account's entitlement data
+$resCurrOtherUser = runEndpoint(__DIR__ . '/../backend/api/subscriptions/current.php', ['user_id' => 2], [], ['user_id' => 1]);
+if (($resCurrOtherUser['json']['status'] ?? '') !== 'success'
+    || (int)($resCurrOtherUser['json']['account']['id'] ?? 0) !== 1) {
+    echo "[FAIL] current.php did not bind the subscription to the authenticated user: " . $resCurrOtherUser['stdout'] . "\n";
+    exit(1);
+}
+echo "[PASS] current.php ignored a forged user ID and returned only the authenticated account.\n";
+
+// 5. Test features.php
+$resFeatures = runEndpoint(__DIR__ . '/../backend/api/subscriptions/features.php', ['user_id' => 1], [], ['user_id' => 1]);
 if (($resFeatures['json']['status'] ?? '') !== 'success' || !isset($resFeatures['json']['entitlements']['can_record'])) {
     echo "[FAIL] features.php failed: " . $resFeatures['stdout'] . "\n";
     exit(1);
 }
 echo "[PASS] features.php returned valid feature flags.\n";
 
-// 5. Test subscribe.php without payment proof on paid plan
+$monthlyPlanId = 0;
+foreach ($resPlans['json']['plans'] as $plan) {
+    if (($plan['slug'] ?? '') === 'monthly') {
+        $monthlyPlanId = (int)$plan['id'];
+        break;
+    }
+}
+if ($monthlyPlanId < 1) {
+    echo "[FAIL] plans.php did not return the Monthly Plan.\n";
+    exit(1);
+}
+
+// 6. Test subscribe.php without payment proof on paid plan
 $resSubNoPay = runEndpoint(__DIR__ . '/../backend/api/subscriptions/subscribe.php', [], [
     'user_id' => 1,
-    'plan_id' => 6 // Monthly Plan (₹100)
-]);
-if (($resSubNoPay['json']['status'] ?? '') !== 'error' || strpos($resSubNoPay['json']['message'] ?? '', 'Payment required') === false) {
+    'plan_id' => $monthlyPlanId
+], ['user_id' => 1]);
+if (($resSubNoPay['json']['status'] ?? '') !== 'error' || strpos($resSubNoPay['json']['message'] ?? '', 'Razorpay') === false) {
     echo "[FAIL] subscribe.php did not enforce payment proof for paid plan: " . $resSubNoPay['stdout'] . "\n";
     exit(1);
 }
 echo "[PASS] subscribe.php enforced payment verification for paid plan.\n";
 
-echo "All 5 Subscription API Endpoint checks passed!\n";
+echo "All 6 Subscription API Endpoint checks passed!\n";

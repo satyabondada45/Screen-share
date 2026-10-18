@@ -1490,6 +1490,34 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "Back up audio files before edits",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$ErrorActionPreference='Stop'; Copy-Item -LiteralPath 'C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\src\\main.rs' -Destination 'C:\\xampp\\htdocs\\Screen Share\\desktop-agent\\src\\main.rs.bak-before-bidirectional-audio-20261016' -ErrorAction Stop; Copy-Item -LiteralPath 'C:\\xampp\\htdocs\\Screen Share\\frontend\\remote\\session.php' -Destination 'C:\\xampp\\htdocs\\Screen Share\\frontend\\remote\\session.php.bak-before-bidirectional-audio-20261016' -ErrorAction Stop; Write-Output 'Audio source backups created.'"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Temporary DeskStream GUI Release Build",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--release",
+				"--manifest-path",
+				"C:\\xampp\\htdocs\\Screen Share\\screenshare-gui\\Cargo.toml"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build"
 		}
 	]
 }

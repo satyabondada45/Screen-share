@@ -2,13 +2,16 @@
 // DeskStream - Modern Remote Desktop Dashboard
 // Fully Dynamic PHP implementation with live database polling and interactive signaling modals
 
+require_once __DIR__ . '/api_path.php';
+$apiBasePath = deskstream_api_base_path();
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
 // Ensure user is authenticated before accessing dashboard
 if (empty($_SESSION['user_id'])) {
-    header("Location: /DeskStream/index.php");
+    header("Location: " . deskstream_frontend_url('index.php'));
     exit();
 }
 
@@ -17,15 +20,8 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 header("Cache-Control: post-check=0, pre-check=0", false);
 header("Pragma: no-cache");
 
-$dbPath = __DIR__ . '/DeskStream/config/database.php';
-if (!file_exists($dbPath)) {
-    $dbPath = __DIR__ . '/DeskStream/config/database.php';
-}
-
 if (!isset($pdo) || $pdo === null) {
-    if (file_exists($dbPath)) {
-        require $dbPath;
-    }
+    require_once deskstream_config_file('database.php');
 }
 
 // Authenticated user session
@@ -2051,7 +2047,7 @@ function getRelativeTime($timestamp)
             aliasInput.style.display = 'none';
 
             try {
-                await fetch('/DeskStream/api/devices/update.php', {
+                await fetch(<?= json_encode($apiBasePath . '/devices/update.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ device_uid: currentHostUid, alias: newAlias })
@@ -2082,7 +2078,7 @@ function getRelativeTime($timestamp)
             console.info('[CONNECT] stage=SESSION_REQUEST_STARTED target_id=' + cleanId + ' timestamp=' + new Date().toISOString());
 
             try {
-                const res = await fetch('/DeskStream/api/connections/request.php', {
+                const res = await fetch(<?= json_encode($apiBasePath . '/connections/request.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -2118,7 +2114,7 @@ function getRelativeTime($timestamp)
                     }
 
                     try {
-                        const statusRes = await fetch(`/DeskStream/api/connections/status.php?token=${encodeURIComponent(token)}`);
+                        const statusRes = await fetch(<?= json_encode($apiBasePath . '/connections/status.php?token=', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?> + encodeURIComponent(token));
                         const statusData = await statusRes.json();
 
                         if (!statusRes.ok || statusData.status !== 'success') {
@@ -2191,7 +2187,7 @@ function getRelativeTime($timestamp)
                 console.log("[REQUEST] REJECT clicked");
                 console.log("[REQUEST] Sending REJECT; request token present:", Boolean(currentRequestToken));
                 try {
-                    await fetch('/DeskStream/api/connections/reject.php', {
+                    await fetch(<?= json_encode($apiBasePath . '/connections/reject.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -2218,7 +2214,7 @@ function getRelativeTime($timestamp)
                 console.log("[REQUEST] ACCEPT clicked");
                 console.log("[REQUEST] Sending ACCEPT; request token present:", Boolean(requestToken));
                 try {
-                    const response = await fetch('/DeskStream/api/connections/accept.php', {
+                    const response = await fetch(<?= json_encode($apiBasePath . '/connections/accept.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -2374,7 +2370,7 @@ function getRelativeTime($timestamp)
             const registrationPromise = (async () => {
                 let responseText = '';
                 try {
-                    const res = await fetch('/DeskStream/api/devices/register.php', {
+                    const res = await fetch(<?= json_encode($apiBasePath . '/devices/register.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -2472,7 +2468,7 @@ function getRelativeTime($timestamp)
                         </svg>
                         Agent Not Installed
                     </span>
-                    <a href="https://friendssoftwaresolutions.in/DeskStream/api/agent/download.php" class="topbar-tab-btn" style="margin-left:auto; background:var(--primary); color:#fff; cursor:pointer; text-decoration:none;">
+                    <a href="<?= htmlspecialchars($apiBasePath . '/agent/download.php', ENT_QUOTES, 'UTF-8') ?>" class="topbar-tab-btn" style="margin-left:auto; background:var(--primary); color:#fff; cursor:pointer; text-decoration:none;">
                         Download Installer
                     </a>
                 `;
@@ -2500,7 +2496,7 @@ function getRelativeTime($timestamp)
             updateHostBadge('starting');
 
             try {
-                const launchRes = await fetch('/DeskStream/api/agent/launch.php', {
+                const launchRes = await fetch(<?= json_encode($apiBasePath . '/agent/launch.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                     method: 'POST'
                 });
                 const launchData = await launchRes.json();
@@ -2565,7 +2561,7 @@ function getRelativeTime($timestamp)
             if (deviceRefreshInProgress) return;
             deviceRefreshInProgress = true;
             try {
-                const res = await fetch('/DeskStream/api/devices/list.php');
+                const res = await fetch(<?= json_encode($apiBasePath . '/devices/list.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>);
                 if (res.status === 401) {
                     window.location.href = 'index.php';
                     deviceRefreshInProgress = false;
@@ -2646,7 +2642,7 @@ function getRelativeTime($timestamp)
             // Check for incoming connection requests targeted to this computer
             if (currentHostUid && currentHostUid !== 'Connecting...') {
                 try {
-                    const incRes = await fetch(`/DeskStream/api/connections/incoming.php?system_id=${encodeURIComponent(currentHostUid)}`);
+                    const incRes = await fetch(<?= json_encode($apiBasePath . '/connections/incoming.php?system_id=', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?> + encodeURIComponent(currentHostUid));
                     const incData = await incRes.json();
                     if (incData.has_request && incData.request) {
                         const req = incData.request;
@@ -2767,7 +2763,7 @@ function getRelativeTime($timestamp)
             showToast('Establishing local session...');
 
             try {
-                const res = await fetch('/DeskStream/api/connections/request.php', {
+                const res = await fetch(<?= json_encode($apiBasePath . '/connections/request.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/api_path.php';
+$apiBasePath = deskstream_api_base_path();
 $error = isset($_GET['error']) ? htmlspecialchars($_GET['error']) : '';
 $success = isset($_GET['success']) ? htmlspecialchars($_GET['success']) : '';
 ?>
@@ -101,7 +103,7 @@ $success = isset($_GET['success']) ? htmlspecialchars($_GET['success']) : '';
             </div>
         <?php endif; ?>
 
-        <form action="../backend/api/auth/login.php" method="POST">
+        <form action="<?= htmlspecialchars($apiBasePath . '/auth/login.php', ENT_QUOTES, 'UTF-8') ?>" method="POST">
             <input type="email" name="email" placeholder="Email Address" required>
             <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Log In</button>

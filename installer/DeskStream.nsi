@@ -73,6 +73,8 @@ Section "DeskStream (required)"
   
   ; Include the executable built by Cargo
   File "${DESKSTREAM_PAYLOAD_DIR}\DeskStream.exe"
+  IfFileExists "${DESKSTREAM_PAYLOAD_DIR}\deskstream-updater.exe" 0 +2
+  File "${DESKSTREAM_PAYLOAD_DIR}\deskstream-updater.exe"
   
   ; Copy icon to use for shortcuts if it exists
   IfFileExists "..\desktop-agent\assets\icon.ico" 0 +2
@@ -104,6 +106,7 @@ Section "Uninstall"
   
   ; Remove executable and icon
   Delete "$INSTDIR\DeskStream.exe"
+  Delete "$INSTDIR\deskstream-updater.exe"
   Delete "$INSTDIR\icon.ico"
   Delete "$INSTDIR\uninstall.exe"
   

@@ -240,6 +240,33 @@ pub fn clear_session_reverse_request_pending() {
     SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
 }
 
+pub fn begin_session_reverse_request_with_id(request_id: &str) -> Result<bool, String> {
+    if request_id.is_empty()
+        || request_id.len() > 64
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("reverse request ID must be 1-64 safe ASCII characters".to_string());
+    }
+    let mut current_id = SESSION_REVERSE_REQUEST_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "reverse request ID lock poisoned".to_string())?;
+    if SESSION_REVERSE_REQUEST_OUTSTANDING.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    *current_id = Some(request_id.to_string());
+    if SESSION_REVERSE_REQUEST_OUTSTANDING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        *current_id = None;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 pub fn begin_session_reverse_request() -> bool {
     SESSION_REVERSE_REQUEST_OUTSTANDING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -249,10 +276,73 @@ pub fn begin_session_reverse_request() -> bool {
 pub fn cancel_session_reverse_request() {
     SESSION_REVERSE_DECISION.store(0, Ordering::Release);
     SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+    if let Ok(mut request_id) = SESSION_REVERSE_REQUEST_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *request_id = None;
+    }
 }
 
-pub fn set_session_reverse_decision(accepted: bool) {
-    SESSION_REVERSE_DECISION.store(if accepted { 1 } else { 2 }, Ordering::Release);
+pub fn cancel_session_reverse_request_with_id(request_id: &str) -> Result<bool, String> {
+    let mut current_id = SESSION_REVERSE_REQUEST_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "reverse request ID lock poisoned".to_string())?;
+    if current_id.as_deref() != Some(request_id) {
+        return Ok(false);
+    }
+    SESSION_REVERSE_DECISION.store(0, Ordering::Release);
+    SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+    *current_id = None;
+    Ok(true)
+}
+
+pub fn acknowledge_session_reverse_decision_with_id(request_id: &str) -> Result<bool, String> {
+    let mut current_id = SESSION_REVERSE_REQUEST_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "reverse request ID lock poisoned".to_string())?;
+    if current_id.as_deref() != Some(request_id)
+        || SESSION_REVERSE_DECISION.load(Ordering::Acquire) == 0
+    {
+        return Ok(false);
+    }
+    SESSION_REVERSE_DECISION.store(0, Ordering::Release);
+    SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+    *current_id = None;
+    Ok(true)
+}
+
+pub fn session_reverse_request_id() -> Result<Option<String>, String> {
+    SESSION_REVERSE_REQUEST_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map(|request_id| request_id.clone())
+        .map_err(|_| "reverse request ID lock poisoned".to_string())
+}
+
+pub fn set_session_reverse_decision(accepted: bool) -> bool {
+    if !SESSION_REVERSE_REQUEST_OUTSTANDING.load(Ordering::Acquire) {
+        return false;
+    }
+    let decision = if accepted { 1 } else { 2 };
+    if SESSION_REVERSE_DECISION
+        .compare_exchange(0, decision, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    if !SESSION_REVERSE_REQUEST_OUTSTANDING.load(Ordering::Acquire) {
+        let _ = SESSION_REVERSE_DECISION.compare_exchange(
+            decision,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        return false;
+    }
+    true
 }
 
 pub fn take_session_reverse_decision() -> u8 {
@@ -261,6 +351,41 @@ pub fn take_session_reverse_decision() -> u8 {
         SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
     }
     decision
+}
+
+pub fn take_session_reverse_decision_with_peer() -> Result<(u8, Option<String>), String> {
+    let mut peer = SESSION_PEER_SYSTEM_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "session peer ID lock poisoned".to_string())?;
+    let decision = SESSION_REVERSE_DECISION.swap(0, Ordering::AcqRel);
+    if decision != 0 {
+        SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+    }
+    let peer_system_id = peer.clone();
+    if decision != 0 {
+        *peer = None;
+    }
+    Ok((decision, peer_system_id))
+}
+
+pub fn peek_session_reverse_decision_with_peer(
+) -> Result<(u8, Option<String>, Option<String>), String> {
+    let peer_system_id = SESSION_PEER_SYSTEM_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "session peer ID lock poisoned".to_string())?
+        .clone();
+    let request_id = SESSION_REVERSE_REQUEST_ID
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "reverse request ID lock poisoned".to_string())?
+        .clone();
+    Ok((
+        SESSION_REVERSE_DECISION.load(Ordering::Acquire),
+        peer_system_id,
+        request_id,
+    ))
 }
 
 pub fn set_session_peer_system_id(system_id: String) -> Result<(), String> {
@@ -283,10 +408,13 @@ pub fn session_peer_system_id() -> Result<Option<String>, String> {
 }
 
 pub fn clear_session_peer_system_id() -> Result<(), String> {
-    *SESSION_PEER_SYSTEM_ID
+    let mut peer = SESSION_PEER_SYSTEM_ID
         .get_or_init(|| Mutex::new(None))
         .lock()
-        .map_err(|_| "session peer ID lock poisoned".to_string())? = None;
+        .map_err(|_| "session peer ID lock poisoned".to_string())?;
+    if SESSION_REVERSE_DECISION.load(Ordering::Acquire) == 0 {
+        *peer = None;
+    }
     Ok(())
 }
 
@@ -326,6 +454,7 @@ static SESSION_PERM_FILE_TRANSFER: AtomicBool = AtomicBool::new(true);
 static SESSION_REVERSE_REQUEST: AtomicBool = AtomicBool::new(false);
 static SESSION_REVERSE_REQUEST_OUTSTANDING: AtomicBool = AtomicBool::new(false);
 static SESSION_REVERSE_DECISION: AtomicU8 = AtomicU8::new(0);
+static SESSION_REVERSE_REQUEST_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SESSION_PEER_SYSTEM_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SESSION_FILE_OFFERS: OnceLock<Mutex<HashMap<u64, SessionFileOffer>>> = OnceLock::new();
 static SESSION_ACCEPTED_FILES: OnceLock<Mutex<HashMap<u64, bool>>> = OnceLock::new();
@@ -413,13 +542,17 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
     SESSION_AUDIO_ENABLED.store(false, Ordering::Release);
     SESSION_AUDIO_CAPTURE_AVAILABLE.store(false, Ordering::Release);
     SESSION_REVERSE_REQUEST.store(false, Ordering::Release);
-    SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
-    SESSION_REVERSE_DECISION.store(0, Ordering::Release);
-    *SESSION_PEER_SYSTEM_ID
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .map_err(|_| "session peer ID lock poisoned".to_string())? = None;
     if writer.is_some() {
+        *SESSION_REVERSE_REQUEST_ID
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "reverse request ID lock poisoned".to_string())? = None;
+        SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+        SESSION_REVERSE_DECISION.store(0, Ordering::Release);
+        *SESSION_PEER_SYSTEM_ID
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "session peer ID lock poisoned".to_string())? = None;
         SESSION_FILE_OFFERS
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
@@ -431,6 +564,17 @@ pub fn set_session_writer(writer: Option<SyncSender<Vec<u8>>>) -> Result<(), Str
             .map_err(|_| "accepted file lock poisoned".to_string())?
             .clear();
     } else {
+        if SESSION_REVERSE_DECISION.load(Ordering::Acquire) == 0 {
+            *SESSION_REVERSE_REQUEST_ID
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .map_err(|_| "reverse request ID lock poisoned".to_string())? = None;
+            SESSION_REVERSE_REQUEST_OUTSTANDING.store(false, Ordering::Release);
+            *SESSION_PEER_SYSTEM_ID
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .map_err(|_| "session peer ID lock poisoned".to_string())? = None;
+        }
         SESSION_PERM_VIEW_SCREEN.store(true, Ordering::Release);
         SESSION_PERM_CONTROL_INPUT.store(true, Ordering::Release);
         SESSION_PERM_FILE_TRANSFER.store(true, Ordering::Release);
@@ -813,9 +957,9 @@ pub fn revoke_approved_session(token: &str) -> Result<bool, String> {
     Ok(list.len() != previous_len)
 }
 
-pub fn check_and_consume_approved_session(supplied_hash: &[u8; 32]) -> bool {
+pub fn consume_approved_session(supplied_hash: &[u8; 32]) -> Option<(String, String)> {
     if supplied_hash.iter().all(|&b| b == 0) {
-        return false;
+        return None;
     }
 
     let now = Instant::now();
@@ -836,13 +980,17 @@ pub fn check_and_consume_approved_session(supplied_hash: &[u8; 32]) -> bool {
                         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                         .is_ok()
                     {
-                        return true;
+                        return Some((session.token.clone(), session.requester_id.clone()));
                     }
                 }
             }
         }
     }
-    false
+    None
+}
+
+pub fn check_and_consume_approved_session(supplied_hash: &[u8; 32]) -> bool {
+    consume_approved_session(supplied_hash).is_some()
 }
 
 pub fn clear_approved_sessions() {
@@ -882,8 +1030,14 @@ pub fn set_session_active(active: bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_and_consume_approved_session, clear_approved_sessions, record_approved_session,
-        revoke_approved_session,
+        acknowledge_session_reverse_decision_with_id, begin_session_reverse_request,
+        begin_session_reverse_request_with_id, cancel_session_reverse_request,
+        cancel_session_reverse_request_with_id,
+        check_and_consume_approved_session, clear_approved_sessions,
+        clear_session_peer_system_id, record_approved_session, revoke_approved_session,
+        peek_session_reverse_decision_with_peer, session_peer_system_id,
+        set_session_peer_system_id, set_session_reverse_decision,
+        take_session_reverse_decision, take_session_reverse_decision_with_peer,
         session_audio_enabled, session_perm_control_input, session_perm_file_transfer,
         session_perm_view_screen, set_session_audio_enabled, set_session_perm_control_input,
         set_session_perm_file_transfer, set_session_perm_view_screen, set_session_writer,
@@ -985,6 +1139,142 @@ mod tests {
         set_session_audio_enabled(true);
         assert!(session_audio_enabled());
         set_session_audio_enabled(false);
+    }
+
+    #[test]
+    fn reverse_decisions_are_bound_to_one_outstanding_request() {
+        cancel_session_reverse_request();
+        assert!(!set_session_reverse_decision(true));
+        assert!(begin_session_reverse_request());
+        assert!(!begin_session_reverse_request());
+        assert!(set_session_reverse_decision(true));
+        assert!(!set_session_reverse_decision(false));
+        assert_eq!(take_session_reverse_decision(), 1);
+        assert!(!set_session_reverse_decision(true));
+
+        assert!(begin_session_reverse_request());
+        assert!(set_session_reverse_decision(false));
+        assert_eq!(take_session_reverse_decision(), 2);
+        cancel_session_reverse_request();
+    }
+
+    #[test]
+    fn reverse_decision_is_retained_until_matching_request_acknowledges_it() {
+        cancel_session_reverse_request();
+        set_session_peer_system_id("123456789".to_string()).unwrap();
+
+        assert!(begin_session_reverse_request_with_id("reverse-001").unwrap());
+        assert!(!begin_session_reverse_request_with_id("reverse-002").unwrap());
+        assert!(!acknowledge_session_reverse_decision_with_id("reverse-002").unwrap());
+        assert!(set_session_reverse_decision(true));
+        assert!(!acknowledge_session_reverse_decision_with_id("reverse-002").unwrap());
+        assert_eq!(
+            peek_session_reverse_decision_with_peer().unwrap(),
+            (
+                1,
+                Some("123456789".to_string()),
+                Some("reverse-001".to_string())
+            )
+        );
+
+        assert!(acknowledge_session_reverse_decision_with_id("reverse-001").unwrap());
+        assert_eq!(
+            peek_session_reverse_decision_with_peer().unwrap(),
+            (0, Some("123456789".to_string()), None)
+        );
+        assert!(!set_session_reverse_decision(false));
+        clear_session_peer_system_id().unwrap();
+        cancel_session_reverse_request();
+    }
+
+    #[test]
+    fn cancelling_reverse_request_requires_matching_request_id() {
+        cancel_session_reverse_request();
+
+        assert!(begin_session_reverse_request_with_id("reverse-cancel-001").unwrap());
+        assert!(!cancel_session_reverse_request_with_id("reverse-cancel-002").unwrap());
+        assert_eq!(
+            super::session_reverse_request_id().unwrap().as_deref(),
+            Some("reverse-cancel-001")
+        );
+        assert!(cancel_session_reverse_request_with_id("reverse-cancel-001").unwrap());
+        assert!(!set_session_reverse_decision(true));
+        assert_eq!(super::session_reverse_request_id().unwrap(), None);
+    }
+
+    #[test]
+    fn cancelling_reverse_request_preserves_active_peer_identity() {
+        set_session_peer_system_id("123456789".to_string()).unwrap();
+        assert!(begin_session_reverse_request());
+
+        cancel_session_reverse_request();
+
+        assert!(!set_session_reverse_decision(true));
+        assert_eq!(session_peer_system_id().unwrap().as_deref(), Some("123456789"));
+        clear_session_peer_system_id().expect("peer identity should clear");
+    }
+
+    #[test]
+    fn approved_reverse_decision_and_peer_survive_session_teardown() {
+        cancel_session_reverse_request();
+        let (writer, _reader) = sync_channel(1);
+        set_session_writer(Some(writer)).expect("session writer should initialize");
+        set_session_peer_system_id("123456789".to_string()).unwrap();
+        assert!(begin_session_reverse_request());
+        assert!(set_session_reverse_decision(true));
+
+        set_session_writer(None).expect("session writer should clear");
+
+        assert_eq!(
+            take_session_reverse_decision_with_peer().expect("decision and peer should be consumed"),
+            (1, Some("123456789".to_string()))
+        );
+        assert_eq!(session_peer_system_id().unwrap(), None);
+    }
+
+    #[test]
+    fn pending_reverse_decision_keeps_local_request_id_across_teardown() {
+        cancel_session_reverse_request();
+        let (writer, _reader) = sync_channel(1);
+        set_session_writer(Some(writer)).expect("session writer should initialize");
+        set_session_peer_system_id("123456789".to_string()).unwrap();
+        assert!(begin_session_reverse_request_with_id("reverse-teardown-001").unwrap());
+        assert!(set_session_reverse_decision(true));
+
+        set_session_writer(None).expect("session writer should clear");
+
+        assert_eq!(
+            peek_session_reverse_decision_with_peer().unwrap(),
+            (
+                1,
+                Some("123456789".to_string()),
+                Some("reverse-teardown-001".to_string())
+            )
+        );
+        assert!(acknowledge_session_reverse_decision_with_id("reverse-teardown-001").unwrap());
+        assert_eq!(
+            peek_session_reverse_decision_with_peer().unwrap(),
+            (0, Some("123456789".to_string()), None)
+        );
+
+        clear_session_peer_system_id().unwrap();
+        cancel_session_reverse_request();
+    }
+
+    #[test]
+    fn approved_reverse_peer_survives_peer_cleanup_until_decision_is_consumed() {
+        cancel_session_reverse_request();
+        set_session_peer_system_id("123456789".to_string()).unwrap();
+        assert!(begin_session_reverse_request());
+        assert!(set_session_reverse_decision(true));
+
+        clear_session_peer_system_id().expect("session cleanup should retain approved peer");
+
+        assert_eq!(
+            take_session_reverse_decision_with_peer().expect("decision and peer should be consumed"),
+            (1, Some("123456789".to_string()))
+        );
+        assert_eq!(session_peer_system_id().unwrap(), None);
     }
 
     #[test]

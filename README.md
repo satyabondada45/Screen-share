@@ -44,6 +44,22 @@ This will:
 
 Open `http://localhost:8080/dashboard.php` in any browser. The dashboard discovers local and registered remote devices.
 
+### Subscription plans and payments
+
+The PHP backend resolves the Welcome, Free, Monthly, and Yearly plans from the `plans` table. Apply the schema/data migrations in order against the configured database before deploying subscription changes:
+
+```powershell
+php database/migrations/014_subscription_plans_enhancement.php
+php database/migrations/015_subscription_snapshots_and_payments.php
+php database/migrations/016_session_entitlement_tracking.php
+```
+
+Back up the production database before applying migrations. Migration 014 adds the canonical `plans.slug` column required by authenticated entitlement resolution; applying it before deploying the updated login endpoint prevents a missing-column failure. The production API base is `https://friendssoftwaresolutions.in/DeskStream/api`; deploy `backend/api`, `backend/config`, and `backend/services` to the matching `/api`, `/config`, and `/services` directories under the DeskStream application root. Deploy `frontend/api_path.php` as `/api_path.php` at the DeskStream application root so the API and root-level pages resolve deployment paths consistently.
+
+Subscription assignment records snapshot the plan terms and immutable activation/expiry timestamps. Editing the Welcome Plan changes terms for future registrations only. Expired Welcome and paid subscriptions resolve to Free Plan entitlements on server-side entitlement checks. The Free Plan allows one active remote session per account across both viewer and host roles.
+
+Configure `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` in the server environment or the project `.env` file. The subscription page creates INR orders on the server and verifies captured payments with Razorpay before activation. Configure the Razorpay webhook URL as `/DeskStream/api/payments/webhook.php` and subscribe it to the `payment.captured` event. Do not expose the secret values in source control.
+
 ## Protocol
 
 ### Video Packet (Type 13 / Type 15)

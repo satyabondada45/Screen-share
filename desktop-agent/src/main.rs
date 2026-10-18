@@ -13,6 +13,7 @@ pub mod tray;
 pub mod ui;
 pub mod webview_app;
 pub mod local_server;
+pub mod updater;
 // TEMPORARY SESSION DIAGNOSTICS: remove with session_debug.rs after the A/B trace.
 pub mod session_debug;
 
@@ -819,6 +820,9 @@ where
 {
     use cpal::FromSample;
 
+    let mut captured_packets = 0u64;
+    let mut dropped_packets = 0u64;
+    let mut disconnected_logged = false;
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -841,7 +845,42 @@ where
                 let sample: f32 = f32::from_sample_(*sample);
                 packet.extend_from_slice(&sample.to_le_bytes());
             }
-            let _ = write_stream.try_send(packet);
+            match write_stream.try_send(packet) {
+                Ok(()) => {
+                    captured_packets = captured_packets.saturating_add(1);
+                    if captured_packets == 1 || captured_packets % 100 == 0 {
+                        eprintln!(
+                            "[AUDIO TX] stage=queued packets={} sample_rate={} channels={} samples={}",
+                            captured_packets,
+                            sample_rate,
+                            channels,
+                            data.len()
+                        );
+                    }
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    dropped_packets = dropped_packets.saturating_add(1);
+                    if dropped_packets == 1 || dropped_packets % 100 == 0 {
+                        eprintln!(
+                            "[AUDIO TX] stage=queue_drop reason=writer_queue_full dropped_packets={} sample_rate={} channels={} samples={}",
+                            dropped_packets,
+                            sample_rate,
+                            channels,
+                            data.len()
+                        );
+                    }
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    if !disconnected_logged {
+                        eprintln!(
+                            "[AUDIO TX] stage=queue_drop reason=writer_disconnected sample_rate={} channels={}",
+                            sample_rate,
+                            channels
+                        );
+                        disconnected_logged = true;
+                    }
+                }
+            }
         },
         |error| eprintln!("[Audio] Input stream failed: {error}"),
         None,
@@ -863,6 +902,13 @@ fn start_audio_capture(
     let stream_config: cpal::StreamConfig = supported_config.into();
     let sample_rate = stream_config.sample_rate.0;
     let channels = stream_config.channels;
+    eprintln!(
+        "[AUDIO TX] stage=capture_configured sample_format={:?} sample_rate={} channels={} buffer_size={:?}",
+        sample_format,
+        sample_rate,
+        channels,
+        stream_config.buffer_size
+    );
 
     let stream = match sample_format {
         cpal::SampleFormat::F32 => build_audio_capture_stream::<f32>(
@@ -953,6 +999,12 @@ fn setup_session_audio_playback() -> (Option<cpal::Stream>, Arc<Mutex<VecDeque<f
     let stream_config: cpal::StreamConfig = config.clone().into();
     let output_rate = stream_config.sample_rate.0;
     let output_channels = stream_config.channels.max(1) as usize;
+    eprintln!(
+        "[AUDIO RX] stage=playback_configured sample_format={:?} sample_rate={} channels={}",
+        sample_format,
+        output_rate,
+        output_channels
+    );
     let output_stream = match sample_format {
         cpal::SampleFormat::F32 => build_audio_output_stream::<f32>(
             &device, &stream_config, Arc::clone(&queue), output_channels, output_rate,
@@ -1004,7 +1056,11 @@ fn decode_audio_packet(
         .chunks_exact(4)
         .map(|bytes| {
             let sample = f32::from_le_bytes(bytes.try_into().ok()?);
-            Some(if sample.is_finite() { sample } else { 0.0 })
+            Some(if sample.is_finite() {
+                sample.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            })
         })
         .collect::<Option<Vec<_>>>()?;
     if samples.len() % channel_count != 0 {
@@ -1040,6 +1096,62 @@ fn decode_audio_packet(
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod audio_packet_tests {
+    use super::decode_audio_packet;
+
+    fn pcm(samples: &[f32]) -> Vec<u8> {
+        samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn decodes_mono_float_pcm_without_changing_rate() {
+        let decoded = decode_audio_packet(&pcm(&[-0.5, 0.0, 0.75]), 48_000, 1, 48_000)
+            .expect("valid mono packet should decode");
+
+        assert_eq!(decoded, vec![-0.5, 0.0, 0.75]);
+    }
+
+    #[test]
+    fn downmixes_stereo_and_clamps_out_of_range_samples() {
+        let decoded = decode_audio_packet(&pcm(&[1.5, -0.5, 0.5, 0.5]), 44_100, 2, 44_100)
+            .expect("valid stereo packet should decode");
+
+        assert_eq!(decoded, vec![0.25, 0.5]);
+    }
+
+    #[test]
+    fn replaces_non_finite_pcm_samples_with_silence() {
+        let decoded = decode_audio_packet(&pcm(&[f32::NAN, f32::INFINITY]), 48_000, 1, 48_000)
+            .expect("valid packet with non-finite samples should decode safely");
+
+        assert_eq!(decoded, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn resamples_to_the_output_rate() {
+        let decoded = decode_audio_packet(&pcm(&[0.0, 1.0]), 24_000, 1, 48_000)
+            .expect("valid packet should resample");
+
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(decoded[0], 0.0);
+        assert_eq!(decoded[1], 0.5);
+        assert_eq!(decoded[2], 1.0);
+        assert_eq!(decoded[3], 1.0);
+    }
+
+    #[test]
+    fn rejects_malformed_packet_metadata_and_frames() {
+        assert!(decode_audio_packet(&[0; 3], 48_000, 1, 48_000).is_none());
+        assert!(decode_audio_packet(&pcm(&[0.0]), 0, 1, 48_000).is_none());
+        assert!(decode_audio_packet(&pcm(&[0.0]), 48_000, 0, 48_000).is_none());
+        assert!(decode_audio_packet(&pcm(&[0.0]), 48_000, 2, 48_000).is_none());
+    }
 }
 
 fn read_next_file_chunk<R: Read>(reader: &mut R, buffer: &mut [u8]) -> std::io::Result<Option<usize>> {
@@ -2141,10 +2253,13 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 "received_32_auth_bytes; host_approval_check; contents_not_logged",
                             );
 
-                            let is_approved = if is_zero_hash {
-                                false
+                            let (is_approved, approved_token, approved_requester) = if is_zero_hash {
+                                (false, None, None)
                             } else {
-                                crate::status::check_and_consume_approved_session(&auth_hash)
+                                match crate::status::consume_approved_session(&auth_hash) {
+                                    Some((tok, req)) => (true, Some(tok), Some(req)),
+                                    None => (false, None, None),
+                                }
                             };
 
                             if !is_approved {
@@ -2288,8 +2403,12 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 "approval ACK byte 1 written",
                             );
 
+                            let active_request_token = approved_token.clone();
+                            if let Some(ref req_id) = approved_requester {
+                                println!("[Host] Approved session for requester {}", req_id);
+                            }
                             println!("[Host] Approval response sent successfully (APPROVED)");
-                            backend.log_session_start(&system_id);
+                            backend.log_session_start_with_token(&system_id, active_request_token.as_deref(), Some("desktop"));
                             println!("[Agent] Session APPROVED! Starting live video...");
                             // ====================================================
                             // CONNECTION STATE & STREAMING PIPELINE
@@ -2584,6 +2703,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let mut video_trace_count = 0u64;
                                 let mut diagnostic_video_count = 0u64;
                                 let mut outbound_chat_message_id = 0u64;
+                                let mut outbound_audio_packet_count = 0u64;
 
                                 let mut write_packet = |packet: Vec<u8>| -> bool {
                                     if packet.first() == Some(&13u8) || packet.first() == Some(&15u8) {
@@ -2779,6 +2899,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         // latency-sensitive; chunking adds no benefit.
                                         let packet_type = packet.first().copied().unwrap_or(255);
                                         let direction_byte = packet.get(1).copied().unwrap_or(255);
+                                        let audio_trace_count = if packet_type == 17 {
+                                            outbound_audio_packet_count =
+                                                outbound_audio_packet_count.saturating_add(1);
+                                            (outbound_audio_packet_count == 1
+                                                || outbound_audio_packet_count % 100 == 0)
+                                                .then_some(outbound_audio_packet_count)
+                                        } else {
+                                            None
+                                        };
                                         let payload_bytes = if packet_type == 16 && packet.len() >= 4 {
                                             u16::from_be_bytes([packet[2], packet[3]]) as usize
                                         } else {
@@ -2803,6 +2932,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                             "n/a".to_string()
                                         };
                                         let write_started = Instant::now();
+                                        if let Some(count) = audio_trace_count {
+                                            eprintln!(
+                                                "[AUDIO TX] stage=socket_write_begin packet={} direction=B_TO_A session_id=not_carried_by_protocol local_device_id={} packet_bytes={}",
+                                                count,
+                                                diagnostic_system_id,
+                                                packet.len()
+                                            );
+                                        }
                                         if let Some(probe_id) = heartbeat_id {
                                             crate::session_debug::log(
                                                 &diagnostic_system_id,
@@ -2852,6 +2989,15 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         }
                                         match write_tcp.write_all(&packet) {
                                             Ok(_) => {
+                                                if let Some(count) = audio_trace_count {
+                                                    eprintln!(
+                                                        "[AUDIO TX] stage=socket_write_complete packet={} direction=B_TO_A session_id=not_carried_by_protocol local_device_id={} packet_bytes={} write_ms={}",
+                                                        count,
+                                                        diagnostic_system_id,
+                                                        packet.len(),
+                                                        write_started.elapsed().as_millis()
+                                                    );
+                                                }
                                                 if let Some(message_id) = chat_message_id.as_deref() {
                                                     crate::session_debug::log(
                                                         &diagnostic_system_id,
@@ -2916,6 +3062,14 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 true
                                             }
                                             Err(e) => {
+                                                if packet_type == 17 {
+                                                    eprintln!(
+                                                        "[AUDIO TX] stage=socket_write_failed direction=B_TO_A session_id=not_carried_by_protocol local_device_id={} packet_bytes={} error_kind={:?}",
+                                                        diagnostic_system_id,
+                                                        packet.len(),
+                                                        e.kind()
+                                                    );
+                                                }
                                                 if let Some(message_id) = chat_message_id.as_deref() {
                                                     crate::session_debug::log(
                                                         &diagnostic_system_id,
@@ -3209,6 +3363,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                 let mut received_bytes: u64 = 0;
                                 let mut file_hasher = Sha256::new();
                                 let mut inbound_chat_message_id = 0u64;
+                                let mut inbound_audio_packet_count = 0u64;
                                 // FIXED: keyboard modifier latch (Ctrl/Shift/Alt/Win).
                                 let mut mod_ctrl = false;
                                 let mut mod_shift = false;
@@ -3674,8 +3829,27 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                         }
 
                                         30 => {
-                                            crate::status::set_session_reverse_request_pending();
-                                            println!("[REVERSE] Received TYPE 30 request during active session.");
+                                            let accepted = crate::status::set_session_reverse_request_pending();
+                                            let peer_system_id = match crate::status::session_peer_system_id() {
+                                                Ok(Some(peer_id)) => peer_id,
+                                                Ok(None) => "unknown".to_string(),
+                                                Err(error) => {
+                                                    eprintln!("[REVERSE] Could not read peer identity for TYPE 30: {error}");
+                                                    "unavailable".to_string()
+                                                }
+                                            };
+                                            crate::session_debug::log(
+                                                &input_identity,
+                                                &format!(
+                                                    "[REVERSE TRACE] role=HOST direction=RECV message_type=30 request_id=not_carried_by_wire active_session_id=unavailable active_session_host_id={} peer_system_id={} result={}",
+                                                    input_identity,
+                                                    peer_system_id,
+                                                    if accepted { "pending" } else { "duplicate_ignored" }
+                                                ),
+                                            );
+                                            println!(
+                                                "[REVERSE] Received TYPE 30 request during active session; pending={accepted}."
+                                            );
                                         }
 
                                         31 => {
@@ -3696,8 +3870,41 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 eprintln!("[REVERSE] Invalid TYPE 31 decision={}", decision[0]);
                                                 continue;
                                             }
-                                            crate::status::set_session_reverse_decision(decision[0] == 1);
-                                            println!("[REVERSE] Received TYPE 31 decision={}; active roles are unchanged.", decision[0]);
+                                            let request_id = match crate::status::session_reverse_request_id() {
+                                                Ok(Some(request_id)) => request_id,
+                                                Ok(None) => "none".to_string(),
+                                                Err(error) => {
+                                                    eprintln!("[REVERSE] Could not read pending request ID: {error}");
+                                                    "unavailable".to_string()
+                                                }
+                                            };
+                                            let peer_system_id = match crate::status::session_peer_system_id() {
+                                                Ok(Some(peer_id)) => peer_id,
+                                                Ok(None) => "unknown".to_string(),
+                                                Err(error) => {
+                                                    eprintln!("[REVERSE] Could not read peer identity for TYPE 31: {error}");
+                                                    "unavailable".to_string()
+                                                }
+                                            };
+                                            if crate::status::set_session_reverse_decision(decision[0] == 1) {
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[REVERSE TRACE] role=HOST direction=RECV message_type=31 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} decision={} result=accepted_for_pending_request",
+                                                        request_id, input_identity, peer_system_id, decision[0]
+                                                    ),
+                                                );
+                                                println!("[REVERSE] Received TYPE 31 decision={} for the outstanding request; active roles are unchanged.", decision[0]);
+                                            } else {
+                                                crate::session_debug::log(
+                                                    &input_identity,
+                                                    &format!(
+                                                        "[REVERSE TRACE] role=HOST direction=RECV message_type=31 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} decision={} result=unsolicited_or_duplicate_ignored",
+                                                        request_id, input_identity, peer_system_id, decision[0]
+                                                    ),
+                                                );
+                                                eprintln!("[REVERSE] Ignored unsolicited or duplicate TYPE 31 decision={}.", decision[0]);
+                                            }
                                         }
 
                                         32 => {
@@ -3780,9 +3987,30 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                                                 if let Ok(mut queue) = audio_playback_queue.lock() {
                                                     let max_samples = (audio_output_rate as f32 * 0.3) as usize; // 300ms max latency
                                                     if queue.len().saturating_add(samples.len()) > max_samples {
+                                                        eprintln!(
+                                                            "[AUDIO RX] stage=playback_resync reason=queue_limit queue_samples={} incoming_samples={} output_rate={}",
+                                                            queue.len(),
+                                                            samples.len(),
+                                                            audio_output_rate
+                                                        );
                                                         queue.clear();
                                                     }
                                                     queue.extend(samples);
+                                                    inbound_audio_packet_count =
+                                                        inbound_audio_packet_count.saturating_add(1);
+                                                    if inbound_audio_packet_count == 1
+                                                        || inbound_audio_packet_count % 100 == 0
+                                                    {
+                                                        eprintln!(
+                                                            "[AUDIO RX] stage=queued packets={} source_rate={} source_channels={} payload_bytes={} queue_samples={} output_rate={}",
+                                                            inbound_audio_packet_count,
+                                                            sample_rate,
+                                                            channels,
+                                                            payload_len,
+                                                            queue.len(),
+                                                            audio_output_rate
+                                                        );
+                                                    }
                                                 }
                                             } else {
                                                 eprintln!(
@@ -5034,7 +5262,7 @@ fn run_agent_loop(relay_addr: String, config: identity::device_id::AgentConfig) 
                             let _ = capture_handle.join();
                             let _ = writer_handle.join();
 
-                            backend.log_session_end(&system_id, 0.0);
+                            backend.log_session_end_with_token(&system_id, active_request_token.as_deref(), 0.0);
                             println!("[STREAM STATE] STOPPED");
                             crate::session_debug::log(
                                 &system_id,

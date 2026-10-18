@@ -1,5 +1,11 @@
 <?php
 // backend/api/auth/logout.php
+$pathHelper = __DIR__ . '/../../api_path.php';
+if (!is_file($pathHelper)) {
+    $pathHelper = __DIR__ . '/../../../frontend/api_path.php';
+}
+require_once $pathHelper;
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -25,5 +31,5 @@ if (isset($_SERVER['HTTP_ACCEPT']) && strpos($_SERVER['HTTP_ACCEPT'], 'applicati
     exit();
 }
 
-header("Location: ../../../frontend/index.php?success=" . urlencode("Logged out successfully."));
+header("Location: " . deskstream_login_url() . "?success=" . urlencode("Logged out successfully."));
 exit();

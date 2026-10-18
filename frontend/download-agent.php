@@ -1,5 +1,7 @@
 <?php
 // Screen Share — Windows download page
+require_once __DIR__ . '/api_path.php';
+$downloadUrl = deskstream_api_base_path() . '/agent/download.php';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -34,10 +36,10 @@
         <li>Starts with Windows (optional)</li>
         <li>Clean uninstall via Windows Settings</li>
       </ul>
-      <a class="btn" href="https://friendssoftwaresolutions.in/DeskStream/api/agent/download.php">Download DeskStream Agent for Windows</a>
+      <a class="btn" href="<?= htmlspecialchars($downloadUrl, ENT_QUOTES, 'UTF-8') ?>">Download DeskStream Agent for Windows</a>
       <p class="muted" style="margin-top:18px;">
         Direct executable download:
-        <a href="https://friendssoftwaresolutions.in/DeskStream/api/agent/download.php">DeskStream-Agent-v1.1.3-x64.exe</a>
+        <a href="<?= htmlspecialchars($downloadUrl, ENT_QUOTES, 'UTF-8') ?>">DeskStream-Agent-v1.1.3-x64.exe</a>
       </p>
     </div>
   </div>

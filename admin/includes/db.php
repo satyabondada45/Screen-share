@@ -3,6 +3,69 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+function admin_service_file(string $filename): ?string
+{
+    if ($filename === '' || basename($filename) !== $filename) {
+        return null;
+    }
+
+    $projectRoot = dirname(__DIR__, 2);
+    foreach (['services', 'backend' . DIRECTORY_SEPARATOR . 'services'] as $directory) {
+        $path = $projectRoot . DIRECTORY_SEPARATOR . $directory . DIRECTORY_SEPARATOR . $filename;
+        if (is_file($path)) {
+            return $path;
+        }
+    }
+
+    return null;
+}
+
+function admin_request_id(): string
+{
+    static $requestId = null;
+    if ($requestId === null) {
+        $requestId = 'req_' . bin2hex(random_bytes(6));
+    }
+    return $requestId;
+}
+
+function admin_log_error(Throwable $e, string $context = ''): string
+{
+    $reqId = admin_request_id();
+    $msg = sprintf(
+        '[DeskStream Admin Error][%s] %s in %s:%d | Error: %s',
+        $reqId,
+        $context !== '' ? "Context: $context |" : '',
+        $e->getFile(),
+        $e->getLine(),
+        $e->getMessage()
+    );
+    error_log($msg);
+    return $reqId;
+}
+
+function admin_safe_error_html(string $title, string $userMessage, ?Throwable $e = null): string
+{
+    $reqId = $e ? admin_log_error($e, $title) : admin_request_id();
+    $safeTitle = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
+    $safeMessage = htmlspecialchars($userMessage, ENT_QUOTES, 'UTF-8');
+    $safeReqId = htmlspecialchars($reqId, ENT_QUOTES, 'UTF-8');
+    
+    return <<<HTML
+<div class="section" style="max-width:700px; margin:40px auto; text-align:center;">
+    <div style="font-size:3rem; margin-bottom:12px;">⚠️</div>
+    <h2 style="margin-bottom:10px; color:var(--text-primary); font-size:1.5rem;">{$safeTitle}</h2>
+    <p style="color:var(--text-secondary); margin-bottom:20px; line-height:1.5;">{$safeMessage}</p>
+    <div style="background:var(--bg-card); border:1px solid var(--border-color); border-radius:8px; padding:12px 16px; display:inline-block; font-family:monospace; font-size:0.875rem; color:var(--text-muted);">
+        Reference ID: <strong>{$safeReqId}</strong>
+    </div>
+    <div style="margin-top:24px;">
+        <a href="index.php" class="button" style="display:inline-block;">Return to Dashboard</a>
+    </div>
+</div>
+HTML;
+}
+
 function admin_db(): PDO
 {
     static $pdo = null;
@@ -129,39 +192,51 @@ function admin_verify_csrf_token($token): bool
 
 function admin_table_exists(PDO $pdo, string $table): bool
 {
-    $stmt = $pdo->prepare(
-        'SELECT 1 FROM information_schema.TABLES
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-         LIMIT 1'
-    );
-    $stmt->execute([$table]);
-    return (bool) $stmt->fetchColumn();
-}
-
-function admin_column_exists(PDO $pdo, string $table, string $column): bool
-{
-    $stmt = $pdo->prepare(
-        'SELECT 1 FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?
-         LIMIT 1'
-    );
-    $stmt->execute([$table, $column]);
-    return (bool) $stmt->fetchColumn();
+    static $cache = [];
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT 1 FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+             LIMIT 1'
+        );
+        $stmt->execute([$table]);
+        return $cache[$table] = (bool) $stmt->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function admin_table_columns(PDO $pdo, string $table): array
 {
+    static $cache = [];
+    if (isset($cache[$table])) {
+        return $cache[$table];
+    }
     if (!preg_match('/^[A-Za-z0-9_]+$/D', $table)) {
-        throw new InvalidArgumentException('Invalid database table name.');
+        return [];
     }
 
-    $stmt = $pdo->prepare(
-        'SELECT COLUMN_NAME FROM information_schema.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-         ORDER BY ORDINAL_POSITION'
-    );
-    $stmt->execute([$table]);
-    return $stmt->fetchAll(PDO::FETCH_COLUMN);
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT COLUMN_NAME FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+             ORDER BY ORDINAL_POSITION'
+        );
+        $stmt->execute([$table]);
+        $cols = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $cache[$table] = is_array($cols) ? $cols : [];
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function admin_column_exists(PDO $pdo, string $table, string $column): bool
+{
+    $columns = admin_table_columns($pdo, $table);
+    return in_array($column, $columns, true);
 }
 
 function admin_related_rows(PDO $pdo, string $table, array $device, int $limit = 20, array $subscriptionIds = []): array
@@ -226,7 +301,8 @@ function admin_admin_user_query(PDO $pdo)
         if (!$identityColumns) {
             continue;
         }
-        if ($table !== 'admin_users' && !in_array('role', $select, true)) {
+        // If users table has role column, require role in select. If users table does not have role column, do not skip.
+        if ($table !== 'admin_users' && admin_column_exists($pdo, $table, 'role') && !in_array('role', $select, true)) {
             continue;
         }
 
@@ -245,8 +321,22 @@ function admin_user_is_admin(PDO $pdo, array $user): bool
     if (($user['_source_table'] ?? '') === 'admin_users') {
         return true;
     }
-    $role = strtolower(trim((string) ($user['role'] ?? '')));
-    return in_array($role, ['admin', 'administrator', 'super_admin'], true);
+    if (!empty($user['role'])) {
+        $role = strtolower(trim((string) $user['role']));
+        if (in_array($role, ['admin', 'administrator', 'super_admin'], true)) {
+            return true;
+        }
+    }
+    // If users table does NOT have a role column in schema, allow ID 1 or username/email matching admin
+    if (!admin_column_exists($pdo, 'users', 'role')) {
+        $id = (int) ($user['id'] ?? 0);
+        $email = strtolower(trim((string) ($user['email'] ?? '')));
+        $username = strtolower(trim((string) ($user['username'] ?? '')));
+        if ($id === 1 || strpos($email, 'admin') !== false || strpos($username, 'admin') !== false) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function admin_value_or_default($value, $default = 'N/A')
@@ -323,10 +413,45 @@ function admin_log_action(PDO $pdo, string $action, ?string $details = null, ?in
         if (!admin_table_exists($pdo, 'audit_logs')) {
             return;
         }
+        $cols = admin_table_columns($pdo, 'audit_logs');
         $adminId = $userId ?? ($_SESSION['admin_user_id'] ?? null);
         $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-        $stmt = $pdo->prepare('INSERT INTO `audit_logs` (`user_id`, `action`, `details`, `ip_address`, `created_at`) VALUES (?, ?, ?, ?, NOW())');
-        $stmt->execute([$adminId, $action, $details, $ip]);
+        
+        $data = [];
+        if (in_array('user_id', $cols, true)) {
+            $data['user_id'] = $adminId;
+        } elseif (in_array('admin_user_id', $cols, true)) {
+            $data['admin_user_id'] = $adminId;
+        }
+        
+        if (in_array('action', $cols, true)) {
+            $data['action'] = $action;
+        }
+        
+        if (in_array('details', $cols, true)) {
+            $data['details'] = $details;
+        } elseif (in_array('description', $cols, true)) {
+            $data['description'] = $details;
+        }
+        
+        if (in_array('ip_address', $cols, true)) {
+            $data['ip_address'] = $ip;
+        } elseif (in_array('ip', $cols, true)) {
+            $data['ip'] = $ip;
+        }
+        
+        if (in_array('created_at', $cols, true)) {
+            $data['created_at'] = date('Y-m-d H:i:s');
+        }
+
+        if (empty($data)) {
+            return;
+        }
+
+        $colList = implode(', ', array_map(fn($k) => "`$k`", array_keys($data)));
+        $valList = implode(', ', array_fill(0, count($data), '?'));
+        $stmt = $pdo->prepare("INSERT INTO `audit_logs` ({$colList}) VALUES ({$valList})");
+        $stmt->execute(array_values($data));
     } catch (Throwable $e) {
         error_log('admin_log_action failed: ' . $e->getMessage());
     }
@@ -470,4 +595,3 @@ function admin_time_ago(?string $datetime): string
     }
     return date('d M Y', $ts);
 }
-

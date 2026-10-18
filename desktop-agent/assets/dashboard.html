@@ -770,7 +770,8 @@
 
         .card-main-info {
             flex: 1;
-            overflow: hidden;
+            min-width: 0;
+            overflow: visible;
         }
 
         .card-top-row {
@@ -830,6 +831,38 @@
 
         .more-opt-btn:hover {
             color: var(--text-dark);
+        }
+
+        .recent-card-menu {
+            position: absolute;
+            top: 38px;
+            right: 12px;
+            z-index: 5;
+            min-width: 150px;
+            padding: 4px;
+            background: #ffffff;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: var(--shadow-modal);
+        }
+
+        .recent-card-menu[hidden] {
+            display: none;
+        }
+
+        .recent-card-menu button {
+            width: 100%;
+            padding: 8px 10px;
+            border: 0;
+            border-radius: 5px;
+            background: transparent;
+            color: var(--text-dark);
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .recent-card-menu button:hover {
+            background: #f1f5f9;
         }
 
         .device-ip-text {
@@ -1673,16 +1706,134 @@
                 <div id="recent-section">
                     <div class="section-header-row">
                         <h3 class="section-heading">Recent Sessions</h3>
-                        <a class="view-all-link" href="#" onclick="fetchAllDevices(true); return false;">View All</a>
+                        <a class="view-all-link" id="recentSessionsViewAll" href="#" onclick="toggleRecentSessionsView(); return false;">View All</a>
                     </div>
                     <div class="workstations-grid" id="workstationsContainer">
-                        <div class="empty-grid-box">Loading devices...</div>
+                        <div class="empty-grid-box">Loading recent sessions...</div>
                     </div>
                 </div>
             </div>
 
             <section id="settingsPage" class="page-panel" style="display:none;">
-                <div class="panel-card" style="max-width: 900px; width: 100%; margin: 0 auto;">
+                <!-- Account & Subscription Section -->
+                <div class="panel-card" id="subscriptionSettingsCard" style="max-width: 900px; width: 100%; margin: 0 auto 20px auto;">
+                    <div class="panel-header" style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
+                        <div>
+                            <h2 class="panel-title" style="display:flex; align-items:center; gap:8px;">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                                    <circle cx="12" cy="7" r="4"></circle>
+                                </svg>
+                                Account &amp; Subscription
+                            </h2>
+                            <p class="panel-subtitle">Plan details, renewal validity, and session entitlements.</p>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                            <button type="button" class="action-btn" id="subRefreshBtn" onclick="loadSubscriptionSettings(true)" style="padding:6px 14px; font-size:13px; font-weight:600; border-radius:8px; background:var(--bg-body); border:1px solid var(--border-color); color:var(--text-dark); cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                Refresh
+                            </button>
+                            <a id="subRenewBtn" href="https://friendssoftwaresolutions.in/DeskStream/#pricing" target="_blank" class="primary-btn" style="padding:6px 16px; font-size:13px; font-weight:600; border-radius:8px; background:var(--primary); color:#fff; text-decoration:none; display:none; align-items:center; gap:6px;">
+                                Renew / Upgrade
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Error Banner (hidden by default) -->
+                    <div id="subErrorBanner" style="display:none; margin:16px 0; padding:12px 16px; background:#fef2f2; border:1px solid #fca5a5; border-radius:8px; color:#991b1b; font-size:13px; align-items:center; justify-content:space-between;">
+                        <span id="subErrorMessage">Unable to load subscription details</span>
+                        <button type="button" onclick="loadSubscriptionSettings(true)" style="padding:4px 10px; font-size:12px; font-weight:600; border-radius:6px; background:#fff; border:1px solid #fca5a5; color:#991b1b; cursor:pointer;">Retry</button>
+                    </div>
+
+                    <!-- Subscription Details Grid -->
+                    <div id="subDetailsGrid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:16px; margin-top:16px;">
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Account</div>
+                            <div id="subAccountValue" style="font-size:15px; font-weight:600; color:var(--text-dark); word-break:break-all;">Not signed in</div>
+                        </div>
+
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Current Plan</div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span id="subPlanValue" style="font-size:15px; font-weight:700; color:var(--text-dark);">—</span>
+                                <span id="subStatusBadge" style="display:inline-block; padding:2px 8px; font-size:11px; font-weight:700; border-radius:999px; text-transform:uppercase; background:#e2e8f0; color:#475569;">—</span>
+                            </div>
+                        </div>
+
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Activated On</div>
+                            <div id="subActivatedValue" style="font-size:15px; font-weight:600; color:var(--text-dark);">—</div>
+                        </div>
+
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Expires On</div>
+                            <div id="subExpiresValue" style="font-size:15px; font-weight:600; color:var(--text-dark);">—</div>
+                        </div>
+
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Remaining Time</div>
+                            <div id="subRemainingValue" style="font-size:15px; font-weight:600; color:var(--text-dark);">—</div>
+                        </div>
+
+                        <div id="subPreviousPlanBox" style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color); display:none;">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Subscription History</div>
+                            <div id="subPreviousValue" style="font-size:14px; font-weight:500; color:var(--text-dark);">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Application & Updates Panel -->
+                <div class="panel-card" id="appUpdateCard" style="max-width: 900px; width: 100%; margin: 16px auto 0;">
+                    <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                        <div>
+                            <h2 class="panel-title" style="display:flex; align-items:center; gap:8px;">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                                Application &amp; Updates
+                            </h2>
+                            <p class="panel-subtitle">Release version, automated updates, and channel status.</p>
+                        </div>
+                        <div>
+                            <button type="button" class="action-btn" id="checkUpdateBtn" onclick="checkUpdatesManual()" style="padding:7px 16px; font-size:13px; font-weight:600; border-radius:8px; background:var(--bg-body); border:1px solid var(--border-color); color:var(--text-dark); cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                <span id="checkUpdateBtnText">Check for Updates</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:16px; margin-top:16px;">
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Installed Version</div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span id="installedVersionText" style="font-size:15px; font-weight:700; color:var(--text-dark);">1.1.3</span>
+                                <span style="display:inline-block; padding:2px 8px; font-size:11px; font-weight:700; border-radius:999px; text-transform:uppercase; background:#eff6ff; color:#2563eb;">Stable Channel</span>
+                            </div>
+                        </div>
+
+                        <div style="background:var(--bg-body); padding:14px 16px; border-radius:10px; border:1px solid var(--border-color);">
+                            <div style="font-size:12px; color:var(--text-muted); text-transform:uppercase; font-weight:700; letter-spacing:0.5px; margin-bottom:4px;">Update Status</div>
+                            <div id="updateStatusText" style="font-size:15px; font-weight:600; color:var(--text-dark);">Up to date</div>
+                        </div>
+                    </div>
+
+                    <!-- Inline Notification Card if update is available -->
+                    <div id="inlineUpdateNotice" style="display:none; margin-top:16px; padding:16px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:10px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                            <div>
+                                <div style="font-weight:700; color:#1e40af; font-size:14px;" id="inlineUpdateTitle">New Version Available</div>
+                                <div style="font-size:13px; color:#3b82f6; margin-top:4px;" id="inlineUpdateSubtitle">Includes new features and security enhancements.</div>
+                            </div>
+                            <button type="button" onclick="showUpdateModalFromCached()" style="padding:8px 18px; font-size:13px; font-weight:700; border-radius:8px; background:var(--primary); color:#fff; border:none; cursor:pointer;">
+                                View &amp; Install
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-card" style="max-width: 900px; width: 100%; margin: 16px auto 0;">
                     <div class="panel-header">
                         <h2 class="panel-title">Settings</h2>
                     </div>
@@ -1927,6 +2078,77 @@
         </div>
     </div>
 
+    <!-- Update Notification Modal -->
+    <div id="updateModalOverlay" style="display:none; position:fixed; inset:0; z-index:10001; background:rgba(15,23,42,0.65); backdrop-filter:blur(4px); align-items:center; justify-content:center; padding:20px;">
+        <div style="background:#fff; width:100%; max-width:500px; border-radius:16px; box-shadow:0 25px 50px -12px rgba(15,23,42,0.25); overflow:hidden; border:1px solid var(--border-color); display:flex; flex-direction:column;">
+            <!-- Header -->
+            <div style="padding:22px 24px 16px; border-bottom:1px solid var(--border-color); display:flex; justify-content:space-between; align-items:flex-start;">
+                <div style="display:flex; gap:14px; align-items:center;">
+                    <div style="width:44px; height:44px; border-radius:12px; background:#eff6ff; color:#2563eb; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                    </div>
+                    <div>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <h3 style="font-size:17px; font-weight:700; color:var(--text-dark); margin:0;">DeskStream Update</h3>
+                            <span id="modalNewVersionBadge" style="display:inline-block; padding:2px 8px; font-size:12px; font-weight:700; border-radius:999px; background:#eff6ff; color:#2563eb;">v1.1.4</span>
+                        </div>
+                        <p style="font-size:13px; color:var(--text-muted); margin-top:2px;" id="modalCurrentVersionNote">Currently installed: v1.1.3</p>
+                    </div>
+                </div>
+                <button type="button" id="modalCloseBtn" onclick="dismissUpdateModal()" style="background:none; border:none; color:var(--text-subtle); cursor:pointer; padding:4px; border-radius:6px; display:flex; align-items:center; justify-content:center;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+
+            <!-- Content -->
+            <div style="padding:20px 24px;">
+                <!-- Mandatory Alert (if mandatory security release) -->
+                <div id="modalMandatoryAlert" style="display:none; margin-bottom:14px; padding:10px 14px; background:#fef2f2; border:1px solid #fca5a5; border-radius:8px; color:#991b1b; font-size:12px; font-weight:600;">
+                    This is a mandatory security update. Please update to continue using DeskStream securely.
+                </div>
+
+                <!-- Release Notes Box -->
+                <div style="margin-bottom:16px;">
+                    <div style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">What's New in this Version</div>
+                    <div id="modalReleaseNotes" style="font-size:13px; line-height:1.5; color:var(--text-dark); background:var(--bg-body); padding:12px 14px; border-radius:8px; border:1px solid var(--border-color); max-height:150px; overflow-y:auto; white-space:pre-wrap;">
+Release notes loading...
+                    </div>
+                </div>
+
+                <!-- Progress Bar Section (shown while downloading or verifying) -->
+                <div id="modalProgressSection" style="display:none; margin-bottom:16px;">
+                    <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600; color:var(--text-dark); margin-bottom:6px;">
+                        <span id="modalProgressLabel">Downloading update package...</span>
+                        <span id="modalProgressPercent">0%</span>
+                    </div>
+                    <div style="width:100%; height:8px; background:#e2e8f0; border-radius:999px; overflow:hidden;">
+                        <div id="modalProgressBar" style="width:0%; height:100%; background:linear-gradient(90deg, #3b82f6, #2563eb); border-radius:999px; transition:width 0.2s ease;"></div>
+                    </div>
+                </div>
+
+                <!-- Status / Error Banner -->
+                <div id="modalErrorBanner" style="display:none; margin-bottom:14px; padding:10px 14px; background:#fef2f2; border:1px solid #fca5a5; border-radius:8px; color:#991b1b; font-size:12px; align-items:center; justify-content:space-between;">
+                    <span id="modalErrorMessage">Download failed. Please check your network and retry.</span>
+                    <button type="button" onclick="startUpdateDownload()" style="padding:4px 10px; font-size:11px; font-weight:700; border-radius:6px; background:#fff; border:1px solid #fca5a5; color:#991b1b; cursor:pointer;">Retry</button>
+                </div>
+            </div>
+
+            <!-- Action Buttons Footer -->
+            <div style="padding:16px 24px; background:var(--bg-body); border-top:1px solid var(--border-color); display:flex; justify-content:flex-end; gap:10px;">
+                <button type="button" id="modalLaterBtn" onclick="dismissUpdateModal()" style="padding:8px 18px; font-size:13px; font-weight:600; border-radius:8px; background:#fff; border:1px solid var(--border-color); color:var(--text-dark); cursor:pointer;">
+                    Later
+                </button>
+                <button type="button" id="modalUpdateBtn" onclick="handleUpdateActionClick()" style="padding:8px 22px; font-size:13px; font-weight:700; border-radius:8px; background:var(--primary); color:#fff; border:none; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
+                    <span id="modalUpdateBtnText">Update Now</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast -->
     <div class="toast-popup" id="toastBox"><span id="toastMsg">Action completed</span></div>
 
@@ -1979,6 +2201,7 @@
         let isAuthenticated = false;
         let approvedReverseRequesterId = null;
         let approvedReverseExpiresAt = 0;
+        let approvedReverseRequestId = null;
         let autoAcceptingReverseToken = null;
 
         // ── Boot ─────────────────────────────────────────────────────
@@ -1989,6 +2212,11 @@
                 console.info('[SESSION] event=overlay_boot authenticated=false auth_storage_unchanged=true current_path=' + window.location.pathname);
             } else {
                 tryRestoreSession();
+                setTimeout(() => {
+                    if (typeof checkForUpdates === 'function') {
+                        checkForUpdates(true);
+                    }
+                }, 3500);
             }
             bSessionUiReady.then(() => {
                 pollAgentHealth();
@@ -2038,40 +2266,38 @@
         }
 
         // ── Auth helpers ─────────────────────────────────────────────
-        function tryRestoreSession() {
-            // Check if we have a session cookie / local token
-            const token = localStorage.getItem('ds_session_token');
+        async function tryRestoreSession() {
             const username = localStorage.getItem('ds_username');
+            const token = localStorage.getItem('ds_session_token');
             console.info('[AUTH] event=restore_started current_path=' + window.location.pathname +
                 ' authenticated=' + isAuthenticated +
-                ' token_exists=' + Boolean(token) +
-                ' username_exists=' + Boolean(username));
-            if (token && username) {
-                // Validate token against backend
-                fetch(`${BACKEND}/api/auth/validate.php`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
-                })
-                    .then(response => {
-                        console.info('[AUTH] event=token_validation_response http_status=' + response.status);
-                        return response.json();
-                    })
-                    .then(data => {
-                        if (data.status === 'valid' || data.valid) {
-                            onAuthenticated(username);
-                        } else {
-                            showLoginOverlay('token validation rejected');
-                        }
-                    })
-                    .catch(error => {
-                        // If backend unreachable but we have a token, still proceed optimistically
-                        console.warn('[AUTH] event=token_validation_failed error=' + error.message);
-                        if (token) onAuthenticated(username);
-                        else showLoginOverlay('no persisted token');
-                    });
-            } else {
-                showLoginOverlay('no persisted token or username');
+                ' username_exists=' + Boolean(username) +
+                ' token_exists=' + Boolean(token));
+            if (!username) {
+                showLoginOverlay('no saved account');
+                return;
+            }
+
+            const headers = { 'Accept': 'application/json' };
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+                headers['X-DeskStream-Session'] = token;
+            }
+
+            try {
+                const response = await fetch(`${BACKEND}/api/subscriptions/current.php`, {
+                    method: 'GET',
+                    headers: headers,
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'success' || !data.account) {
+                    throw new Error(`Session validation failed (HTTP ${response.status}).`);
+                }
+                await onAuthenticated(data.account.username || data.account.email || username);
+            } catch (error) {
+                console.warn('[AUTH] event=session_validation_failed error=' + error.message);
+                showLoginOverlay('server session could not be validated');
             }
         }
 
@@ -2111,11 +2337,15 @@
                     body: JSON.stringify({ email: email, password: pass })
                 });
                 const data = await res.json();
-                if (data.status === 'success' || data.token || data.user_id) {
-                    const username = data.username || email.split('@')[0];
-                    if (data.token) localStorage.setItem('ds_session_token', data.token);
-                    if (data.session_id) localStorage.setItem('ds_session_token', data.session_id);
+                if (res.ok && data.status === 'success' && data.user) {
+                    const username = data.user.username || data.user.email || email.split('@')[0];
                     localStorage.setItem('ds_username', username);
+                    if (data.session_token) {
+                        localStorage.setItem('ds_session_token', data.session_token);
+                    }
+                    if (data.user.id) {
+                        localStorage.setItem('ds_user_id', data.user.id);
+                    }
                     onAuthenticated(username);
                 } else {
                     errEl.textContent = data.message || 'Invalid credentials.';
@@ -2123,7 +2353,7 @@
                 }
             } catch (e) {
                 console.error("Login fetch error:", e);
-                errEl.textContent = 'Connection error: ' + e.message;
+                errEl.textContent = 'Unable to reach the sign-in service. Please try again.';
                 errEl.style.display = 'block';
             }
         }
@@ -2188,15 +2418,64 @@
             applyDisplayIdentity(safeUsername);
             showDashboardPage('home');
             await pollAgentHealth();
+            renderRecentSessionHistory();
             fetchAllDevices(false);
-            setInterval(() => fetchAllDevices(false), 5000);
-            setInterval(checkIncoming, 4000);
+            if (!deviceRefreshInterval) deviceRefreshInterval = setInterval(() => fetchAllDevices(false), 5000);
+            if (!incomingRequestPollInterval) incomingRequestPollInterval = setInterval(checkIncoming, 4000);
         }
 
         function doLogout() {
+            fetch(`${BACKEND}/api/auth/logout.php`, {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+                credentials: 'include'
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || data.status !== 'success') {
+                        throw new Error(`Server logout failed (HTTP ${response.status}).`);
+                    }
+                })
+                .catch(error => {
+                    console.warn('[AUTH] event=logout_request_failed error=' + error.message);
+                    showToast('The server could not confirm logout. Sign in again before continuing.');
+                });
             localStorage.removeItem('ds_session_token');
             localStorage.removeItem('ds_username');
             isAuthenticated = false;
+            if (subscriptionRefreshTimer) {
+                clearInterval(subscriptionRefreshTimer);
+                subscriptionRefreshTimer = null;
+            }
+            lastSubscriptionData = null;
+            const subAcct = document.getElementById('subAccountValue');
+            if (subAcct) subAcct.textContent = 'Not signed in';
+            const subPlan = document.getElementById('subPlanValue');
+            if (subPlan) subPlan.textContent = '—';
+            const subBadge = document.getElementById('subStatusBadge');
+            if (subBadge) {
+                subBadge.textContent = '—';
+                subBadge.style.background = '#e2e8f0';
+                subBadge.style.color = '#475569';
+            }
+            const subAct = document.getElementById('subActivatedValue');
+            if (subAct) subAct.textContent = '—';
+            const subExp = document.getElementById('subExpiresValue');
+            if (subExp) subExp.textContent = '—';
+            const subRem = document.getElementById('subRemainingValue');
+            if (subRem) subRem.textContent = '—';
+            const subPrev = document.getElementById('subPreviousPlanBox');
+            if (subPrev) subPrev.style.display = 'none';
+            const subRenew = document.getElementById('subRenewBtn');
+            if (subRenew) subRenew.style.display = 'none';
+            if (deviceRefreshInterval) {
+                clearInterval(deviceRefreshInterval);
+                deviceRefreshInterval = null;
+            }
+            if (incomingRequestPollInterval) {
+                clearInterval(incomingRequestPollInterval);
+                incomingRequestPollInterval = null;
+            }
             document.getElementById('topbarUserBadge').style.display = 'none';
             // Hide dashboard chrome so it cannot be seen behind the login overlay
             const topbar = document.getElementById('mainTopbar');
@@ -2345,7 +2624,8 @@
                     if (Object.keys(activeSessions).length === 0) {
                         bSession.enter();
                     }
-                } else if (!hasLiveBSession && bSession && bSession.isActive) {
+                } else if (!hasLiveBSession && bSession && bSession.isActive
+                    && !bSession.isReverseHandoffPending) {
                     bSession.dismiss();
                 }
             } catch (e) {
@@ -2407,62 +2687,47 @@
             deviceRefreshInProgress = true;
             try {
                 const res = await fetch(`${BACKEND}/api/devices/list.php`, { credentials: 'include' });
+                if (!res.ok) throw new Error(`Device list request failed: HTTP ${res.status}`);
                 const data = await res.json();
-                if (data.status === 'success' && Array.isArray(data.devices)) {
-                    const others = data.devices.filter(d =>
-                        d.system_id !== currentHostUid && d.device_uid !== currentHostUid
-                    );
-                    lastFetchedDevices = others;
-                    const onlineById = new Map(others.map(device => [
-                        String(device.system_id || device.device_uid || '').replace(/\D/g, ''),
-                        device
-                    ]));
-                    const recent = getRecentSessionEntries().map(entry => {
-                        const id = String(entry.system_id || entry.device_uid || '').replace(/\D/g, '');
-                        const online = onlineById.get(id);
-                        return {
-                            ...(online || {}),
-                            ...entry,
-                            system_id: id,
-                            device_uid: id,
-                            is_online: online ? online.is_online : 0,
-                            name: online?.name || entry.name || 'Workstation',
-                            ip_address: online?.ip_address || entry.ip_address || '—'
-                        };
-                    });
-                    const recentIds = new Set(recent.map(device => device.system_id));
-                    const displayDevices = isManual
-                        ? others
-                        : [...recent, ...others.filter(device =>
-                            !recentIds.has(String(device.system_id || device.device_uid || '').replace(/\D/g, ''))
-                        )];
-                    renderDevicesGrid(displayDevices);
-                    populateRecentDropdown(recent.length ? recent : others);
-                    const mine = data.devices.find(d =>
+                if (data.status !== 'success' || !Array.isArray(data.devices)) {
+                    throw new Error(data.message || 'Device list response was invalid.');
+                }
+                const others = data.devices.filter(d =>
+                    d.system_id !== currentHostUid && d.device_uid !== currentHostUid
+                );
+                lastFetchedDevices = others;
+                renderRecentSessionHistory();
+                const recent = getRecentSessionEntries();
+                populateRecentDropdown(recent.length ? recent : others);
+                const mine = data.devices.find(d =>
                         d.system_id === currentHostUid || d.device_uid === currentHostUid
                     );
-                    if (mine && mine.name) {
-                        const deviceName = normalizeDisplayName(mine.name);
-                        if (deviceName && !normalizeDisplayName(localStorage.getItem('ds_username'))) {
-                            currentHostAlias = deviceName;
-                            applyDisplayIdentity(deviceName);
-                        } else {
-                            applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || deviceName || 'DeskStream User');
-                        }
+                if (mine && mine.name) {
+                    const deviceName = normalizeDisplayName(mine.name);
+                    if (deviceName && !normalizeDisplayName(localStorage.getItem('ds_username'))) {
+                        currentHostAlias = deviceName;
+                        applyDisplayIdentity(deviceName);
                     } else {
-                        applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || 'DeskStream User');
+                        applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || deviceName || 'DeskStream User');
                     }
-                    if (isManual) showToast('Workstation inventory synchronized');
+                } else {
+                    applyDisplayIdentity(localStorage.getItem('ds_username') || currentHostAlias || 'DeskStream User');
                 }
-            } catch (e) {
+                if (isManual) showToast('Workstation inventory synchronized');
+            } catch (error) {
+                console.warn('[DEVICES] Could not refresh device inventory:', error);
                 if (isManual) showToast('Could not reach server');
+                renderRecentSessionHistory();
+                populateRecentDropdown(getRecentSessionEntries());
+            } finally {
+                deviceRefreshInProgress = false;
             }
-            deviceRefreshInProgress = false;
         }
 
         let _incomingRequestPollInFlight = false;
         async function checkIncoming() {
             if (!currentHostUid || !isAuthenticated || _incomingRequestPollInFlight) return;
+            processPendingReverseAcceptance();
             _incomingRequestPollInFlight = true;
             try {
                 const res = await fetch(`${BACKEND}/api/connections/incoming.php?system_id=${encodeURIComponent(currentHostUid)}`, { credentials: 'include' });
@@ -2473,13 +2738,16 @@
                     const req = data.request;
                     if (autoAcceptingReverseToken && req.request_token === autoAcceptingReverseToken) return;
                     if (approvedReverseRequesterId && Date.now() > approvedReverseExpiresAt) {
-                        approvedReverseRequesterId = null;
-                        approvedReverseExpiresAt = 0;
+                        if (approvedReverseRequestId) {
+                            traceReverseHandoff('AUTO_ACCEPT_EXPIRED', approvedReverseRequesterId);
+                            showToast('Reverse handoff expired before the peer reconnected.');
+                        }
+                        clearReverseAutoAccept(approvedReverseRequesterId, approvedReverseRequestId);
                     }
-                    if (approvedReverseRequesterId
-                        && req.requester_system_id === approvedReverseRequesterId) {
+                    if (isApprovedReverseRequester(req.requester_system_id)) {
+                        traceReverseSession('AUTO_ACCEPT_MATCHED', approvedReverseRequesterId);
                         currentRequestToken = req.request_token;
-                        currentRequesterId = req.requester_system_id || '';
+                        currentRequesterId = String(req.requester_system_id || '');
                         autoAcceptingReverseToken = req.request_token;
                         currentRequesterName = req.requester_name || 'Remote User';
                         setIncomingPermissionChoices();
@@ -2530,41 +2798,66 @@
         }
 
         let lastFetchedDevices = [];
+        let deviceRefreshInterval = null;
+        let incomingRequestPollInterval = null;
+        let showAllRecentSessions = false;
+
+        function readRecentSessionEntries() {
+            const raw = localStorage.getItem('ds_recent_sessions');
+            if (raw === null) return [];
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) throw new Error('Saved session history is not a list.');
+            return parsed.filter(entry =>
+                entry && /^\d{9}$/.test(String(entry.system_id || entry.device_uid || '').replace(/\D/g, ''))
+            ).map(entry => {
+                const id = String(entry.system_id || entry.device_uid).replace(/\D/g, '');
+                return {
+                    ...entry,
+                    system_id: id,
+                    device_uid: id,
+                    name: String(entry.name || 'Workstation'),
+                    last_seen_at: entry.last_seen_at || entry.session_at || null,
+                    os_type: entry.os_type || ''
+                };
+            }).sort((a, b) => new Date(b.last_seen_at || 0) - new Date(a.last_seen_at || 0));
+        }
 
         function getRecentSessionEntries() {
             try {
-                const raw = localStorage.getItem('ds_recent_sessions');
-                const parsed = raw ? JSON.parse(raw) : [];
-                return Array.isArray(parsed) ? parsed.filter(entry =>
-                    entry && /^\d{9}$/.test(String(entry.system_id || entry.device_uid || '').replace(/\D/g, ''))
-                ) : [];
+                return readRecentSessionEntries();
             } catch (error) {
+                console.error('[RECENT SESSIONS] Could not read saved session history:', error);
                 return [];
             }
         }
 
         function saveRecentSessionEntries(entries) {
-            localStorage.setItem('ds_recent_sessions', JSON.stringify(entries.slice(0, 6)));
+            localStorage.setItem('ds_recent_sessions', JSON.stringify(entries));
         }
 
         function recordRecentSession(device) {
-            const systemId = String(device.system_id || device.device_uid || '');
-            if (!systemId) return;
-            const entry = {
-                system_id: systemId,
-                device_uid: systemId,
-                name: device.name || 'Workstation',
-                ip_address: device.ip_address || 'Local network',
-                last_seen_at: new Date().toISOString(),
-                is_online: 1,
-                os_type: device.os_type || 'windows'
-            };
-            const existing = getRecentSessionEntries().filter(item => {
-                const itemId = String(item.system_id || item.device_uid || '');
-                return itemId !== systemId;
-            });
-            const next = [entry, ...existing].slice(0, 6);
-            saveRecentSessionEntries(next);
+            const systemId = String(device.system_id || device.device_uid || '').replace(/\D/g, '');
+            if (!/^\d{9}$/.test(systemId)) {
+                console.warn('[RECENT SESSIONS] Ignored connected session with an invalid device ID.');
+                return;
+            }
+            try {
+                const entry = {
+                    ...device,
+                    system_id: systemId,
+                    device_uid: systemId,
+                    name: device.name || 'Workstation',
+                    ip_address: device.ip_address || '',
+                    last_seen_at: new Date().toISOString(),
+                    os_type: device.os_type || device.platform || ''
+                };
+                const existing = readRecentSessionEntries().filter(item => item.system_id !== systemId);
+                saveRecentSessionEntries([entry, ...existing]);
+                renderRecentSessionHistory();
+            } catch (error) {
+                console.error('[RECENT SESSIONS] Could not save connected session history:', error);
+                showToast('The session connected, but its history could not be saved on this device.');
+            }
         }
 
         function findKnownDevice(systemId) {
@@ -2574,6 +2867,524 @@
             ) || null;
         }
 
+        // ── Account & Subscription in Settings ───────────────────────
+        let subscriptionRefreshTimer = null;
+        let lastSubscriptionData = null;
+
+        function formatSubscriptionDate(dateVal) {
+            if (!dateVal) return 'Not available';
+            const d = new Date(dateVal);
+            if (isNaN(d.getTime())) return String(dateVal);
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const day = d.getUTCDate();
+            const month = months[d.getUTCMonth()];
+            const year = d.getUTCFullYear();
+            return `${day} ${month} ${year}`;
+        }
+
+        function formatSubscriptionDateTime(dateVal) {
+            if (!dateVal) return 'Not available';
+            const d = new Date(dateVal);
+            if (isNaN(d.getTime())) return String(dateVal);
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const day = d.getUTCDate();
+            const month = months[d.getUTCMonth()];
+            const year = d.getUTCFullYear();
+            const hours = String(d.getUTCHours()).padStart(2, '0');
+            const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+            return `${day} ${month} ${year}, ${hours}:${minutes} UTC`;
+        }
+
+        function calculateRemainingTime(expiresAtIso, serverNowIso) {
+            if (!expiresAtIso) return 'Ongoing';
+            const expiryTime = new Date(expiresAtIso).getTime();
+            if (isNaN(expiryTime)) return 'Ongoing';
+            
+            const serverBase = serverNowIso ? new Date(serverNowIso).getTime() : Date.now();
+            const diffMs = expiryTime - serverBase;
+            
+            if (diffMs <= 0) {
+                return 'Expired';
+            }
+            const diffSec = Math.floor(diffMs / 1000);
+            const days = Math.floor(diffSec / 86400);
+            const hours = Math.floor((diffSec % 86400) / 3600);
+            const minutes = Math.floor((diffSec % 3600) / 60);
+            
+            if (days > 0) {
+                return `${days} day${days === 1 ? '' : 's'} remaining`;
+            } else if (hours > 0) {
+                return `${hours} hour${hours === 1 ? '' : 's'} remaining`;
+            } else {
+                return `${Math.max(1, minutes)} minute${minutes === 1 ? '' : 's'} remaining`;
+            }
+        }
+
+        async function loadSubscriptionSettings(forceRefresh = false) {
+            const card = document.getElementById('subscriptionSettingsCard');
+            if (!card) return;
+
+            const errorBanner = document.getElementById('subErrorBanner');
+            const errorMessage = document.getElementById('subErrorMessage');
+            const refreshBtn = document.getElementById('subRefreshBtn');
+            const renewBtn = document.getElementById('subRenewBtn');
+
+            if (refreshBtn) refreshBtn.disabled = true;
+            if (errorBanner) errorBanner.style.display = 'none';
+
+            const token = localStorage.getItem('ds_session_token');
+            const headers = { 'Accept': 'application/json' };
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+                headers['X-DeskStream-Session'] = token;
+            }
+
+            try {
+                const response = await fetch(`${BACKEND}/api/subscriptions/current.php`, {
+                    method: 'GET',
+                    headers: headers,
+                    credentials: 'include'
+                });
+
+                if (response.status === 401) {
+                    console.warn('[SUBSCRIPTION] Received 401 Unauthorized from server.');
+                    if (errorBanner) {
+                        errorMessage.textContent = 'Please sign in to view subscription details.';
+                        errorBanner.style.display = 'flex';
+                    }
+                    document.getElementById('subAccountValue').textContent = 'Not signed in';
+                    document.getElementById('subPlanValue').textContent = '—';
+                    const statusBadge = document.getElementById('subStatusBadge');
+                    statusBadge.textContent = 'Sign In Required';
+                    statusBadge.style.background = '#fef3c7';
+                    statusBadge.style.color = '#92400e';
+                    document.getElementById('subActivatedValue').textContent = '—';
+                    document.getElementById('subExpiresValue').textContent = '—';
+                    document.getElementById('subRemainingValue').textContent = '—';
+                    if (renewBtn) renewBtn.style.display = 'none';
+                    return;
+                }
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                if (data.status !== 'success' || !data.subscription) {
+                    throw new Error(data.message || 'Invalid server response');
+                }
+
+                lastSubscriptionData = data;
+                renderSubscriptionSettings(data);
+            } catch (err) {
+                console.error('[SUBSCRIPTION] Failed to load subscription details:', err);
+                if (errorBanner) {
+                    errorMessage.textContent = 'Unable to load subscription details';
+                    errorBanner.style.display = 'flex';
+                }
+                if (!lastSubscriptionData) {
+                    document.getElementById('subPlanValue').textContent = '—';
+                    const statusBadge = document.getElementById('subStatusBadge');
+                    statusBadge.textContent = 'Error';
+                    statusBadge.style.background = '#fef2f2';
+                    statusBadge.style.color = '#dc2626';
+                    document.getElementById('subActivatedValue').textContent = '—';
+                    document.getElementById('subExpiresValue').textContent = '—';
+                    document.getElementById('subRemainingValue').textContent = '—';
+                    if (renewBtn) renewBtn.style.display = 'none';
+                }
+            } finally {
+                if (refreshBtn) refreshBtn.disabled = false;
+            }
+        }
+
+        function renderSubscriptionSettings(data) {
+            const acc = data.account || {};
+            const sub = data.subscription || {};
+            const renewBtn = document.getElementById('subRenewBtn');
+            const previousBox = document.getElementById('subPreviousPlanBox');
+
+            const accountDisplay = acc.email || acc.identifier || acc.username || localStorage.getItem('ds_username') || 'Signed in';
+            document.getElementById('subAccountValue').textContent = accountDisplay;
+
+            const planSlug = (sub.plan_slug || data.plan_slug || 'free').toLowerCase();
+            const planName = sub.plan_name || data.plan_name || (planSlug === 'welcome' ? 'Welcome Plan' : (planSlug === 'free' ? 'Free Plan' : (planSlug === 'monthly' ? 'Monthly Plan' : (planSlug === 'yearly' ? 'Yearly Plan' : 'Active Plan'))));
+            document.getElementById('subPlanValue').textContent = planName;
+
+            const statusBadge = document.getElementById('subStatusBadge');
+            const subStatus = (sub.status || data.current_status || 'active').toLowerCase();
+            if (planSlug === 'free') {
+                statusBadge.textContent = 'Free Plan';
+                statusBadge.style.background = '#eff6ff';
+                statusBadge.style.color = '#2563eb';
+            } else if (subStatus === 'expired') {
+                statusBadge.textContent = 'Expired';
+                statusBadge.style.background = '#fef2f2';
+                statusBadge.style.color = '#dc2626';
+            } else {
+                statusBadge.textContent = 'Active';
+                statusBadge.style.background = '#f0fdf4';
+                statusBadge.style.color = '#16a34a';
+            }
+
+            const activatedEl = document.getElementById('subActivatedValue');
+            if (planSlug === 'free' || !sub.starts_at) {
+                activatedEl.textContent = 'Not applicable';
+            } else {
+                activatedEl.textContent = formatSubscriptionDate(sub.starts_at);
+            }
+
+            const expiresEl = document.getElementById('subExpiresValue');
+            if (planSlug === 'free' || !sub.expires_at) {
+                expiresEl.textContent = 'No expiry';
+            } else {
+                expiresEl.textContent = formatSubscriptionDateTime(sub.expires_at);
+            }
+
+            const remainingEl = document.getElementById('subRemainingValue');
+            if (planSlug === 'free' || !sub.expires_at) {
+                remainingEl.textContent = 'Ongoing';
+            } else {
+                remainingEl.textContent = calculateRemainingTime(sub.expires_at, sub.server_now || data.server_now);
+            }
+
+            const prevPlan = sub.previous_plan_name || data.previous_plan_name;
+            const prevExpiry = sub.previous_expires_at || data.previous_expires_at;
+            if (prevPlan && prevExpiry) {
+                previousBox.style.display = 'block';
+                document.getElementById('subPreviousValue').textContent = `${prevPlan} expired on ${formatSubscriptionDate(prevExpiry)}`;
+            } else {
+                previousBox.style.display = 'none';
+            }
+
+            if (renewBtn) {
+                if (planSlug === 'monthly' || planSlug === 'yearly' || subStatus === 'expired') {
+                    renewBtn.style.display = 'inline-flex';
+                } else {
+                    renewBtn.style.display = 'none';
+                }
+            }
+        }
+
+        // ── In-App Auto-Update System ──────────────────────────────────
+        let cachedUpdateManifest = null;
+        let updatePollInterval = null;
+        let isCheckingUpdate = false;
+        let updateCurrentAction = 'update'; // 'update' | 'install'
+
+        async function loadUpdaterSettings() {
+            try {
+                const res = await fetch('/desktop-api/updater/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.current_version) {
+                        const verEl = document.getElementById('installedVersionText');
+                        if (verEl) verEl.textContent = data.current_version;
+                    }
+                    if (data.state === 'ready_to_install') {
+                        const statusEl = document.getElementById('updateStatusText');
+                        if (statusEl) statusEl.textContent = 'Update downloaded and ready to install';
+                        const inlineEl = document.getElementById('inlineUpdateNotice');
+                        if (inlineEl) inlineEl.style.display = 'block';
+                        const inlineTitle = document.getElementById('inlineUpdateTitle');
+                        if (inlineTitle) inlineTitle.textContent = 'Update Ready to Install';
+                    }
+                }
+            } catch (_) {}
+        }
+
+        async function checkForUpdates(silent = false) {
+            if (isCheckingUpdate) return;
+            isCheckingUpdate = true;
+
+            const checkBtn = document.getElementById('checkUpdateBtn');
+            const checkBtnText = document.getElementById('checkUpdateBtnText');
+            const updateStatusText = document.getElementById('updateStatusText');
+            const inlineNotice = document.getElementById('inlineUpdateNotice');
+            const inlineTitle = document.getElementById('inlineUpdateTitle');
+            const inlineSubtitle = document.getElementById('inlineUpdateSubtitle');
+
+            if (!silent && checkBtnText) {
+                checkBtnText.textContent = 'Checking...';
+                if (checkBtn) checkBtn.disabled = true;
+            }
+
+            try {
+                const res = await fetch('/desktop-api/updater/check');
+                const data = await res.json();
+
+                if (data.current_version) {
+                    const verEl = document.getElementById('installedVersionText');
+                    if (verEl) verEl.textContent = data.current_version;
+                }
+
+                if (data.success && data.update_available && data.manifest) {
+                    cachedUpdateManifest = data.manifest;
+
+                    if (updateStatusText) {
+                        updateStatusText.textContent = `Update available: v${data.manifest.version}`;
+                    }
+                    if (inlineNotice) {
+                        inlineNotice.style.display = 'block';
+                        if (inlineTitle) inlineTitle.textContent = `DeskStream v${data.manifest.version} Available`;
+                        if (inlineSubtitle) inlineSubtitle.textContent = `Released ${data.manifest.release_date || 'recently'}. Click to review and install.`;
+                    }
+
+                    // Check dismissal policy: if silent check and user dismissed within last 4 hours, do not auto-popup
+                    const dismissedUntil = localStorage.getItem('ds_update_dismissed_until');
+                    const isDismissed = dismissedUntil && (Date.now() < parseInt(dismissedUntil, 10));
+
+                    if (!silent || (!isDismissed || data.manifest.mandatory)) {
+                        showUpdateModal(data.manifest);
+                    }
+                } else if (data.success && !data.update_available) {
+                    if (updateStatusText) {
+                        updateStatusText.textContent = `Up to date (v${data.current_version || '1.1.3'})`;
+                    }
+                    if (inlineNotice) {
+                        inlineNotice.style.display = 'none';
+                    }
+                    if (!silent) {
+                        showToast(`DeskStream is up to date (v${data.current_version || '1.1.3'})`);
+                    }
+                } else {
+                    const errMsg = data.error || 'Server returned an error while checking for updates.';
+                    if (!silent) {
+                        showToast(`Update check failed: ${errMsg}`);
+                    }
+                }
+            } catch (err) {
+                console.error('[UPDATER] Update check failed:', err);
+                if (!silent) {
+                    showToast('Could not reach update server. Check your internet connection.');
+                }
+            } finally {
+                isCheckingUpdate = false;
+                if (checkBtnText) checkBtnText.textContent = 'Check for Updates';
+                if (checkBtn) checkBtn.disabled = false;
+            }
+        }
+
+        async function checkUpdatesManual() {
+            await checkForUpdates(false);
+        }
+
+        function showUpdateModalFromCached() {
+            if (cachedUpdateManifest) {
+                showUpdateModal(cachedUpdateManifest);
+            } else {
+                checkForUpdates(false);
+            }
+        }
+
+        function showUpdateModal(manifest) {
+            const overlay = document.getElementById('updateModalOverlay');
+            if (!overlay) return;
+
+            const badge = document.getElementById('modalNewVersionBadge');
+            const note = document.getElementById('modalCurrentVersionNote');
+            const notesBox = document.getElementById('modalReleaseNotes');
+            const mandatoryAlert = document.getElementById('modalMandatoryAlert');
+            const laterBtn = document.getElementById('modalLaterBtn');
+            const closeBtn = document.getElementById('modalCloseBtn');
+            const progressSection = document.getElementById('modalProgressSection');
+            const errorBanner = document.getElementById('modalErrorBanner');
+            const updateBtn = document.getElementById('modalUpdateBtn');
+            const updateBtnText = document.getElementById('modalUpdateBtnText');
+
+            if (badge) badge.textContent = `v${manifest.version}`;
+            const curVer = document.getElementById('installedVersionText')?.textContent || '1.1.3';
+            if (note) note.textContent = `Currently installed: v${curVer}`;
+            if (notesBox) notesBox.textContent = manifest.release_notes || 'DeskStream performance, security, and stability improvements.';
+
+            if (manifest.mandatory) {
+                if (mandatoryAlert) mandatoryAlert.style.display = 'block';
+                if (laterBtn) laterBtn.style.display = 'none';
+                if (closeBtn) closeBtn.style.display = 'none';
+            } else {
+                if (mandatoryAlert) mandatoryAlert.style.display = 'none';
+                if (laterBtn) laterBtn.style.display = 'inline-block';
+                if (closeBtn) closeBtn.style.display = 'flex';
+            }
+
+            if (progressSection) progressSection.style.display = 'none';
+            if (errorBanner) errorBanner.style.display = 'none';
+            if (updateBtn) updateBtn.disabled = false;
+            if (updateBtnText) updateBtnText.textContent = 'Update Now';
+            updateCurrentAction = 'update';
+
+            overlay.style.display = 'flex';
+        }
+
+        function dismissUpdateModal() {
+            if (cachedUpdateManifest && cachedUpdateManifest.mandatory) {
+                // Mandatory update cannot be dismissed
+                return;
+            }
+            // Dismiss for 4 hours
+            localStorage.setItem('ds_update_dismissed_until', Date.now() + (4 * 3600 * 1000));
+            const overlay = document.getElementById('updateModalOverlay');
+            if (overlay) overlay.style.display = 'none';
+            if (updatePollInterval) {
+                clearInterval(updatePollInterval);
+                updatePollInterval = null;
+            }
+        }
+
+        async function handleUpdateActionClick() {
+            if (updateCurrentAction === 'install') {
+                await applyUpdateRestart();
+            } else {
+                await startUpdateDownload();
+            }
+        }
+
+        async function startUpdateDownload() {
+            const errorBanner = document.getElementById('modalErrorBanner');
+            const progressSection = document.getElementById('modalProgressSection');
+            const progressBar = document.getElementById('modalProgressBar');
+            const progressLabel = document.getElementById('modalProgressLabel');
+            const progressPercent = document.getElementById('modalProgressPercent');
+            const updateBtn = document.getElementById('modalUpdateBtn');
+            const updateBtnText = document.getElementById('modalUpdateBtnText');
+            const laterBtn = document.getElementById('modalLaterBtn');
+
+            if (errorBanner) errorBanner.style.display = 'none';
+            if (progressSection) progressSection.style.display = 'block';
+            if (progressBar) {
+                progressBar.style.width = '0%';
+                progressBar.style.background = 'linear-gradient(90deg, #3b82f6, #2563eb)';
+            }
+            if (progressLabel) progressLabel.textContent = 'Connecting to download server...';
+            if (progressPercent) progressPercent.textContent = '0%';
+            if (updateBtn) updateBtn.disabled = true;
+            if (updateBtnText) updateBtnText.textContent = 'Downloading...';
+            if (laterBtn && (!cachedUpdateManifest || !cachedUpdateManifest.mandatory)) {
+                laterBtn.style.display = 'inline-block';
+            }
+
+            try {
+                const res = await fetch('/desktop-api/updater/download', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.error || 'Failed to start download');
+                }
+
+                // Poll status every 400ms
+                if (updatePollInterval) clearInterval(updatePollInterval);
+                updatePollInterval = setInterval(pollUpdateDownloadStatus, 400);
+            } catch (err) {
+                console.error('[UPDATER] Download trigger error:', err);
+                if (errorBanner) {
+                    errorBanner.style.display = 'flex';
+                    const msgEl = document.getElementById('modalErrorMessage');
+                    if (msgEl) msgEl.textContent = `Download error: ${err.message}`;
+                }
+                if (updateBtn) updateBtn.disabled = false;
+                if (updateBtnText) updateBtnText.textContent = 'Retry Download';
+            }
+        }
+
+        async function pollUpdateDownloadStatus() {
+            try {
+                const res = await fetch('/desktop-api/updater/status');
+                if (!res.ok) return;
+                const data = await res.json();
+                const state = data.state;
+
+                const progressBar = document.getElementById('modalProgressBar');
+                const progressLabel = document.getElementById('modalProgressLabel');
+                const progressPercent = document.getElementById('modalProgressPercent');
+                const updateBtn = document.getElementById('modalUpdateBtn');
+                const updateBtnText = document.getElementById('modalUpdateBtnText');
+                const errorBanner = document.getElementById('modalErrorBanner');
+                const modalErrorMessage = document.getElementById('modalErrorMessage');
+
+                if (typeof state === 'object' && state.downloading) {
+                    const p = state.downloading.progress || 0;
+                    const rBytes = (state.downloading.received_bytes / (1024 * 1024)).toFixed(1);
+                    const tBytes = (state.downloading.total_bytes / (1024 * 1024)).toFixed(1);
+
+                    if (progressBar) progressBar.style.width = `${p}%`;
+                    if (progressPercent) progressPercent.textContent = `${p}%`;
+                    if (progressLabel) progressLabel.textContent = `Downloading update: ${rBytes} MB / ${tBytes} MB`;
+                } else if (state === 'ready_to_install') {
+                    if (updatePollInterval) {
+                        clearInterval(updatePollInterval);
+                        updatePollInterval = null;
+                    }
+                    if (progressBar) {
+                        progressBar.style.width = '100%';
+                        progressBar.style.background = '#16a34a';
+                    }
+                    if (progressPercent) progressPercent.textContent = '100%';
+                    if (progressLabel) progressLabel.textContent = 'Update verified cryptographically and ready to install!';
+
+                    updateCurrentAction = 'install';
+                    if (updateBtn) updateBtn.disabled = false;
+                    if (updateBtnText) updateBtnText.textContent = 'Restart & Install Now';
+                } else if (typeof state === 'object' && state.error) {
+                    if (updatePollInterval) {
+                        clearInterval(updatePollInterval);
+                        updatePollInterval = null;
+                    }
+                    if (errorBanner) {
+                        errorBanner.style.display = 'flex';
+                        if (modalErrorMessage) modalErrorMessage.textContent = state.error.message || 'Update verification failed.';
+                    }
+                    if (updateBtn) updateBtn.disabled = false;
+                    if (updateBtnText) updateBtnText.textContent = 'Retry Download';
+                    updateCurrentAction = 'update';
+                }
+            } catch (e) {
+                console.warn('[UPDATER] Poll status failed:', e);
+            }
+        }
+
+        async function applyUpdateRestart() {
+            // 1. Session safety check: Never restart during an active remote session
+            const hasLocalActiveSessions = (typeof activeSessions === 'object' && Object.keys(activeSessions).length > 0);
+            try {
+                const stRes = await fetch('/desktop-api/status');
+                if (stRes.ok) {
+                    const stData = await stRes.json();
+                    if (stData && stData.in_session) {
+                        alert('A remote desktop session is currently active. Please disconnect or finish the session before restarting DeskStream to apply the update.');
+                        return;
+                    }
+                }
+            } catch (_) {}
+
+            if (hasLocalActiveSessions) {
+                alert('A remote desktop session is currently active. Please disconnect or finish the session before restarting DeskStream to apply the update.');
+                return;
+            }
+
+            const updateBtn = document.getElementById('modalUpdateBtn');
+            const updateBtnText = document.getElementById('modalUpdateBtnText');
+            const errorBanner = document.getElementById('modalErrorBanner');
+            const modalErrorMessage = document.getElementById('modalErrorMessage');
+
+            if (updateBtn) updateBtn.disabled = true;
+            if (updateBtnText) updateBtnText.textContent = 'Restarting DeskStream...';
+
+            try {
+                const res = await fetch('/desktop-api/updater/install', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    throw new Error(data.error || 'Failed to trigger application restart');
+                }
+            } catch (err) {
+                console.error('[UPDATER] Install restart error:', err);
+                if (errorBanner) {
+                    errorBanner.style.display = 'flex';
+                    if (modalErrorMessage) modalErrorMessage.textContent = err.message;
+                }
+                if (updateBtn) updateBtn.disabled = false;
+                if (updateBtnText) updateBtnText.textContent = 'Restart & Install Now';
+            }
+        }
+
         function showDashboardPage(page) {
             const home = document.getElementById('dashboardInnerContent');
             const settings = document.getElementById('settingsPage');
@@ -2581,7 +3392,21 @@
 
             const isHome = page === 'home';
             if (home) home.style.display = isHome ? 'block' : 'none';
-            if (settings) settings.style.display = page === 'settings' ? 'block' : 'none';
+            if (settings) {
+                settings.style.display = page === 'settings' ? 'block' : 'none';
+                if (page === 'settings') {
+                    loadSubscriptionSettings();
+                    loadUpdaterSettings();
+                    if (!subscriptionRefreshTimer) {
+                        subscriptionRefreshTimer = setInterval(() => {
+                            const settingsEl = document.getElementById('settingsPage');
+                            if (settingsEl && settingsEl.style.display !== 'none') {
+                                loadSubscriptionSettings(true);
+                            }
+                        }, 60000);
+                    }
+                }
+            }
             if (about) about.style.display = page === 'about' ? 'block' : 'none';
             
             if (isHome) {
@@ -2653,11 +3478,185 @@
             document.getElementById('recentDropdown').classList.remove('open');
         }
 
-        function toggleFavorite(btn) {
-            btn.textContent = btn.textContent === '☆' ? '★' : '☆';
-            btn.style.color = btn.textContent === '★' ? '#f59e0b' : '';
+        function readFavoriteDeviceIds() {
+            const raw = localStorage.getItem('ds_favorite_devices');
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) throw new Error('Saved favorites are not a list.');
+            return [...new Set(parsed.map(value => String(value).replace(/\D/g, ''))
+                .filter(value => /^\d{9}$/.test(value)))];
+        }
+
+        function toggleFavorite(btn, systemId) {
+            try {
+                const favorites = new Set(readFavoriteDeviceIds());
+                const isFavorite = favorites.has(systemId);
+                if (isFavorite) favorites.delete(systemId);
+                else favorites.add(systemId);
+                localStorage.setItem('ds_favorite_devices', JSON.stringify([...favorites]));
+                renderRecentSessionHistory();
+            } catch (error) {
+                console.error('[RECENT SESSIONS] Could not save favorite:', error);
+                showToast('Could not save this favorite on this device.');
+            }
+        }
+
+        function toggleRecentSessionsView() {
+            showAllRecentSessions = !showAllRecentSessions;
+            const link = document.getElementById('recentSessionsViewAll');
+            if (link) link.textContent = showAllRecentSessions ? 'Show Recent' : 'View All';
+            renderRecentSessionHistory();
+        }
+
+        function connectRecentSession(systemId) {
+            const id = String(systemId || '').replace(/\D/g, '');
+            if (!/^\d{9}$/.test(id)) {
+                showToast('This saved device ID is invalid. Remove it and try again.');
+                return;
+            }
+            const input = document.getElementById('remoteIdInput');
+            if (input) input.value = id;
+            showDashboardPage('home');
+            startConnection(id);
+        }
+
+        function toggleRecentActions(event, systemId) {
+            event.stopPropagation();
+            const menu = document.getElementById(`recentActions-${systemId}`);
+            if (!menu) return;
+            const wasOpen = menu.hidden;
+            document.querySelectorAll('.recent-card-menu').forEach(item => { item.hidden = true; });
+            menu.hidden = !wasOpen;
+        }
+
+        async function copyRecentSessionId(systemId) {
+            try {
+                await navigator.clipboard.writeText(systemId);
+                showToast('Device ID copied: ' + formatId(systemId));
+            } catch (error) {
+                console.error('[RECENT SESSIONS] Could not copy device ID:', error);
+                showToast('Could not copy the device ID. Select it from the connection field instead.');
+            }
+        }
+
+        function removeRecentSession(systemId) {
+            try {
+                saveRecentSessionEntries(readRecentSessionEntries().filter(item => item.system_id !== systemId));
+                renderRecentSessionHistory();
+                showToast('Device removed from recent sessions.');
+            } catch (error) {
+                console.error('[RECENT SESSIONS] Could not remove saved history:', error);
+                showToast('Could not update saved session history.');
+            }
         }
         let connectionPollInterval = null;
+
+        function clearApprovedReverseHandoff(targetId) {
+            if (window.__deskstreamReverseHandoffTarget === targetId) {
+                window.__deskstreamReverseHandoffTarget = null;
+            }
+        }
+
+        function traceReverseHandoff(stage, targetId) {
+            const requestId = window.__deskstreamReverseHandoffRequestId;
+            if (!requestId
+                || !/^[A-Za-z0-9_-]{1,64}$/.test(requestId)
+                || !/^\d{9}$/.test(String(targetId || ''))
+                || !/^[A-Z_]+$/.test(stage)) {
+                return;
+            }
+            window.ipc?.postMessage(`reverse_handoff_trace:${requestId}:${stage}:${targetId}`);
+        }
+
+        function traceReverseSession(stage, sessionId) {
+            if (!/^[A-Z_]+$/.test(stage) || !/^\d{9}$/.test(String(sessionId || ''))) return;
+            window.ipc?.postMessage(`reverse_session_trace:${stage}:${sessionId}`);
+        }
+
+        function armReverseAutoAccept(requesterId, requestId = '') {
+            const normalizedRequesterId = String(requesterId || '');
+            const normalizedRequestId = String(requestId || '');
+            if (!/^\d{9}$/.test(normalizedRequesterId)
+                || normalizedRequesterId === currentHostUid
+                || (normalizedRequestId && !/^[A-Za-z0-9_-]{1,64}$/.test(normalizedRequestId))
+                || !isAuthenticated) {
+                if (normalizedRequestId) traceReverseHandoff('AUTO_ACCEPT_ARM_FAILED', normalizedRequesterId);
+                console.error('[REVERSE] Refusing to arm auto-accept for an invalid or unauthenticated peer.');
+                showToast('Could not prepare this device to accept the reverse connection.');
+                return false;
+            }
+            if (approvedReverseRequesterId && Date.now() <= approvedReverseExpiresAt) {
+                const samePendingRequest = approvedReverseRequesterId === normalizedRequesterId
+                    && approvedReverseRequestId === (normalizedRequestId || null);
+                if (!samePendingRequest) {
+                    if (normalizedRequestId) traceReverseHandoff('AUTO_ACCEPT_ARM_FAILED', normalizedRequesterId);
+                    console.warn('[REVERSE] Another reverse handoff is already awaiting a connection.');
+                    showToast('Another reverse handoff is already pending.');
+                    return false;
+                }
+                return true;
+            }
+            approvedReverseRequesterId = normalizedRequesterId;
+            approvedReverseRequestId = normalizedRequestId || null;
+            approvedReverseExpiresAt = Date.now() + 60000;
+            if (normalizedRequestId) traceReverseHandoff('AUTO_ACCEPT_ARMED', normalizedRequesterId);
+            console.info(`[REVERSE] Auto-accept armed for approved peer ${normalizedRequesterId}; waiting for its authenticated connection request.`);
+            return true;
+        }
+
+        function processPendingReverseAcceptance() {
+            const pending = window.__deskstreamPendingReverseAcceptance;
+            if (!pending) return false;
+            if (Date.now() > pending.expiresAt) {
+                traceReverseHandoff('AUTO_ACCEPT_EXPIRED', pending.requesterId);
+                window.__deskstreamPendingReverseAcceptance = null;
+                showToast('Reverse handoff expired before the peer reconnected.');
+                return false;
+            }
+            if (!isAuthenticated) return false;
+            if (!armReverseAutoAccept(pending.requesterId, pending.requestId)) {
+                window.__deskstreamPendingReverseAcceptance = null;
+                return false;
+            }
+            window.__deskstreamPendingReverseAcceptance = null;
+            return true;
+        }
+
+        function clearReverseAutoAccept(requesterId, requestId = '') {
+            if (approvedReverseRequesterId !== String(requesterId || '')
+                || approvedReverseRequestId !== (requestId || null)) {
+                return false;
+            }
+            approvedReverseRequesterId = null;
+            approvedReverseExpiresAt = 0;
+            approvedReverseRequestId = null;
+            if (requestId) traceReverseHandoff('AUTO_ACCEPT_CANCELLED', requesterId);
+            return true;
+        }
+
+        function isApprovedReverseRequester(requesterId) {
+            return Boolean(
+                approvedReverseRequesterId
+                && String(requesterId || '') === approvedReverseRequesterId
+            );
+        }
+
+        function completeIntegratedReverseHandoff(targetId, session) {
+            const reverseTargetId = session.reverseHandoffTargetId;
+            if (!reverseTargetId) return;
+            if (targetId !== reverseTargetId) {
+                console.error('[REVERSE] Refusing handoff because the closed session target does not match the approved peer.');
+                showToast('Reverse handoff could not be started because the session peer changed.');
+                return;
+            }
+            window.__deskstreamReverseHandoffTarget = reverseTargetId;
+            showToast('Current session closed. Connecting in the opposite direction...');
+            startConnection(reverseTargetId).catch(error => {
+                console.error('[REVERSE] Failed to start the peer-initiated reverse connection:', error);
+                clearApprovedReverseHandoff(reverseTargetId);
+                showToast('Reverse approval was received, but the new connection could not be started.');
+            });
+        }
 
         async function startConnection(targetOverride = null) {
             const raw = targetOverride || document.getElementById('remoteIdInput').value.trim();
@@ -2667,16 +3666,25 @@
                 showToast('Remote ID must contain 9 digits');
                 return;
             }
+            const isApprovedReverseHandoff = window.__deskstreamReverseHandoffTarget === targetId;
+            if (isApprovedReverseHandoff) traceReverseHandoff('CONNECTION_STARTED', targetId);
+            const recentTarget = findKnownDevice(targetId);
+            if (recentTarget && recentTarget.is_online == 0) {
+                showToast('This device appears offline. Sending a normal connection request; host approval is still required.');
+            } else {
+                showToast('Sending request to ' + formatId(targetId) + '...');
+            }
             if (freshAuthorizationRequests.has(targetId)) {
-                showToast('Reconnect is already running for this device.');
+                clearApprovedReverseHandoff(targetId);
+                showToast(isApprovedReverseHandoff
+                    ? 'The approved reverse handoff could not start because another reconnect is already running.'
+                    : 'Reconnect is already running for this device.');
                 return;
             }
             const isFreshAuthorization = freshAuthorizationRequests.has(targetId);
             if (isFreshAuthorization) {
                 console.info(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTH_REQUEST_SENT retry=1/1 target_id_length=${targetId.length}`);
             }
-            showToast('Sending request to ' + formatId(targetId) + '...');
-
             const connectBtn = document.querySelector('.btn-connect-primary');
             if (connectBtn) {
                 connectBtn.disabled = true;
@@ -2692,24 +3700,22 @@
                 });
                 const data = await res.json();
                 if (data.status === 'success' && data.request) {
+                    if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_CREATED', targetId);
                     const token = data.request.request_token;
                     const targetDevice = findKnownDevice(targetId);
                     const targetName = targetDevice ? (targetDevice.name || 'Remote Device') : 'Remote Device';
                     let sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&target_name=${encodeURIComponent(targetName)}`;
                     
                     if (data.request.status === 'accepted') {
+                        if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_ACCEPTED', targetId);
                         if (isFreshAuthorization) console.info(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTHORIZATION_ACCEPTED target_id_length=${targetId.length}`);
-                        recordRecentSession({
-                            system_id: targetId,
-                            name: targetName,
-                            ip_address: targetDevice?.ip_address || 'Connected',
-                            os_type: 'windows'
-                        });
                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                         openIntegratedSession(sessionUrl);
                     } else {
                         if (isFreshAuthorization) console.info(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTH_REQUEST_PENDING awaiting_remote_approval=true`);
-                        showToast(`Connection request sent — waiting for ${formatId(targetId)} to accept...`);
+                        showToast(isApprovedReverseHandoff
+                            ? 'The approved reverse handoff is waiting for the replacement session to connect...'
+                            : `Connection request sent — waiting for ${formatId(targetId)} to accept...`);
                         
                         if (connectionPollInterval) clearInterval(connectionPollInterval);
                         let pollCount = 0;
@@ -2717,8 +3723,12 @@
                             pollCount++;
                             if (pollCount > 30) { 
                                 clearInterval(connectionPollInterval);
+                                clearApprovedReverseHandoff(targetId);
                                 if (isFreshAuthorization) console.warn(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTH_REQUEST_FAILED reason=approval_timeout`);
-                                showToast('Connection request timed out.');
+                                showToast(isApprovedReverseHandoff
+                                    ? 'Approved reverse session timed out before it could be established.'
+                                    : 'Connection request timed out.');
+                                if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_FAILED', targetId);
                                 if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                                 return;
                             }
@@ -2727,13 +3737,8 @@
                                 const statusData = await statusRes.json();
                                 if (statusData.status === 'success') {
                                     if (statusData.request_status === 'accepted') {
+                                        if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_ACCEPTED', targetId);
                                         if (isFreshAuthorization) console.info(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTHORIZATION_ACCEPTED target_id_length=${targetId.length}`);
-                                        recordRecentSession({
-                                            system_id: targetId,
-                                            name: findKnownDevice(targetId)?.name || 'Remote Device',
-                                            ip_address: findKnownDevice(targetId)?.ip_address || 'Connected',
-                                            os_type: 'windows'
-                                        });
                                         clearInterval(connectionPollInterval);
                                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                                         const targetDevice = findKnownDevice(targetId);
@@ -2741,24 +3746,38 @@
                                         let sessionUrl = `session.html?id=${encodeURIComponent(targetId)}&requester_system_id=${encodeURIComponent(currentHostUid)}&mode=${selectedMode}&token=${encodeURIComponent(token)}&target_name=${encodeURIComponent(targetName)}`;
                                         openIntegratedSession(sessionUrl);
                                     } else if (statusData.request_status === 'rejected' || statusData.request_status === 'expired') {
+                                        if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_FAILED', targetId);
                                         clearInterval(connectionPollInterval);
+                                        clearApprovedReverseHandoff(targetId);
                                         if (isFreshAuthorization) console.warn(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTHORIZATION_FAILED reason=${statusData.request_status}`);
-                                        showToast('Connection request was ' + statusData.request_status);
+                                        showToast(isApprovedReverseHandoff
+                                            ? `Approved reverse session was ${statusData.request_status}.`
+                                            : 'Connection request was ' + statusData.request_status);
                                         if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
                                     }
                                 }
-                            } catch (e) { }
+                            } catch (e) {
+                                console.warn('[SESSION] Could not check connection request status:', e);
+                            }
                         }, 2000);
                     }
                 } else {
+                    if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_FAILED', targetId);
+                    clearApprovedReverseHandoff(targetId);
                     if (isFreshAuthorization) console.warn(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTH_REQUEST_FAILED reason=${data.status || 'request_rejected'}`);
                     if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
-                    showToast(data.message || 'Connection request failed');
+                    showToast(isApprovedReverseHandoff
+                        ? `Approved reverse session could not be started: ${data.message || 'connection request failed'}`
+                        : data.message || 'Connection request failed');
                 }
             } catch (e) { 
+                if (isApprovedReverseHandoff) traceReverseHandoff('REQUEST_FAILED', targetId);
+                clearApprovedReverseHandoff(targetId);
                 if (isFreshAuthorization) console.error(`[RECONNECT TRACE] timestamp=${new Date().toISOString()} stage=FRESH_AUTH_REQUEST_FAILED reason=${e && e.name ? e.name : 'request_error'}`);
                 if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = `Connect <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`; }
-                showToast('Server error — check internet connection'); 
+                showToast(isApprovedReverseHandoff
+                    ? 'Approved reverse session could not be started. Check the server and try again.'
+                    : 'Server error — check internet connection');
             }
         }
 
@@ -2787,10 +3806,11 @@
         }
 
         function getOsSvg(osType) {
-            osType = (osType || 'windows').toLowerCase();
+            osType = (osType || '').toLowerCase();
             if (osType.includes('mac') || osType.includes('apple')) return '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.63-.77 1.06-1.84.94-2.91-.91.04-2.02.61-2.67 1.37-.58.67-1.09 1.76-.95 2.8 1.02 0 2-.49 2.63-1.26z"/></svg>';
             if (osType.includes('linux')) return '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"/></svg>';
-            return '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.557L10.375 4.5v6.924H3V5.557zm0 12.886l7.375 1.057v-6.924H3v5.867zm8.344 1.218L21 21.2V11.424H11.344v8.237zM21 2.8L11.344 4.361v7.063H21V2.8z"/></svg>';
+            if (osType.includes('windows') || osType.includes('win')) return '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.557L10.375 4.5v6.924H3V5.557zm0 12.886l7.375 1.057v-6.924H3v5.867zm8.344 1.218L21 21.2V11.424H11.344v8.237zM21 2.8L11.344 4.361v7.063H21V2.8z"/></svg>';
+            return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>';
         }
 
         function formatRelativeTime(dateStr) {
@@ -2809,41 +3829,167 @@
             return d.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
         }
 
-        function renderDevicesGrid(devices) {
+        function escapeRecentHtml(value) {
+            return String(value).replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            })[character]);
+        }
+
+        let isFetchingRecentSessions = false;
+        async function fetchRecentSessionsFromServer() {
+            if (isFetchingRecentSessions) return;
+            isFetchingRecentSessions = true;
+            try {
+                const headers = { 'Accept': 'application/json' };
+                const token = localStorage.getItem('ds_session_token');
+                if (token) {
+                    headers['X-DeskStream-Session'] = token;
+                }
+                const res = await fetch(`${BACKEND}/api/sessions/history.php?limit=20`, {
+                    credentials: 'include',
+                    headers
+                });
+                if (!res.ok) {
+                    return;
+                }
+                const data = await res.json();
+                if (data.status === 'success' && Array.isArray(data.sessions)) {
+                    const serverEntries = data.sessions.map(s => {
+                        const peerId = String(s.peer?.system_id || '').replace(/\D/g, '');
+                        return {
+                            system_id: peerId,
+                            device_uid: peerId,
+                            name: s.peer?.name || 'Remote Device',
+                            os_type: s.peer?.os_type || 'windows',
+                            ip_address: s.peer?.ip_address || '',
+                            last_seen_at: s.ended_at || s.started_at,
+                            duration_formatted: s.duration_formatted || '',
+                            duration_seconds: s.duration_seconds || 0,
+                            status: s.status || 'completed',
+                            mode: s.mode || 'desktop'
+                        };
+                    }).filter(e => /^\d{9}$/.test(e.system_id));
+
+                    if (serverEntries.length > 0) {
+                        const local = readRecentSessionEntries();
+                        const mergedMap = new Map();
+                        for (const entry of serverEntries) {
+                            mergedMap.set(entry.system_id, entry);
+                        }
+                        for (const entry of local) {
+                            if (!mergedMap.has(entry.system_id)) {
+                                mergedMap.set(entry.system_id, entry);
+                            }
+                        }
+                        saveRecentSessionEntries([...mergedMap.values()]);
+                        renderRecentCardsFromList([...mergedMap.values()]);
+                    }
+                }
+            } catch (err) {
+                console.warn('[RECENT SESSIONS] Failed to fetch server history:', err);
+            } finally {
+                isFetchingRecentSessions = false;
+            }
+        }
+
+        function renderRecentCardsFromList(sessions) {
             const container = document.getElementById('workstationsContainer');
-            if (!devices || devices.length === 0) {
-                container.innerHTML = '<div class="empty-grid-box">No remote desktop agents connected yet. Launch the DeskStream Agent on another computer to connect automatically!</div>';
+            if (!container) return;
+            let favorites = new Set();
+            try {
+                favorites = new Set(readFavoriteDeviceIds());
+            } catch (error) {
+                console.error('[RECENT SESSIONS] Favorites could not be loaded:', error);
+            }
+            const onlineById = new Map(lastFetchedDevices.map(device => [
+                String(device.system_id || device.device_uid || '').replace(/\D/g, ''),
+                device
+            ]));
+            sessions = sessions.map(entry => {
+                const online = onlineById.get(entry.system_id);
+                return {
+                    ...entry,
+                    name: online?.name || entry.name,
+                    os_type: online?.os_type || entry.os_type,
+                    ip_address: online?.ip_address || entry.ip_address || '',
+                    is_online: online ? online.is_online : 0
+                };
+            }).sort((a, b) => {
+                const favoriteOrder = Number(favorites.has(b.system_id)) - Number(favorites.has(a.system_id));
+                return favoriteOrder || new Date(b.last_seen_at || 0) - new Date(a.last_seen_at || 0);
+            });
+            const viewAllLink = document.getElementById('recentSessionsViewAll');
+            if (viewAllLink) {
+                viewAllLink.hidden = sessions.length <= 6;
+                viewAllLink.textContent = showAllRecentSessions ? 'Show Recent' : 'View All';
+            }
+            if (sessions.length === 0) {
+                container.innerHTML = '<div class="empty-grid-box">No previous sessions yet. Connect to a device to build your session history.</div>';
                 return;
             }
+            const displayedSessions = showAllRecentSessions ? sessions : sessions.slice(0, 6);
             const colors = ['#0284c7', '#ef4444', '#16a34a', '#f59e0b', '#8b5cf6', '#0d9488'];
-            container.innerHTML = devices.map((dev, idx) => {
+            container.innerHTML = displayedSessions.map((dev, idx) => {
                 const color = colors[idx % colors.length];
                 const isOnline = dev.is_online == 1;
-                const timeStr = formatRelativeTime(dev.last_seen_at || dev.created_at);
-                const safeName = (dev.name || 'Workstation').replace(/'/g, "\\'");
-                const safeUid = (dev.device_uid || dev.system_id || '').replace(/'/g, "\\'");
+                const timeValue = dev.last_seen_at || dev.created_at;
+                const sessionDate = timeValue && !Number.isNaN(new Date(timeValue).getTime())
+                    ? new Date(timeValue)
+                    : null;
+                const timeStr = sessionDate
+                    ? sessionDate.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+                    : 'Session date unavailable';
+                const safeName = escapeRecentHtml(dev.name || 'Workstation');
+                const safeUid = dev.system_id;
+                const favorite = favorites.has(safeUid);
+                const durationPill = dev.duration_formatted ? `<span style="margin-left: 6px; color: #16a34a; font-size: 11px; font-weight: 600;">· ${escapeRecentHtml(dev.duration_formatted)}</span>` : '';
+                const modePill = dev.mode ? `<span style="margin-left: 6px; text-transform: uppercase; font-size: 10px; font-weight: 600; padding: 1px 5px; border-radius: 4px; background: #f1f5f9; color: #475569;">${escapeRecentHtml(dev.mode)}</span>` : '';
                 return `
-                <div class="workstation-card" onclick="startConnection('${safeUid}'); window.scrollTo({ top: 0, behavior: 'smooth' });">
+                <div class="workstation-card" onclick="connectRecentSession('${safeUid}')">
                     <div class="device-avatar-circle" style="background:${color};">${getOsSvg(dev.os_type)}</div>
                     <div class="card-main-info">
                         <div class="card-top-row">
                             <div class="device-name-title">
-                                ${dev.name || 'Workstation'}
+                                ${safeName}
                                 <span class="online-dot ${isOnline ? 'active' : ''}" title="${isOnline ? 'Online' : 'Offline'}"></span>
                             </div>
                             <div class="card-top-actions" onclick="event.stopPropagation()">
-                                <button class="star-fav-btn" title="Favorite" onclick="toggleFavorite(this)">☆</button>
-                                <button class="more-opt-btn" title="Options" onclick="showToast('Device: ${safeName}')">⋮</button>
+                                <button class="star-fav-btn" title="${favorite ? 'Remove favorite' : 'Add favorite'}" aria-pressed="${favorite}" onclick="event.stopPropagation(); toggleFavorite(this, '${safeUid}')">${favorite ? '★' : '☆'}</button>
+                                <button class="more-opt-btn" title="Options" aria-label="Actions for ${safeName}" onclick="toggleRecentActions(event, '${safeUid}')">⋮</button>
+                                <div class="recent-card-menu" id="recentActions-${safeUid}" hidden>
+                                    <button type="button" onclick="event.stopPropagation(); connectRecentSession('${safeUid}')">Connect</button>
+                                    <button type="button" onclick="event.stopPropagation(); copyRecentSessionId('${safeUid}')">Copy device ID</button>
+                                    <button type="button" onclick="event.stopPropagation(); removeRecentSession('${safeUid}')">Remove from history</button>
+                                </div>
                             </div>
                         </div>
-                        <div class="device-ip-text">${dev.ip_address || '—'}</div>
+                        <div class="device-ip-text">${escapeRecentHtml(formatId(safeUid))}</div>
                         <div class="last-active-row">
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                            ${timeStr}
+                            <span>${escapeRecentHtml(timeStr)}</span>
+                            ${durationPill}
+                            ${modePill}
                         </div>
                     </div>
                 </div>`;
             }).join('');
+        }
+
+        function renderRecentSessionHistory() {
+            const container = document.getElementById('workstationsContainer');
+            if (!container) return;
+            try {
+                const sessions = readRecentSessionEntries();
+                renderRecentCardsFromList(sessions);
+            } catch (error) {
+                console.error('[RECENT SESSIONS] History could not be loaded:', error);
+                container.innerHTML = '<div class="empty-grid-box">Recent session history could not be loaded. Check this device’s local storage settings and refresh the dashboard.</div>';
+            }
+            fetchRecentSessionsFromServer();
         }
 
         function populateRecentDropdown(devices) {
@@ -3021,6 +4167,12 @@
                 }
             } catch (error) {
                 console.error('[SESSION] Failed to set session permissions:', error);
+                if (isApprovedReverse) {
+                    autoAcceptingReverseToken = null;
+                    approvedReverseRequesterId = null;
+                    approvedReverseExpiresAt = 0;
+                    approvedReverseRequestId = null;
+                }
                 showToast('Could not apply the selected session permissions.');
                 _connectionDecisionInFlight = false;
                 if (acceptBtn) acceptBtn.disabled = false;
@@ -3044,6 +4196,12 @@
                 }
             } catch (error) {
                 console.error('[AUTH] Could not authorize the pending request on the local agent:', error);
+                if (isApprovedReverse) {
+                    autoAcceptingReverseToken = null;
+                    approvedReverseRequesterId = null;
+                    approvedReverseExpiresAt = 0;
+                    approvedReverseRequestId = null;
+                }
                 showToast('The DeskStream agent could not authorize this request.');
                 _connectionDecisionInFlight = false;
                 if (acceptBtn) acceptBtn.disabled = false;
@@ -3064,7 +4222,10 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ request_token: requestToken })
                     });
-                    if (isApprovedReverse) autoAcceptingReverseToken = null;
+                    if (isApprovedReverse) {
+                        autoAcceptingReverseToken = null;
+                        clearReverseAutoAccept(requesterId, approvedReverseRequestId);
+                    }
                     showToast('The incoming connection request expired before it could be accepted.');
                     closeModal();
                     return;
@@ -3073,11 +4234,13 @@
                 const data = await res.json();
                 if (data.status === 'success') {
                     accepted = true;
+                    if (isApprovedReverse) traceReverseSession('AUTO_ACCEPT_SUCCEEDED', requesterId);
                     waitForRealBSession();
                     if (isApprovedReverse) {
                         autoAcceptingReverseToken = null;
                         approvedReverseRequesterId = null;
                         approvedReverseExpiresAt = 0;
+                        approvedReverseRequestId = null;
                     }
                 } else {
                     const message = String(data.message || 'Connection acceptance failed');
@@ -3087,7 +4250,10 @@
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ request_token: requestToken })
                         });
-                        if (isApprovedReverse) autoAcceptingReverseToken = null;
+                        if (isApprovedReverse) {
+                            autoAcceptingReverseToken = null;
+                            clearReverseAutoAccept(requesterId, approvedReverseRequestId);
+                        }
                         showToast('The incoming connection request is no longer available.');
                         closeModal();
                         return;
@@ -3107,6 +4273,9 @@
                 }
                 if (isApprovedReverse) {
                     autoAcceptingReverseToken = null;
+                    approvedReverseRequesterId = null;
+                    approvedReverseExpiresAt = 0;
+                    approvedReverseRequestId = null;
                     showToast(error.message || 'Could not start the approved reverse session');
                 } else {
                     showToast(error.message || 'Connection acceptance failed');
@@ -3186,6 +4355,9 @@
         document.addEventListener('click', (e) => {
             const dd = document.getElementById('recentDropdown');
             if (!e.target.closest('.input-with-dropdown')) dd.classList.remove('open');
+            if (!e.target.closest('.card-top-actions')) {
+                document.querySelectorAll('.recent-card-menu').forEach(item => { item.hidden = true; });
+            }
         });
 
         // Integrated Remote Session Support
@@ -3197,6 +4369,14 @@
 
                 window.addEventListener('pagehide', () => {
                     cancelWaitForRealBSession();
+                    if (deviceRefreshInterval) {
+                        clearInterval(deviceRefreshInterval);
+                        deviceRefreshInterval = null;
+                    }
+                    if (incomingRequestPollInterval) {
+                        clearInterval(incomingRequestPollInterval);
+                        incomingRequestPollInterval = null;
+                    }
                     if (agentHealthPollTimer) {
                         clearInterval(agentHealthPollTimer);
                         agentHealthPollTimer = null;
@@ -3375,6 +4555,9 @@
             cancelFreshAuthorizationReconnect(targetId, null, 'session_replaced');
             const replacedSession = activeSessions[targetId];
             if (replacedSession) finishClosingSessionTab(targetId, replacedSession);
+            const isReverseHandoff = window.__deskstreamReverseHandoffTarget === targetId;
+            if (isReverseHandoff) clearApprovedReverseHandoff(targetId);
+            if (isReverseHandoff) traceReverseHandoff('SESSION_UI_OPENED', targetId);
 
             targetUrl.searchParams.set('layer', 'A');
             targetUrl.searchParams.set('integrated', '1');
@@ -3392,12 +4575,26 @@
             container.appendChild(iframe);
             document.body.appendChild(container);
 
-            activeSessions[targetId] = {
+            const session = {
                 name: targetUrl.searchParams.get('target_name') || 'Remote Device',
                 iframe,
                 container,
-                tabBtn: null
+                tabBtn: null,
+                connected: false,
+                historyRecorded: false,
+                reverseHandoff: isReverseHandoff,
+                reverseHandoffTimer: null
             };
+            activeSessions[targetId] = session;
+            if (isReverseHandoff) {
+                session.reverseHandoffTimer = setTimeout(() => {
+                    if (activeSessions[targetId] !== session || session.connected) return;
+                    session.reverseHandoff = false;
+                    session.reverseHandoffTimer = null;
+                    showToast('The approved reverse session did not connect in time.');
+                    closeSessionTab(targetId);
+                }, 30000);
+            }
             currentActiveTab = targetId;
         }
 
@@ -3425,6 +4622,10 @@
                 clearTimeout(closeTimer);
                 sessionCloseTimers.delete(targetId);
             }
+            if (session.reverseHandoffTimer) {
+                clearTimeout(session.reverseHandoffTimer);
+                session.reverseHandoffTimer = null;
+            }
             cancelFreshAuthorizationReconnect(targetId, null, 'session_tab_closed');
             
             session.container.remove();
@@ -3434,6 +4635,7 @@
             if (currentActiveTab === targetId) {
                 currentActiveTab = 'dashboard';
             }
+            renderRecentSessionHistory();
             if (window.ipc) {
                 try { window.ipc.postMessage('close_overlay'); } catch (e) {}
             }
@@ -3475,8 +4677,31 @@
             const [sourceTargetId, sourceSession] = sourceEntry;
 
             if (e.data === 'session_connected') {
-                // Controller iframes own their stream UI; B-side state is synchronized from local health.
+                sourceSession.connected = true;
+                if (sourceSession.reverseHandoff) {
+                    sourceSession.reverseHandoff = false;
+                    if (sourceSession.reverseHandoffTimer) {
+                        clearTimeout(sourceSession.reverseHandoffTimer);
+                        sourceSession.reverseHandoffTimer = null;
+                    }
+                    traceReverseHandoff('SESSION_CONNECTED', sourceTargetId);
+                    showToast('Reverse session connected. The role transition is confirmed.');
+                }
+                if (!sourceSession.historyRecorded
+                    && String(sourceTargetId).replace(/\D/g, '') !== String(currentHostUid || '').replace(/\D/g, '')) {
+                    sourceSession.historyRecorded = true;
+                    const knownDevice = findKnownDevice(sourceTargetId);
+                    recordRecentSession({
+                        system_id: sourceTargetId,
+                        name: knownDevice?.name || sourceSession.name || 'Remote Device',
+                        ip_address: knownDevice?.ip_address || '',
+                        os_type: knownDevice?.os_type || knownDevice?.platform || ''
+                    });
+                }
             } else if (e.data === 'session_ended') {
+                if (sourceSession.reverseHandoff) {
+                    showToast('The approved reverse session ended before the role transition completed.');
+                }
                 finishClosingSessionTab(sourceTargetId, sourceSession);
                 if (window.ipc) {
                     try { window.ipc.postMessage('close_overlay'); } catch (e) {}
@@ -3484,9 +4709,17 @@
             } else if (e.data && e.data.type === 'end_integrated_session') {
                 const targetId = String(e.data.targetId || sourceTargetId);
                 if (targetId !== sourceTargetId) return;
+                if (sourceSession.reverseHandoff) {
+                    showToast('The approved reverse session ended before the role transition completed.');
+                }
                 finishClosingSessionTab(targetId, sourceSession);
+                completeIntegratedReverseHandoff(targetId, sourceSession);
             } else if (e.data === 'end_integrated_session') {
+                if (sourceSession.reverseHandoff) {
+                    showToast('The approved reverse session ended before the role transition completed.');
+                }
                 finishClosingSessionTab(sourceTargetId, sourceSession);
+                completeIntegratedReverseHandoff(sourceTargetId, sourceSession);
             } else if (e.data && e.data.type === 'request_fresh_authorized_session') {
                 const targetId = String(e.data.targetId || '');
                 const session = activeSessions[targetId];
@@ -3532,15 +4765,35 @@
                         targetId
                     }, '*');
                 }
-            } else if (e.data && e.data.type === 'reverse_remote_approved') {
-                const requesterId = String(e.data.requester_system_id || '');
-                if (/^\d{9}$/.test(requesterId)) {
-                    approvedReverseRequesterId = requesterId;
-                    approvedReverseExpiresAt = Date.now() + 30000;
-                    showToast('Reverse permission approved. Reconnecting in the opposite direction...');
-                } else {
-                    console.error('[REVERSE] Approved peer identity is invalid; automatic handoff was not armed.');
+            } else if (e.data && e.data.type === 'reverse_session_trace') {
+                const sessionId = String(e.data.session_id || '');
+                const stage = String(e.data.stage || '');
+                if (sourceSession
+                    && sourceSession === activeSessions[sourceTargetId]
+                    && sessionId === sourceTargetId
+                    && /^[A-Z_]+$/.test(stage)
+                    && [
+                        'SIMULTANEOUS_REQUEST_DECLINED',
+                        'TYPE30_RECEIVED',
+                        'TYPE31_ACCEPT_SENT',
+                        'TYPE31_REJECT_SENT',
+                        'APPROVAL_POSTED'
+                    ].includes(stage)) {
+                    window.ipc?.postMessage(`reverse_session_trace:${stage}:${sessionId}`);
                 }
+            } else if (e.data && e.data.type === 'reverse_handoff_initiate') {
+                const targetId = String(e.data.target_system_id || '');
+                if (!sourceSession
+                    || sourceSession !== activeSessions[sourceTargetId]
+                    || targetId !== sourceTargetId
+                    || !/^\d{9}$/.test(targetId)
+                    || targetId === currentHostUid
+                    || sourceSession.reverseHandoffTargetId) {
+                    console.error('[REVERSE] Ignoring invalid or duplicate reverse-handoff initiation.');
+                    return;
+                }
+                sourceSession.reverseHandoffTargetId = targetId;
+                showToast('Reverse approved. Closing the current session before reconnecting in the opposite direction...');
             }
         });
     </script>

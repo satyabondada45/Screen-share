@@ -11,12 +11,22 @@ path = "src/main.rs"
 name = "viewer"
 path = "src/bin/viewer.rs"
 
+[[bin]]
+name = "deskstream-updater"
+path = "src/bin/updater.rs"
+
+[[bin]]
+name = "sign-manifest"
+path = "src/bin/sign_manifest.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
 strip = true
 
 [dependencies]
+semver = "1.0"
+ed25519-dalek = { version = "2.1", default-features = false }
 sha2 = "0.10"
 minifb = "0.25"
 enigo = "0.2.1"

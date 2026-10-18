@@ -1,13 +1,12 @@
 <?php
+require_once __DIR__ . '/api_path.php';
+$apiBasePath = deskstream_api_base_path();
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-$dbPath = __DIR__ . '/../backend/config/database.php';
 if (!isset($pdo) || $pdo === null) {
-    if (file_exists($dbPath)) {
-        require $dbPath;
-    }
+    require_once deskstream_config_file('database.php');
 }
 
 $currentUserId = $_SESSION['user_id'] ?? null;
@@ -324,7 +323,7 @@ function formatDeviceId($id) {
 
         async function fetchDevices() {
             try {
-                const res = await fetch('../backend/api/devices/list.php');
+                const res = await fetch(<?= json_encode($apiBasePath . '/devices/list.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>);
                 const data = await res.json();
                 
                 const grid = document.getElementById('device-grid');

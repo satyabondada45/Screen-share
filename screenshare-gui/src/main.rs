@@ -33,6 +33,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, ICONINFO,
 };
 use windows_sys::Win32::System::DataExchange::{OpenClipboard, EmptyClipboard, CloseClipboard, SetClipboardData};
+use windows_sys::Win32::Networking::WinHttp::{
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_SET_COOKIE,
+    WINHTTP_QUERY_STATUS_CODE, WINHTTP_QUERY_FLAG_NUMBER,
+};
 
 const WM_USER_TRAY: u32 = WM_USER + 1;
 
@@ -47,6 +53,7 @@ const CBS_HASSTRINGS: u32 = 0x0200;
 const ES_LEFT: u32 = 0;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const ES_READONLY: u32 = 0x0800;
+const ES_PASSWORD: u32 = 0x0020;
 const MF_STRING: u32 = 0x0000;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 
@@ -99,6 +106,29 @@ const ID_BTN_LOGS: i32 = 215;
 const ID_BTN_CFG: i32 = 216;
 const ID_BTN_SAVE: i32 = 217;
 const ID_BTN_CANCEL: i32 = 218;
+const ID_ED_ACCOUNT_EMAIL: i32 = 219;
+const ID_ED_ACCOUNT_PASSWORD: i32 = 220;
+const ID_BTN_ACCOUNT_SIGNIN: i32 = 221;
+const ID_BTN_ACCOUNT_REFRESH: i32 = 222;
+const ID_BTN_SUBSCRIPTION_RENEW: i32 = 223;
+const ID_ACCOUNT_VALUE: i32 = 224;
+const ID_PLAN_VALUE: i32 = 225;
+const ID_ACTIVATED_VALUE: i32 = 226;
+const ID_EXPIRES_VALUE: i32 = 227;
+const ID_SUB_STATUS_VALUE: i32 = 228;
+const ID_REMAINING_VALUE: i32 = 229;
+const ID_HISTORY_VALUE: i32 = 230;
+const ID_SUBSCRIPTION_MESSAGE: i32 = 231;
+const ID_LBL_ACCOUNT_EMAIL: i32 = 240;
+const ID_LBL_ACCOUNT_PASSWORD: i32 = 241;
+const ID_LBL_ACCOUNT: i32 = 242;
+const ID_LBL_PLAN: i32 = 243;
+const ID_LBL_ACTIVATED: i32 = 244;
+const ID_LBL_EXPIRES: i32 = 245;
+const ID_LBL_SUB_STATUS: i32 = 246;
+const ID_LBL_REMAINING: i32 = 247;
+const ID_LBL_HISTORY: i32 = 248;
+const ID_GRP_SUBSCRIPTION: i32 = 249;
 
 // Tray menu ids
 const ID_TRAY_OPEN: i32 = 300;
@@ -145,6 +175,17 @@ struct AppState {
     chk_startup: HWND,
     ed_devname: HWND,
     st_sysid: HWND,
+    ed_account_email: HWND,
+    ed_account_password: HWND,
+    h_account_value: HWND,
+    h_plan_value: HWND,
+    h_activated_value: HWND,
+    h_expires_value: HWND,
+    h_subscription_status: HWND,
+    h_remaining_time: HWND,
+    h_history_expiry: HWND,
+    h_subscription_message: HWND,
+    h_subscription_renew: HWND,
 
     system_id: String,
     device_name: String,
@@ -158,6 +199,11 @@ struct AppState {
     relay_url: String,
     environment: String,
     start_with_windows: bool,
+    session_cookie: String,
+    subscription_last_refresh: Instant,
+    subscription_expiry_epoch: Option<i64>,
+    subscription_server_epoch: Option<i64>,
+    subscription_refresh_started: Option<Instant>,
 
     mode: i32,
     last_launch: Instant,
@@ -187,6 +233,17 @@ impl AppState {
             chk_startup: 0,
             ed_devname: 0,
             st_sysid: 0,
+            ed_account_email: 0,
+            ed_account_password: 0,
+            h_account_value: 0,
+            h_plan_value: 0,
+            h_activated_value: 0,
+            h_expires_value: 0,
+            h_subscription_status: 0,
+            h_remaining_time: 0,
+            h_history_expiry: 0,
+            h_subscription_message: 0,
+            h_subscription_renew: 0,
             system_id: String::new(),
             device_name: String::new(),
             status_str: "connecting".to_string(),
@@ -198,6 +255,11 @@ impl AppState {
             relay_url: "127.0.0.1:9001".to_string(),
             environment: "Production".to_string(),
             start_with_windows: true,
+            session_cookie: String::new(),
+            subscription_last_refresh: Instant::now() - Duration::from_secs(3600),
+            subscription_expiry_epoch: None,
+            subscription_server_epoch: None,
+            subscription_refresh_started: None,
             mode: 0,
             last_launch: Instant::now(),
         }
@@ -652,10 +714,455 @@ fn escape_json(s: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
             _ => out.push(c),
         }
     }
     out
+}
+
+fn request_backend(
+    backend_url: &str,
+    endpoint: &str,
+    method: &str,
+    body: Option<&str>,
+    cookie: Option<&str>,
+) -> Result<(u32, String, Option<String>), String> {
+    let backend = backend_url.trim_end_matches('/');
+    let (secure, remainder) = if let Some(url) = backend.strip_prefix("https://") {
+        (true, url)
+    } else if let Some(url) = backend.strip_prefix("http://") {
+        (false, url)
+    } else {
+        return Err("The backend URL must use HTTP or HTTPS.".to_string());
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return Err("The backend URL is invalid.".to_string());
+    }
+    let root_path = &remainder[authority_end..];
+    let (host, port) = if authority.starts_with('[') {
+        let bracket = authority.find(']').ok_or("The backend host is invalid.")?;
+        let host = &authority[1..bracket];
+        let suffix = &authority[bracket + 1..];
+        let port = if suffix.is_empty() {
+            if secure { 443 } else { 80 }
+        } else {
+            suffix
+                .strip_prefix(':')
+                .and_then(|value| value.parse::<u16>().ok())
+                .ok_or("The backend port is invalid.")?
+        };
+        (host, port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (
+            host,
+            port.parse::<u16>()
+                .map_err(|_| "The backend port is invalid.")?,
+        )
+    } else {
+        (authority, if secure { 443 } else { 80 })
+    };
+    if host.is_empty() {
+        return Err("The backend host is invalid.".to_string());
+    }
+    let path = format!(
+        "{}/{}",
+        root_path.trim_end_matches('/'),
+        endpoint.trim_start_matches('/')
+    );
+    let host_w = to_wide(host);
+    let path_w = to_wide(&path);
+    let method_w = to_wide(method);
+    let agent_w = to_wide("DeskStream");
+    let headers = match (method, cookie) {
+        ("POST", _) => "Content-Type: application/json\r\n".to_string(),
+        (_, Some(value)) if !value.is_empty() => format!("Cookie: {}\r\n", value),
+        _ => String::new(),
+    };
+    let headers_w = to_wide(&headers);
+    let request_body = body.unwrap_or("").as_bytes();
+
+    unsafe {
+        let session = WinHttpOpen(
+            agent_w.as_ptr(),
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            ptr::null(),
+            ptr::null(),
+            0,
+        );
+        if session.is_null() {
+            return Err("Unable to initialize the secure connection.".to_string());
+        }
+        WinHttpSetTimeouts(session, 4000, 4000, 4000, 5000);
+        let connection = WinHttpConnect(session, host_w.as_ptr(), port, 0);
+        if connection.is_null() {
+            WinHttpCloseHandle(session);
+            return Err("Unable to connect to the account server.".to_string());
+        }
+        let request = WinHttpOpenRequest(
+            connection,
+            method_w.as_ptr(),
+            path_w.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            if secure { WINHTTP_FLAG_SECURE } else { 0 },
+        );
+        if request.is_null() {
+            WinHttpCloseHandle(connection);
+            WinHttpCloseHandle(session);
+            return Err("Unable to create the account request.".to_string());
+        }
+
+        let header_ptr = if headers.is_empty() { ptr::null() } else { headers_w.as_ptr() };
+        let header_len = if headers.is_empty() { 0 } else { u32::MAX };
+        let body_ptr = if request_body.is_empty() {
+            ptr::null()
+        } else {
+            request_body.as_ptr() as *const std::ffi::c_void
+        };
+        let sent = WinHttpSendRequest(
+            request,
+            header_ptr,
+            header_len,
+            body_ptr,
+            request_body.len() as u32,
+            request_body.len() as u32,
+            0,
+        ) != 0;
+        let received = sent && WinHttpReceiveResponse(request, ptr::null_mut()) != 0;
+        let mut status_code = 0u32;
+        let mut status_len = mem::size_of::<u32>() as u32;
+        let status_index = 0u32;
+        if received {
+            WinHttpQueryHeaders(
+                request,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                ptr::null(),
+                &mut status_code as *mut u32 as *mut std::ffi::c_void,
+                &mut status_len,
+                &status_index as *const u32 as *mut u32,
+            );
+        }
+
+        let mut response = Vec::new();
+        if received {
+            loop {
+                let mut chunk = [0u8; 4096];
+                let mut read = 0u32;
+                if WinHttpReadData(
+                    request,
+                    chunk.as_mut_ptr() as *mut std::ffi::c_void,
+                    chunk.len() as u32,
+                    &mut read,
+                ) == 0
+                {
+                    break;
+                }
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&chunk[..read as usize]);
+                if response.len() > 1024 * 1024 {
+                    break;
+                }
+            }
+        }
+
+        let mut cookie_value = None;
+        let mut cookie_len = 0u32;
+        let mut cookie_index = 0u32;
+        WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_SET_COOKIE,
+            ptr::null(),
+            ptr::null_mut(),
+            &mut cookie_len,
+            &mut cookie_index,
+        );
+        if cookie_len >= 2 && cookie_len <= 8192 {
+            let mut cookie_buf = vec![0u16; (cookie_len as usize + 1) / 2];
+            if WinHttpQueryHeaders(
+                request,
+                WINHTTP_QUERY_SET_COOKIE,
+                ptr::null(),
+                cookie_buf.as_mut_ptr() as *mut std::ffi::c_void,
+                &mut cookie_len,
+                &mut cookie_index,
+            ) != 0
+            {
+                let cookie_header = String::from_utf16_lossy(
+                    &cookie_buf[..cookie_len as usize / 2],
+                );
+                if let Some((pair, _)) = cookie_header.split_once(';') {
+                    cookie_value = Some(pair.trim().to_string());
+                } else if !cookie_header.trim().is_empty() {
+                    cookie_value = Some(cookie_header.trim().to_string());
+                }
+            }
+        }
+
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        if !received {
+            return Err("Unable to receive a response from the account server.".to_string());
+        }
+        let text = String::from_utf8(response)
+            .map_err(|_| "The account server returned an invalid response.".to_string())?;
+        Ok((status_code, text, cookie_value))
+    }
+}
+
+fn timestamp_epoch(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || (bytes.get(10) != Some(&b'T') && bytes.get(10) != Some(&b' '))
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    let number = |start: usize, end: usize| {
+        value.get(start..end)?.parse::<i64>().ok()
+    };
+    let year = number(0, 4)?;
+    let month = number(5, 7)?;
+    let day = number(8, 10)?;
+    let hour = number(11, 13)?;
+    let minute = number(14, 16)?;
+    let second = number(17, 19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days_since_epoch = era * 146097 + day_of_era - 719468;
+    Some(days_since_epoch * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+fn format_server_timestamp(value: Option<String>) -> String {
+    let Some(value) = value else {
+        return "Not available".to_string();
+    };
+    let Some(_) = timestamp_epoch(&value) else {
+        return "Not available".to_string();
+    };
+    let date = value.get(0..10).unwrap_or("");
+    let time = value.get(11..19).unwrap_or("");
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        return "Not available".to_string();
+    }
+    let month = match parts[1] {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return "Not available".to_string(),
+    };
+    format!("{} {} {}, {} UTC", parts[2], month, parts[0], time)
+}
+
+fn update_remaining_display(st: &AppState) {
+    let remaining = match (
+        st.subscription_expiry_epoch,
+        st.subscription_server_epoch,
+        st.subscription_refresh_started,
+    ) {
+        (Some(expiry), Some(server_now), Some(fetched_at)) => {
+            let elapsed = fetched_at.elapsed().as_secs() as i64;
+            let seconds = expiry - server_now - elapsed;
+            if seconds <= 0 {
+                "Expired — refreshing status".to_string()
+            } else if seconds >= 86400 {
+                format!("{} days remaining", (seconds + 86399) / 86400)
+            } else if seconds >= 3600 {
+                format!("{} hours remaining", (seconds + 3599) / 3600)
+            } else {
+                format!("{} minutes remaining", (seconds + 59) / 60)
+            }
+        }
+        _ => "Ongoing".to_string(),
+    };
+    set_text(st.h_remaining_time, &remaining);
+}
+
+fn clear_subscription_display(st: &mut AppState, message: &str) {
+    st.subscription_expiry_epoch = None;
+    st.subscription_server_epoch = None;
+    st.subscription_refresh_started = None;
+    set_text(st.h_account_value, "Not signed in");
+    set_text(st.h_plan_value, "—");
+    set_text(st.h_activated_value, "—");
+    set_text(st.h_expires_value, "—");
+    set_text(st.h_subscription_status, "—");
+    set_text(st.h_remaining_time, "—");
+    set_text(st.h_history_expiry, "—");
+    set_text(st.h_subscription_message, message);
+    unsafe { ShowWindow(st.h_subscription_renew, SW_HIDE) };
+}
+
+fn refresh_subscription(st: &mut AppState) {
+    if st.session_cookie.is_empty() {
+        clear_subscription_display(st, "Sign in to load your subscription details.");
+        return;
+    }
+    set_text(st.h_subscription_message, "Refreshing subscription details...");
+    let result = request_backend(
+        &st.backend_url,
+        "subscriptions/current.php",
+        "GET",
+        None,
+        Some(&st.session_cookie),
+    );
+    st.subscription_last_refresh = Instant::now();
+    match result {
+        Ok((200, response, _)) if json_get(&response, "status").as_deref() == Some("success") => {
+            let email = json_get(&response, "email").unwrap_or_default();
+            let slug = json_get(&response, "plan_slug").unwrap_or_else(|| "free".to_string());
+            let plan_name = json_get(&response, "plan_name").unwrap_or_else(|| "Free Plan".to_string());
+            let status = json_get(&response, "current_status")
+                .map(|value| if value == "free" { "Free Plan" } else { "Active" })
+                .unwrap_or("Active");
+            let starts_at = json_get(&response, "starts_at");
+            let expires_at = json_get(&response, "expires_at");
+            let server_now = json_get(&response, "server_now");
+            let historical_expiry = json_get(&response, "previous_expires_at");
+            let historical_plan = json_get(&response, "previous_plan_name").unwrap_or_default();
+
+            set_text(st.h_account_value, &email);
+            set_text(st.h_plan_value, &plan_name);
+            let activated_text = if slug == "free" {
+                "Not applicable".to_string()
+            } else {
+                format_server_timestamp(starts_at)
+            };
+            set_text(st.h_activated_value, &activated_text);
+
+            let expires_text = if slug == "free" {
+                "No expiry".to_string()
+            } else {
+                format_server_timestamp(expires_at.clone())
+            };
+            set_text(st.h_expires_value, &expires_text);
+            set_text(st.h_subscription_status, status);
+            if let Some(expires_at) = expires_at {
+                st.subscription_expiry_epoch = timestamp_epoch(&expires_at);
+                st.subscription_server_epoch = server_now.as_deref().and_then(timestamp_epoch);
+                st.subscription_refresh_started = Some(Instant::now());
+            } else {
+                st.subscription_expiry_epoch = None;
+                st.subscription_server_epoch = None;
+                st.subscription_refresh_started = None;
+            }
+            update_remaining_display(st);
+            let history_text = match historical_expiry {
+                Some(expiry) => format!("{} expired {}", historical_plan, format_server_timestamp(Some(expiry))),
+                None => "None".to_string(),
+            };
+            set_text(st.h_history_expiry, &history_text);
+            set_text(st.h_subscription_message, "");
+            set_text(st.ed_account_password, "");
+            set_text(st.ed_account_email, &email);
+            unsafe {
+                ShowWindow(
+                    st.h_subscription_renew,
+                    if slug == "monthly" || slug == "yearly" { SW_SHOW } else { SW_HIDE },
+                );
+            }
+        }
+        Ok((_, response, _)) => {
+            if json_get(&response, "message").as_deref().map(|v| v.contains("Unauthorized")).unwrap_or(false) {
+                st.session_cookie.clear();
+            }
+            clear_subscription_display(st, "Unable to load subscription details");
+        }
+        Err(_) => clear_subscription_display(st, "Unable to load subscription details"),
+    }
+    if st.session_cookie.is_empty() {
+        unsafe { ShowWindow(st.h_subscription_renew, SW_HIDE) };
+    }
+}
+
+fn sign_in_subscription(st: &mut AppState) {
+    let email = get_text(st.ed_account_email);
+    let password = get_text(st.ed_account_password);
+    if email.trim().is_empty() || password.is_empty() {
+        clear_subscription_display(st, "Enter your account email and password.");
+        return;
+    }
+    set_text(st.h_subscription_message, "Signing in...");
+    let payload = format!(
+        "{{\"email\":\"{}\",\"password\":\"{}\"}}",
+        escape_json(email.trim()),
+        escape_json(&password)
+    );
+    set_text(st.ed_account_password, "");
+    match request_backend(
+        &st.backend_url,
+        "auth/login.php",
+        "POST",
+        Some(&payload),
+        None,
+    ) {
+        Ok((200, response, cookie))
+            if json_get(&response, "status").as_deref() == Some("success") =>
+        {
+            if let Some(cookie) = cookie {
+                st.session_cookie = cookie;
+                refresh_subscription(st);
+            } else if let Some(token) = json_get(&response, "session_token") {
+                st.session_cookie = format!("PHPSESSID={}", token);
+                refresh_subscription(st);
+            } else {
+                clear_subscription_display(st, "Unable to load subscription details");
+            }
+        }
+        Ok((_, response, _)) => {
+            let message = json_get(&response, "message")
+                .unwrap_or_else(|| "Unable to sign in. Check your account details.".to_string());
+            clear_subscription_display(st, &message);
+        }
+        Err(_) => clear_subscription_display(st, "Unable to load subscription details"),
+    }
+}
+
+fn open_subscription_page(st: &AppState) {
+    let backend = st.backend_url.trim_end_matches('/');
+    let web_root = backend
+        .strip_suffix("/backend/api")
+        .unwrap_or(backend);
+    let url = format!("{}/frontend/subscription.php", web_root);
+    let url_w = to_wide(&url);
+    let op = to_wide("open");
+    unsafe {
+        ShellExecuteW(0, op.as_ptr(), url_w.as_ptr(), ptr::null(), ptr::null(), 1);
+    }
 }
 
 // ------------------------------------------------------------
@@ -1250,12 +1757,47 @@ fn create_controls(hwnd: HWND, st: &mut AppState) {
     st.st_sysid = make_edit_hidden_dpi(hwnd, ID_ST_SID, ES_LEFT | ES_READONLY, 35, 456, 440, 26, scale);
     st.settings_controls.push(st.st_sysid);
 
-    st.settings_controls.push(make_group_dpi(hwnd, "Logging", ID_GRP_LOG, 15, 468, 490, 60, scale));
-    st.settings_controls.push(make_button_dpi(hwnd, "Open Logs Folder", ID_BTN_LOGS, 35, 492, 180, 30, scale));
-    st.settings_controls.push(make_button_dpi(hwnd, "Open Configuration Folder", ID_BTN_CFG, 285, 492, 180, 30, scale));
+    st.settings_controls.push(make_group_dpi(hwnd, "Account & Subscription", ID_GRP_SUBSCRIPTION, 15, 468, 490, 280, scale));
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Account email", ID_LBL_ACCOUNT_EMAIL, SS_LEFT, 35, 492, 100, 22, scale));
+    st.ed_account_email = make_edit_hidden_dpi(hwnd, ID_ED_ACCOUNT_EMAIL, ES_LEFT | ES_AUTOHSCROLL, 35, 514, 270, 26, scale);
+    st.settings_controls.push(st.ed_account_email);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Password", ID_LBL_ACCOUNT_PASSWORD, SS_LEFT, 35, 544, 100, 22, scale));
+    st.ed_account_password = make_edit_hidden_dpi(hwnd, ID_ED_ACCOUNT_PASSWORD, ES_LEFT | ES_AUTOHSCROLL | ES_PASSWORD, 35, 566, 270, 26, scale);
+    st.settings_controls.push(st.ed_account_password);
+    st.settings_controls.push(make_button_dpi(hwnd, "Sign In", ID_BTN_ACCOUNT_SIGNIN, 330, 514, 150, 30, scale));
+    st.settings_controls.push(make_button_dpi(hwnd, "Refresh", ID_BTN_ACCOUNT_REFRESH, 330, 552, 150, 30, scale));
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Account", ID_LBL_ACCOUNT, SS_LEFT, 35, 602, 105, 20, scale));
+    st.h_account_value = make_static_hidden_dpi(hwnd, "Not signed in", ID_ACCOUNT_VALUE, SS_LEFT, 145, 602, 335, 20, scale);
+    st.settings_controls.push(st.h_account_value);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Current plan", ID_LBL_PLAN, SS_LEFT, 35, 623, 105, 20, scale));
+    st.h_plan_value = make_static_hidden_dpi(hwnd, "—", ID_PLAN_VALUE, SS_LEFT, 145, 623, 335, 20, scale);
+    st.settings_controls.push(st.h_plan_value);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Activated on", ID_LBL_ACTIVATED, SS_LEFT, 35, 644, 105, 20, scale));
+    st.h_activated_value = make_static_hidden_dpi(hwnd, "—", ID_ACTIVATED_VALUE, SS_LEFT, 145, 644, 335, 20, scale);
+    st.settings_controls.push(st.h_activated_value);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Expires on", ID_LBL_EXPIRES, SS_LEFT, 35, 665, 105, 20, scale));
+    st.h_expires_value = make_static_hidden_dpi(hwnd, "—", ID_EXPIRES_VALUE, SS_LEFT, 145, 665, 335, 20, scale);
+    st.settings_controls.push(st.h_expires_value);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Status", ID_LBL_SUB_STATUS, SS_LEFT, 35, 686, 105, 20, scale));
+    st.h_subscription_status = make_static_hidden_dpi(hwnd, "—", ID_SUB_STATUS_VALUE, SS_LEFT, 145, 686, 335, 20, scale);
+    st.settings_controls.push(st.h_subscription_status);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Remaining time", ID_LBL_REMAINING, SS_LEFT, 35, 707, 105, 20, scale));
+    st.h_remaining_time = make_static_hidden_dpi(hwnd, "—", ID_REMAINING_VALUE, SS_LEFT, 145, 707, 335, 20, scale);
+    st.settings_controls.push(st.h_remaining_time);
+    st.settings_controls.push(make_static_hidden_dpi(hwnd, "Last plan", ID_LBL_HISTORY, SS_LEFT, 35, 728, 105, 20, scale));
+    st.h_history_expiry = make_static_hidden_dpi(hwnd, "—", ID_HISTORY_VALUE, SS_LEFT, 145, 728, 335, 20, scale);
+    st.settings_controls.push(st.h_history_expiry);
+    st.h_subscription_message = make_static_hidden_dpi(hwnd, "", ID_SUBSCRIPTION_MESSAGE, SS_LEFT, 35, 750, 290, 22, scale);
+    st.settings_controls.push(st.h_subscription_message);
+    st.h_subscription_renew = make_button_dpi(hwnd, "Renew / Upgrade", ID_BTN_SUBSCRIPTION_RENEW, 330, 746, 150, 30, scale);
+    st.settings_controls.push(st.h_subscription_renew);
 
-    st.settings_controls.push(make_button_dpi(hwnd, "Save", ID_BTN_SAVE, 35, 540, 200, 36, scale));
-    st.settings_controls.push(make_button_dpi(hwnd, "Cancel", ID_BTN_CANCEL, 285, 540, 200, 36, scale));
+    st.settings_controls.push(make_group_dpi(hwnd, "Logging", ID_GRP_LOG, 15, 778, 490, 60, scale));
+    st.settings_controls.push(make_button_dpi(hwnd, "Open Logs Folder", ID_BTN_LOGS, 35, 802, 180, 30, scale));
+    st.settings_controls.push(make_button_dpi(hwnd, "Open Configuration Folder", ID_BTN_CFG, 285, 802, 180, 30, scale));
+
+    st.settings_controls.push(make_button_dpi(hwnd, "Save", ID_BTN_SAVE, 35, 854, 200, 36, scale));
+    st.settings_controls.push(make_button_dpi(hwnd, "Cancel", ID_BTN_CANCEL, 285, 854, 200, 36, scale));
 }
 
 fn show_view(st: &mut AppState, mode: i32) {
@@ -1648,6 +2190,11 @@ unsafe extern "system" fn window_proc(
                     set_text(st.ed_devname, &st.device_name);
                     set_text(st.st_sysid, &st.system_id);
                     show_view(st, 1);
+                    if st.session_cookie.is_empty() {
+                        clear_subscription_display(st, "Sign in to load your subscription details.");
+                    } else {
+                        refresh_subscription(st);
+                    }
                 }
                 ID_BTN_DASHBOARD => {
                     open_dashboard();
@@ -1663,12 +2210,17 @@ unsafe extern "system" fn window_proc(
                     let env = combo_selected(st.cb_env);
                     let start = is_checked(st.chk_startup);
                     let dev = get_text(st.ed_devname);
+                    let backend_changed = st.backend_url != backend;
                     st.backend_url = backend.clone();
                     st.relay_url = relay.clone();
                     st.environment = env.clone();
                     st.start_with_windows = start;
                     st.device_name = dev.clone();
                     write_gui_config(&backend, &relay, &env, start, &dev);
+                    if backend_changed {
+                        st.session_cookie.clear();
+                        clear_subscription_display(st, "Sign in to load your subscription details.");
+                    }
                     update_agent_config(&dev, &relay);
                     if start {
                         let exe = gui_exe_path();
@@ -1685,6 +2237,9 @@ unsafe extern "system" fn window_proc(
                 ID_BTN_CANCEL => {
                     show_view(st, 0);
                 }
+                ID_BTN_ACCOUNT_SIGNIN => sign_in_subscription(st),
+                ID_BTN_ACCOUNT_REFRESH => refresh_subscription(st),
+                ID_BTN_SUBSCRIPTION_RENEW => open_subscription_page(st),
                 ID_BTN_LOGS => {
                     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
                     open_folder(&format!("{}\\DeskStream", local));
@@ -1705,6 +2260,11 @@ unsafe extern "system" fn window_proc(
                     set_text(st.st_sysid, &st.system_id);
                     show_window(st);
                     show_view(st, 1);
+                    if st.session_cookie.is_empty() {
+                        clear_subscription_display(st, "Sign in to load your subscription details.");
+                    } else {
+                        refresh_subscription(st);
+                    }
                 }
                 ID_TRAY_RESTART => {
                     stop_agent();
@@ -1726,6 +2286,14 @@ unsafe extern "system" fn window_proc(
             if wparam == 1 {
                 poll_and_update(st);
                 ensure_agent(st);
+                if st.mode == 1
+                    && !st.session_cookie.is_empty()
+                    && st.subscription_last_refresh.elapsed() >= Duration::from_secs(60)
+                {
+                    refresh_subscription(st);
+                } else {
+                    update_remaining_display(st);
+                }
             } else if wparam == 2 {
                 set_text(st.h_toast, "");
             }
@@ -1884,7 +2452,7 @@ fn main() {
     let sw = 1920i32;
     let sh = 1080i32;
     let base_w = 540i32;
-    let base_h = 680i32;
+    let base_h = 950i32;
     // Disable DPI calculation to prevent potential crash
     let init_scale = 1.0f32;
     let w = base_w;

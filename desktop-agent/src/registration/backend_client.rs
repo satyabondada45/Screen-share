@@ -134,25 +134,77 @@ impl BackendClient {
         });
     }
 
-    /// Logs the start of an active remote session in the database.
-    pub fn log_session_start(&self, session_key: &str) {
+    /// Logs the start of an active remote session in the database with optional request token.
+    pub fn log_session_start_with_token(
+        &self,
+        session_key: &str,
+        request_token: Option<&str>,
+        mode: Option<&str>,
+    ) {
         let url = format!("{}/sessions/start.php", self.base_url);
         let mut payload = HashMap::new();
         payload.insert("device_id", self.system_id.clone());
+        payload.insert("system_id", self.system_id.clone());
+        payload.insert("machine_identifier", self.machine_identifier.clone());
         payload.insert("session_key", session_key.to_string());
+        if let Some(tok) = request_token {
+            payload.insert("request_token", tok.to_string());
+        }
+        if let Some(m) = mode {
+            payload.insert("mode", m.to_string());
+        }
 
-        let client = reqwest::blocking::Client::new();
-        let _ = client.post(&url).json(&payload).send();
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => reqwest::blocking::Client::new(),
+        };
+        let res = client.post(&url).json(&payload).send();
+        if let Ok(r) = res {
+            println!("[SESSION LOG] log_session_start status={}", r.status());
+        }
+    }
+
+    /// Logs the start of an active remote session in the database.
+    pub fn log_session_start(&self, session_key: &str) {
+        self.log_session_start_with_token(session_key, None, None);
+    }
+
+    /// Records session conclusion upon disconnection with optional request token.
+    pub fn log_session_end_with_token(
+        &self,
+        session_key: &str,
+        request_token: Option<&str>,
+        bandwidth_mb: f64,
+    ) {
+        let url = format!("{}/sessions/end.php", self.base_url);
+        let mut payload = HashMap::new();
+        payload.insert("device_id", self.system_id.clone());
+        payload.insert("system_id", self.system_id.clone());
+        payload.insert("machine_identifier", self.machine_identifier.clone());
+        payload.insert("session_key", session_key.to_string());
+        if let Some(tok) = request_token {
+            payload.insert("request_token", tok.to_string());
+        }
+        payload.insert("bandwidth_used_mb", bandwidth_mb.to_string());
+
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => reqwest::blocking::Client::new(),
+        };
+        let res = client.post(&url).json(&payload).send();
+        if let Ok(r) = res {
+            println!("[SESSION LOG] log_session_end status={}", r.status());
+        }
     }
 
     /// Records session conclusion upon disconnection.
     pub fn log_session_end(&self, session_key: &str, bandwidth_mb: f64) {
-        let url = format!("{}/sessions/end.php", self.base_url);
-        let mut payload = HashMap::new();
-        payload.insert("session_key", session_key.to_string());
-        payload.insert("bandwidth_used_mb", bandwidth_mb.to_string());
-
-        let client = reqwest::blocking::Client::new();
-        let _ = client.post(&url).json(&payload).send();
+        self.log_session_end_with_token(session_key, None, bandwidth_mb);
     }
 }

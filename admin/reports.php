@@ -44,48 +44,78 @@ try {
     // Users
     if (admin_table_exists($pdo, 'users')) {
         $stats['users_total'] = (int) $pdo->query('SELECT COUNT(*) FROM `users`')->fetchColumn();
-        $stats['users_active'] = (int) $pdo->query('SELECT COUNT(*) FROM `users` WHERE LOWER(status) = "active"')->fetchColumn();
+        if (admin_column_exists($pdo, 'users', 'status')) {
+            $stats['users_active'] = (int) $pdo->query('SELECT COUNT(*) FROM `users` WHERE LOWER(status) = "active"')->fetchColumn();
+        } else {
+            $stats['users_active'] = $stats['users_total'];
+        }
     }
 
     // Devices
     if (admin_table_exists($pdo, 'devices')) {
         $stats['devices_total'] = (int) $pdo->query('SELECT COUNT(*) FROM `devices`')->fetchColumn();
-        $stats['devices_online'] = (int) $pdo->query('SELECT COUNT(*) FROM `devices` WHERE `is_online` = 1')->fetchColumn();
-        $stats['devices_offline'] = max(0, $stats['devices_total'] - $stats['devices_online']);
+        if (admin_column_exists($pdo, 'devices', 'is_online')) {
+            $stats['devices_online'] = (int) $pdo->query('SELECT COUNT(*) FROM `devices` WHERE `is_online` = 1')->fetchColumn();
+            $stats['devices_offline'] = max(0, $stats['devices_total'] - $stats['devices_online']);
+        }
     }
 
     // Sessions
     if (admin_table_exists($pdo, 'sessions')) {
         $stats['sessions_total'] = (int) $pdo->query('SELECT COUNT(*) FROM `sessions`')->fetchColumn();
-        $stats['sessions_active'] = (int) $pdo->query('SELECT COUNT(*) FROM `sessions` WHERE LOWER(status) = "active"')->fetchColumn();
-        $stats['sessions_completed'] = (int) $pdo->query('SELECT COUNT(*) FROM `sessions` WHERE LOWER(status) = "completed"')->fetchColumn();
-        $stats['bandwidth_mb'] = (float) $pdo->query('SELECT COALESCE(SUM(bandwidth_used_mb), 0) FROM `sessions`')->fetchColumn();
+        if (admin_column_exists($pdo, 'sessions', 'status')) {
+            $stats['sessions_active'] = (int) $pdo->query('SELECT COUNT(*) FROM `sessions` WHERE LOWER(status) = "active"')->fetchColumn();
+            $stats['sessions_completed'] = (int) $pdo->query('SELECT COUNT(*) FROM `sessions` WHERE LOWER(status) = "completed"')->fetchColumn();
+        }
+        if (admin_column_exists($pdo, 'sessions', 'bandwidth_used_mb')) {
+            $stats['bandwidth_mb'] = (float) $pdo->query('SELECT COALESCE(SUM(bandwidth_used_mb), 0) FROM `sessions`')->fetchColumn();
+        }
     }
 
     // Connection Requests
     if (admin_table_exists($pdo, 'connection_requests')) {
         $stats['conn_total'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests`')->fetchColumn();
-        $stats['conn_accepted'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(status) = "accepted"')->fetchColumn();
-        $stats['conn_pending'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(status) = "pending"')->fetchColumn();
-        $stats['conn_expired'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(status) IN ("expired", "rejected", "cancelled")')->fetchColumn();
+        if (admin_column_exists($pdo, 'connection_requests', 'status')) {
+            $stats['conn_accepted'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(status) = "accepted"')->fetchColumn();
+            $stats['conn_pending'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(status) = "pending"')->fetchColumn();
+            $stats['conn_expired'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(status) IN ("expired", "rejected", "cancelled")')->fetchColumn();
+        }
+    } elseif (admin_table_exists($pdo, 'connections')) {
+        $stats['conn_total'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections`')->fetchColumn();
+        if (admin_column_exists($pdo, 'connections', 'status')) {
+            $stats['conn_accepted'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections` WHERE LOWER(status) = "accepted"')->fetchColumn();
+            $stats['conn_pending'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections` WHERE LOWER(status) IN ("pending", "requested")')->fetchColumn();
+            $stats['conn_expired'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections` WHERE LOWER(status) IN ("rejected", "disconnected")')->fetchColumn();
+        }
     }
 
     // Subscriptions
     if (admin_table_exists($pdo, 'subscriptions')) {
         $stats['subs_total'] = (int) $pdo->query('SELECT COUNT(*) FROM `subscriptions`')->fetchColumn();
-        $stats['subs_active'] = (int) $pdo->query('SELECT COUNT(*) FROM `subscriptions` WHERE LOWER(status) = "active"')->fetchColumn();
-        $stats['subs_expired'] = (int) $pdo->query('SELECT COUNT(*) FROM `subscriptions` WHERE expires_at IS NOT NULL AND expires_at < NOW()')->fetchColumn();
+        if (admin_column_exists($pdo, 'subscriptions', 'status')) {
+            $stats['subs_active'] = (int) $pdo->query('SELECT COUNT(*) FROM `subscriptions` WHERE LOWER(status) = "active"')->fetchColumn();
+        }
+        $expCol = admin_column_exists($pdo, 'subscriptions', 'expires_at') ? 'expires_at' : (admin_column_exists($pdo, 'subscriptions', 'expiry_date') ? 'expiry_date' : null);
+        if ($expCol) {
+            $stats['subs_expired'] = (int) $pdo->query("SELECT COUNT(*) FROM `subscriptions` WHERE `{$expCol}` IS NOT NULL AND `{$expCol}` < NOW()")->fetchColumn();
+        }
     }
 
     // Payments
     if (admin_table_exists($pdo, 'payments')) {
-        $stats['revenue_total'] = (float) $pdo->query('SELECT COALESCE(SUM(amount), 0) FROM `payments` WHERE LOWER(status) IN ("completed", "paid", "successful")')->fetchColumn();
-        $stats['payments_completed'] = (int) $pdo->query('SELECT COUNT(*) FROM `payments` WHERE LOWER(status) IN ("completed", "paid", "successful")')->fetchColumn();
-        $stats['payments_pending'] = (int) $pdo->query('SELECT COUNT(*) FROM `payments` WHERE LOWER(status) = "pending"')->fetchColumn();
-        $stats['payments_failed'] = (int) $pdo->query('SELECT COUNT(*) FROM `payments` WHERE LOWER(status) IN ("failed", "refunded")')->fetchColumn();
+        $statusCol = admin_column_exists($pdo, 'payments', 'status') ? 'status' : null;
+        if ($statusCol) {
+            $stats['revenue_total'] = (float) $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM `payments` WHERE LOWER(`{$statusCol}`) IN ('completed', 'paid', 'successful')")->fetchColumn();
+            $stats['payments_completed'] = (int) $pdo->query("SELECT COUNT(*) FROM `payments` WHERE LOWER(`{$statusCol}`) IN ('completed', 'paid', 'successful')")->fetchColumn();
+            $stats['payments_pending'] = (int) $pdo->query("SELECT COUNT(*) FROM `payments` WHERE LOWER(`{$statusCol}`) = 'pending'")->fetchColumn();
+            $stats['payments_failed'] = (int) $pdo->query("SELECT COUNT(*) FROM `payments` WHERE LOWER(`{$statusCol}`) IN ('failed', 'refunded')")->fetchColumn();
+        } else {
+            $stats['revenue_total'] = (float) $pdo->query('SELECT COALESCE(SUM(amount), 0) FROM `payments`')->fetchColumn();
+            $stats['payments_completed'] = (int) $pdo->query('SELECT COUNT(*) FROM `payments`')->fetchColumn();
+        }
     }
 } catch (Throwable $e) {
-    error_log('Reports aggregation error: ' . $e->getMessage());
+    admin_log_error($e, 'Reports aggregation error');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

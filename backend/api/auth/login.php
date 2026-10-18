@@ -2,9 +2,14 @@
 // backend/api/auth/login.php
 require_once __DIR__ . '/../../config/database.php';
 
-$db = $conn ?? $pdo ?? null;
+$db = $pdo ?? $conn ?? null;
 
-// Start session
+if (!$db) {
+    http_response_code(500);
+    header("Location: /DeskStream/index.php?error=" . urlencode("Database connection unavailable."));
+    exit();
+}
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -13,13 +18,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
     if (stripos($contentType, 'application/json') !== false) {
         $jsonInput = json_decode(file_get_contents('php://input'), true);
-        $email    = trim($jsonInput['email'] ?? $jsonInput['username'] ?? '');
+        $email = trim($jsonInput['email'] ?? $jsonInput['username'] ?? '');
         $password = $jsonInput['password'] ?? '';
-        $isJson   = true;
+        $isJson = true;
     } else {
-        $email    = trim($_POST['email'] ?? $_POST['username'] ?? '');
+        $email = trim($_POST['email'] ?? $_POST['username'] ?? '');
         $password = $_POST['password'] ?? '';
-        $isJson   = false;
+        $isJson = false;
     }
 
     if (empty($email) || empty($password)) {
@@ -28,7 +33,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(["status" => "error", "success" => false, "message" => "All fields are required."]);
             exit();
         }
-        header("Location: ../../../frontend/index.php?error=" . urlencode("All fields are required."));
+        header("Location: /DeskStream/index.php?error=" . urlencode("All fields are required."));
         exit();
     }
 
@@ -45,7 +50,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (empty($uniqueUserId)) {
                 // Legacy account without unique_user_id — generate one now and store permanently
                 do {
-                    $candidate = (string)random_int(100000000, 999999999);
+                    $candidate = (string) random_int(100000000, 999999999);
                     $check = $db->prepare("SELECT id FROM users WHERE unique_user_id = ? LIMIT 1");
                     $check->execute([$candidate]);
                 } while ($check->fetch());
@@ -55,15 +60,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             // Establish clean server session
-            $_SESSION['user_id'] = (int)$user['id'];
+            $_SESSION['user_id'] = (int) $user['id'];
             $_SESSION['username'] = $user['username'];
             $_SESSION['email'] = $user['email'];
             $_SESSION['unique_user_id'] = $uniqueUserId;
-
-            // Authoritative subscription and entitlement resolution
-            require_once __DIR__ . '/../../services/SubscriptionService.php';
-            $userEntitlements = SubscriptionService::getUserEntitlements((int)$user['id']);
-            $_SESSION['subscription'] = $userEntitlements;
 
             // Fetch user's registered system if already registered by the Rust desktop agent
             $sysStmt = $db->prepare("
@@ -83,24 +83,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     "success" => true,
                     "message" => "Login successful",
                     "user" => [
-                        "id" => (int)$user['id'],
+                        "id" => (int) $user['id'],
                         "name" => $user['username'],
                         "username" => $user['username'],
                         "email" => $user['email'],
                         "unique_user_id" => $uniqueUserId
                     ],
-                    "subscription" => [
-                        "plan_id" => $userEntitlements['plan_id'],
-                        "plan_name" => $userEntitlements['plan_name'],
-                        "plan_slug" => $userEntitlements['plan_slug'],
-                        "can_record" => $userEntitlements['can_record'],
-                        "can_reverse_control" => $userEntitlements['can_reverse_control'],
-                        "max_quality" => $userEntitlements['max_quality'],
-                        "max_concurrent_sessions" => $userEntitlements['max_concurrent_sessions'],
-                        "expires_at" => $userEntitlements['expires_at']
-                    ],
                     "system" => $userSystem ? [
-                        "system_id" => (string)($userSystem['system_id'] ?: $userSystem['device_uid']),
+                        "system_id" => (string) ($userSystem['system_id'] ?: $userSystem['device_uid']),
                         "device_name" => $userSystem['name'],
                         "status" => !empty($userSystem['is_live_online']) ? "online" : "offline"
                     ] : null
@@ -108,7 +98,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit();
             }
 
-            header("Location: ../../../frontend/dashboard.php");
+            header("Location: /DeskStream/dashboard.php");
             exit();
         } else {
             if ($isJson) {
@@ -116,7 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(["status" => "error", "success" => false, "message" => "Invalid email or password."]);
                 exit();
             }
-            header("Location: ../../../frontend/index.php?error=" . urlencode("Invalid email or password."));
+            header("Location: /DeskStream/index.php?error=" . urlencode("Invalid email or password."));
             exit();
         }
 
@@ -126,10 +116,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(["status" => "error", "success" => false, "message" => "Database error: " . $e->getMessage()]);
             exit();
         }
-        header("Location: ../../../frontend/index.php?error=" . urlencode("Database error: " . $e->getMessage()));
+        header("Location: /DeskStream/index.php?error=" . urlencode("Database error: " . $e->getMessage()));
         exit();
     }
 } else {
-    header("Location: ../../../frontend/index.php");
+    header("Location: /DeskStream/index.php");
     exit();
 }

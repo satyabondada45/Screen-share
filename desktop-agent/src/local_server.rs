@@ -5,7 +5,37 @@ use reqwest::blocking::Client;
 use std::sync::Arc;
 use serde_json::json;
 
-const UPSTREAM: &str = "https://friendssoftwaresolutions.in/DeskStream";
+fn upstream_api_url(local_path: &str) -> Option<String> {
+    let api_path = local_path.strip_prefix("/api")?;
+    if !api_path.starts_with('/') {
+        return None;
+    }
+    Some(format!(
+        "{}{}",
+        crate::identity::device_id::DEFAULT_BACKEND_URL,
+        api_path
+    ))
+}
+
+#[cfg(test)]
+mod api_url_tests {
+    use super::upstream_api_url;
+
+    #[test]
+    fn api_proxy_uses_the_configured_production_api_base_once() {
+        assert_eq!(
+            upstream_api_url("/api/auth/login.php"),
+            Some(
+                "https://friendssoftwaresolutions.in/DeskStream/api/auth/login.php".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn api_proxy_rejects_paths_outside_the_api_prefix() {
+        assert_eq!(upstream_api_url("/apiary/auth/login.php"), None);
+    }
+}
 
 pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -26,47 +56,85 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             
             // Proxy API Requests
             if path.starts_with("/api/") {
-                let upstream_url = format!("{}{}", UPSTREAM, path);
-                let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes()).unwrap();
-                
-                use std::io::Write;
-                let mut log_file = std::fs::OpenOptions::new().create(true).append(true).open("proxy.log").unwrap();
-                
-                writeln!(log_file, "[PROXY] local request = {}", path).unwrap();
-                writeln!(log_file, "[PROXY] upstream URL = {}", upstream_url).unwrap();
-                writeln!(log_file, "[PROXY] method = {}", method).unwrap();
+                let upstream_url = match upstream_api_url(&path) {
+                    Some(url) => url,
+                    None => {
+                        let _ = request.respond(Response::from_string("Invalid API path").with_status_code(400));
+                        continue;
+                    }
+                };
+                let method = match reqwest::Method::from_bytes(request.method().as_str().as_bytes()) {
+                    Ok(method) => method,
+                    Err(error) => {
+                        eprintln!("[API PROXY] unsupported request method: {}", error);
+                        let _ = request.respond(
+                            Response::from_string("Unsupported API request method")
+                                .with_status_code(405),
+                        );
+                        continue;
+                    }
+                };
                 
                 let mut req_builder = client.request(method, &upstream_url);
                 
-                // Forward specific headers (do NOT forward Cookie)
+                let mut forwarded_cookie = false;
+                let mut session_token: Option<String> = None;
                 for header in request.headers() {
                     let name = header.field.to_string().to_lowercase();
-                    if name == "content-type" || name == "accept" {
+                    if name == "content-type" 
+                        || name == "accept" 
+                        || name == "authorization" 
+                        || name == "x-deskstream-session" 
+                        || name == "x-auth-token" 
+                    {
                         req_builder = req_builder.header(header.field.to_string(), header.value.to_string());
+                        if name == "x-deskstream-session" {
+                            session_token = Some(header.value.to_string());
+                        }
+                    } else if name == "cookie" {
+                        forwarded_cookie = true;
+                        req_builder = req_builder.header("Cookie", header.value.to_string());
+                    }
+                }
+                if !forwarded_cookie {
+                    if let Some(token) = session_token {
+                        req_builder = req_builder.header("Cookie", format!("PHPSESSID={}", token));
                     }
                 }
                 
                 // Read body
                 let mut body = Vec::new();
-                let _ = request.as_reader().read_to_end(&mut body);
+                if let Err(error) = request.as_reader().read_to_end(&mut body) {
+                    eprintln!(
+                        "[API PROXY] failed to read request body for {}: {}",
+                        path.split('?').next().unwrap_or("/api"),
+                        error
+                    );
+                    let _ = request.respond(
+                        Response::from_string("Could not read API request").with_status_code(400),
+                    );
+                    continue;
+                }
                 if !body.is_empty() {
-                    writeln!(log_file, "[PROXY] body length = {}", body.len()).unwrap();
-                    if let Ok(body_str) = std::str::from_utf8(&body) {
-                        writeln!(log_file, "[PROXY] request body = {}", body_str).unwrap();
-                    }
                     req_builder = req_builder.body(body);
                 }
                 
                 match req_builder.send() {
                     Ok(mut upstream_resp) => {
                         let status_code = upstream_resp.status().as_u16();
-                        writeln!(log_file, "[PROXY] upstream status = {}", status_code).unwrap();
+                        if status_code >= 400 {
+                            eprintln!(
+                                "[API PROXY] upstream returned HTTP {} for {}",
+                                status_code,
+                                path.split('?').next().unwrap_or("/api")
+                            );
+                        }
                         let mut resp_headers = Vec::new();
                         
-                        // Forward Content-Type (do NOT forward Set-Cookie)
+                        // Forward Content-Type, Set-Cookie, Cache-Control
                         for (k, v) in upstream_resp.headers().iter() {
                             let name = k.as_str().to_lowercase();
-                            if name == "content-type" {
+                            if name == "content-type" || name == "set-cookie" || name == "cache-control" {
                                 if let Ok(val) = v.to_str() {
                                     if let Ok(header) = Header::from_bytes(k.as_str().as_bytes(), val.as_bytes()) {
                                         resp_headers.push(header);
@@ -76,10 +144,17 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         }
                         
                         let mut resp_body = Vec::new();
-                        let _ = upstream_resp.read_to_end(&mut resp_body);
-                        
-                        if let Ok(body_str) = std::str::from_utf8(&resp_body) {
-                            writeln!(log_file, "[PROXY] upstream response = {}", body_str).unwrap();
+                        if let Err(error) = upstream_resp.read_to_end(&mut resp_body) {
+                            eprintln!(
+                                "[API PROXY] failed to read upstream response for {}: {}",
+                                path.split('?').next().unwrap_or("/api"),
+                                error
+                            );
+                            let _ = request.respond(
+                                Response::from_string("Could not read API response")
+                                    .with_status_code(502),
+                            );
+                            continue;
                         }
                         
                         let mut response = Response::from_data(resp_body)
@@ -91,7 +166,11 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         let _ = request.respond(response);
                     },
                     Err(e) => {
-                        println!("Proxy error: {}", e);
+                        eprintln!(
+                            "[API PROXY] upstream request failed for {}: {}",
+                            path.split('?').next().unwrap_or("/api"),
+                            e
+                        );
                         let _ = request.respond(Response::from_string("Proxy error").with_status_code(502));
                     }
                 }
@@ -191,6 +270,73 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 println!("[AGENT] Received graceful shutdown request from UI.");
                 quit.store(true, std::sync::atomic::Ordering::Relaxed);
                 let response = Response::from_string("{\"success\":true}")
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            // ── In-App Updater Endpoints ─────────────────────────────────────
+            if path == "/desktop-api/updater/check" {
+                let check_res = crate::updater::check_for_updates_sync();
+                let json_body = match check_res {
+                    Ok(result) => {
+                        let manager = crate::updater::UPDATER.get();
+                        let manifest = manager.cached_manifest.lock().ok().and_then(|m| m.clone());
+                        json!({
+                            "success": true,
+                            "update_available": result.update_available,
+                            "current_version": result.current_version,
+                            "new_version": result.new_version,
+                            "mandatory": result.mandatory,
+                            "release_notes": result.release_notes,
+                            "release_date": result.release_date,
+                            "package_size": result.package_size,
+                            "package_url": result.package_url,
+                            "manifest": manifest,
+                            "data": result
+                        }).to_string()
+                    },
+                    Err(err) => json!({ "success": false, "error": err }).to_string(),
+                };
+                let response = Response::from_string(json_body)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/updater/download" && request.method() == &tiny_http::Method::Post {
+                let dl_res = crate::updater::start_download_update();
+                let json_body = match dl_res {
+                    Ok(()) => json!({ "success": true }).to_string(),
+                    Err(err) => json!({ "success": false, "error": err }).to_string(),
+                };
+                let response = Response::from_string(json_body)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/updater/status" {
+                let manager = crate::updater::UPDATER.get();
+                let current_state = manager.state.lock().map(|st| st.clone()).unwrap_or(crate::updater::UpdateState::Idle);
+                let json_body = json!({
+                    "success": true,
+                    "state": current_state,
+                    "current_version": crate::updater::CURRENT_VERSION
+                }).to_string();
+                let response = Response::from_string(json_body)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/updater/install" && request.method() == &tiny_http::Method::Post {
+                let install_res = crate::updater::apply_update_and_restart();
+                let json_body = match install_res {
+                    Ok(()) => json!({ "success": true, "message": "Restarting application..." }).to_string(),
+                    Err(err) => json!({ "success": false, "error": err }).to_string(),
+                };
+                let response = Response::from_string(json_body)
                     .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
                 continue;
@@ -581,11 +727,25 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
             }
 
             if path == "/desktop-api/session/reverse" && request.method() == &tiny_http::Method::Post {
-                let in_session = crate::status::LIVE
-                    .get()
-                    .and_then(|status| status.lock().ok())
-                    .map(|status| status.in_session)
-                    .unwrap_or(false);
+                let request_id = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("X-DeskStream-Reverse-Request-Id"))
+                    .map(|header| header.value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let in_session = match crate::status::LIVE.get() {
+                    Some(status) => match status.lock() {
+                        Ok(status) => status.in_session,
+                        Err(_) => {
+                            let _ = request.respond(
+                                Response::from_string("agent status lock poisoned").with_status_code(500),
+                            );
+                            continue;
+                        }
+                    },
+                    None => false,
+                };
                 if !in_session {
                     let _ = request.respond(Response::from_string("No active session").with_status_code(409));
                     continue;
@@ -601,20 +761,49 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         continue;
                     }
                 };
-                if !crate::status::begin_session_reverse_request() {
-                    let _ = request.respond(Response::from_string("A reverse request is already pending").with_status_code(409));
-                    continue;
+                match crate::status::begin_session_reverse_request_with_id(&request_id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = request.respond(Response::from_string("A reverse request is already pending").with_status_code(409));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(400));
+                        continue;
+                    }
                 }
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[REVERSE TRACE] role=HOST direction=SEND stage=REQUEST_QUEUED message_type=30 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} result=pending",
+                        request_id, system_id, peer_system_id
+                    ),
+                );
                 match crate::status::send_session_packet(vec![30]) {
                     Ok(()) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[REVERSE TRACE] role=HOST direction=SEND_COMPLETE message_type=30 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} result=queued",
+                                request_id, system_id, peer_system_id
+                            ),
+                        );
                         let _ = request.respond(Response::from_string(json!({
                             "success": true,
-                            "peer_system_id": peer_system_id
+                            "peer_system_id": peer_system_id,
+                            "request_id": request_id
                         }).to_string())
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
                     }
                     Err(error) => {
                         crate::status::cancel_session_reverse_request();
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[REVERSE TRACE] role=HOST direction=SEND_FAILED message_type=30 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} result=failed reason={}",
+                                request_id, system_id, peer_system_id, error
+                            ),
+                        );
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
                     }
                 }
@@ -630,12 +819,133 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                 continue;
             }
 
+            if path == "/desktop-api/session/reverse/cancel" && request.method() == &tiny_http::Method::Post {
+                let (_, peer_system_id, _) =
+                    match crate::status::peek_session_reverse_decision_with_peer() {
+                        Ok(state) => state,
+                        Err(error) => {
+                            let _ = request.respond(
+                                Response::from_string(error).with_status_code(500),
+                            );
+                            continue;
+                        }
+                    };
+                let cancel_request_id = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("X-DeskStream-Reverse-Request-Id"))
+                    .map(|header| header.value.as_str())
+                    .unwrap_or("");
+                if cancel_request_id.is_empty() {
+                    let _ = request.respond(
+                        Response::from_string("reverse request ID is required").with_status_code(400),
+                    );
+                    continue;
+                }
+                let cancelled = match crate::status::cancel_session_reverse_request_with_id(cancel_request_id) {
+                    Ok(cancelled) => cancelled,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
+                if !cancelled {
+                    let _ = request.respond(
+                        Response::from_string("reverse request ID does not match the outstanding request")
+                            .with_status_code(409),
+                    );
+                    continue;
+                }
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[REVERSE TRACE] role=HOST direction=LOCAL stage=CANCEL message_type=30 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} result=cleared",
+                        cancel_request_id,
+                        system_id,
+                        peer_system_id.as_deref().unwrap_or("none")
+                    ),
+                );
+                let response = Response::from_string("{\"success\":true}")
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
             if path == "/desktop-api/session/reverse/decision" && request.method() == &tiny_http::Method::Get {
+                let (decision, peer_system_id, request_id) = match crate::status::peek_session_reverse_decision_with_peer() {
+                    Ok((decision, peer_system_id, request_id)) => (
+                        decision,
+                        peer_system_id.unwrap_or_default(),
+                        request_id.unwrap_or_default(),
+                    ),
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[REVERSE TRACE] role=HOST direction=LOCAL_POLL stage=DECISION_READ message_type=31 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} decision={} result=retained_until_session_end_or_cancel",
+                        request_id, system_id, peer_system_id, decision
+                    ),
+                );
                 let response = Response::from_string(json!({
-                    "decision": crate::status::take_session_reverse_decision(),
-                    "peer_system_id": crate::status::session_peer_system_id().unwrap_or_default()
+                    "decision": decision,
+                    "peer_system_id": peer_system_id,
+                    "request_id": request_id
                 }).to_string())
                 .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if path == "/desktop-api/session/reverse/decision/ack" && request.method() == &tiny_http::Method::Post {
+                let request_id = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("X-DeskStream-Reverse-Request-Id"))
+                    .map(|header| header.value.as_str())
+                    .unwrap_or("");
+                if request_id.is_empty() {
+                    let _ = request.respond(
+                        Response::from_string("reverse request ID is required").with_status_code(400),
+                    );
+                    continue;
+                }
+                let acknowledged = match crate::status::acknowledge_session_reverse_decision_with_id(request_id) {
+                    Ok(acknowledged) => acknowledged,
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
+                if !acknowledged {
+                    let _ = request.respond(
+                        Response::from_string("reverse decision is absent or belongs to another request")
+                            .with_status_code(409),
+                    );
+                    continue;
+                }
+                let peer_system_id = match crate::status::session_peer_system_id() {
+                    Ok(Some(peer_system_id)) => peer_system_id,
+                    Ok(None) => "unknown".to_string(),
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
+                crate::session_debug::log(
+                    &system_id,
+                    &format!(
+                        "[REVERSE TRACE] role=HOST direction=LOCAL stage=DECISION_ACK message_type=31 request_id={} active_session_id=unavailable active_session_host_id={} peer_system_id={} result=cleared_after_ui_validation",
+                        request_id,
+                        system_id,
+                        peer_system_id
+                    ),
+                );
+                let response = Response::from_string("{\"success\":true}")
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
                 continue;
             }
@@ -660,13 +970,40 @@ pub fn start_local_server(system_id: String, quit: std::sync::Arc<std::sync::ato
                         continue;
                     }
                 };
+                let peer_system_id = match crate::status::session_peer_system_id() {
+                    Ok(Some(peer_system_id)) => peer_system_id,
+                    Ok(None) => "unknown".to_string(),
+                    Err(error) => {
+                        let _ = request.respond(Response::from_string(error).with_status_code(500));
+                        continue;
+                    }
+                };
                 match crate::status::send_session_packet(vec![31, u8::from(accepted)]) {
                     Ok(()) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[REVERSE TRACE] role=HOST direction=SEND message_type=31 request_id=not_carried_by_wire active_session_id=unavailable active_session_host_id={} peer_system_id={} decision={} result=queued",
+                                system_id,
+                                peer_system_id,
+                                u8::from(accepted)
+                            ),
+                        );
                         crate::status::clear_session_reverse_request_pending();
                         let _ = request.respond(Response::from_string("{\"success\":true}")
                             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()));
                     }
                     Err(error) => {
+                        crate::session_debug::log(
+                            &system_id,
+                            &format!(
+                                "[REVERSE TRACE] role=HOST direction=SEND_FAILED message_type=31 request_id=not_carried_by_wire active_session_id=unavailable active_session_host_id={} peer_system_id={} decision={} result=failed reason={}",
+                                system_id,
+                                peer_system_id,
+                                u8::from(accepted),
+                                error
+                            ),
+                        );
                         let _ = request.respond(Response::from_string(error).with_status_code(503));
                     }
                 }

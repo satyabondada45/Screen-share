@@ -90,6 +90,12 @@ try {
             $stats['accepted_connections'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(`status`) = "accepted"')->fetchColumn();
             $stats['pending_connections'] = (int) $pdo->query('SELECT COUNT(*) FROM `connection_requests` WHERE LOWER(`status`) = "pending"')->fetchColumn();
         }
+    } elseif (admin_table_exists($pdo, 'connections')) {
+        $stats['total_connection_requests'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections`')->fetchColumn();
+        if (admin_column_exists($pdo, 'connections', 'status')) {
+            $stats['accepted_connections'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections` WHERE LOWER(`status`) = "accepted"')->fetchColumn();
+            $stats['pending_connections'] = (int) $pdo->query('SELECT COUNT(*) FROM `connections` WHERE LOWER(`status`) IN ("pending", "requested")')->fetchColumn();
+        }
     }
 
     // Plans metrics
@@ -160,28 +166,46 @@ if (admin_table_exists($pdo, 'devices')) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // 3. QUERY REAL RECENT SUBSCRIPTIONS (JOIN USER & PLAN)
 // ─────────────────────────────────────────────────────────────────────────────
 
 $recentSubscriptions = [];
 if (admin_table_exists($pdo, 'subscriptions')) {
     try {
+        $subCols = admin_table_columns($pdo, 'subscriptions');
+        $hasSubUserId = in_array('user_id', $subCols, true);
+        $hasSubDeviceId = in_array('device_id', $subCols, true);
+        $planCols = admin_table_exists($pdo, 'plans') ? admin_table_columns($pdo, 'plans') : [];
+        $hasPlanUnit = in_array('duration_unit', $planCols, true);
+        $unitSelect = $hasPlanUnit ? 'p.duration_unit' : '"days" AS duration_unit';
+        $priceSelect = in_array('price', $planCols, true) ? 'p.price AS plan_price' : 's.amount AS plan_price';
+
+        $userJoin = '';
+        if ($hasSubUserId && admin_table_exists($pdo, 'users')) {
+            $userJoin = 'LEFT JOIN `users` u ON s.user_id = u.id';
+        } elseif ($hasSubDeviceId && admin_table_exists($pdo, 'devices') && admin_table_exists($pdo, 'users')) {
+            $userJoin = 'LEFT JOIN `devices` d ON (s.device_id = d.system_id OR s.device_id = d.device_uid OR s.device_id = CAST(d.id AS CHAR))
+                         LEFT JOIN `users` u ON d.user_id = u.id';
+        }
+
         $sql = "
             SELECT s.*, 
                    u.name AS user_name, 
                    u.email AS user_email,
                    p.name AS plan_name,
-                   p.price AS plan_price,
-                   p.duration_unit
+                   {$priceSelect},
+                   {$unitSelect}
             FROM `subscriptions` s
-            LEFT JOIN `users` u ON s.user_id = u.id
+            {$userJoin}
             LEFT JOIN `plans` p ON s.plan_id = p.id
+            GROUP BY s.id
             ORDER BY s.id DESC
             LIMIT 5
         ";
         $recentSubscriptions = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
     } catch (Throwable $e) {
-        error_log('Recent subscriptions query error: ' . $e->getMessage());
+        admin_log_error($e, 'Recent subscriptions query error');
     }
 }
 
@@ -194,23 +218,35 @@ if (admin_table_exists($pdo, 'subscriptions')) {
     try {
         $expCol = admin_column_exists($pdo, 'subscriptions', 'expires_at') ? 'expires_at' : (admin_column_exists($pdo, 'subscriptions', 'expiry_date') ? 'expiry_date' : null);
         if ($expCol) {
+            $subCols = admin_table_columns($pdo, 'subscriptions');
+            $hasSubUserId = in_array('user_id', $subCols, true);
+            $hasSubDeviceId = in_array('device_id', $subCols, true);
+            $userJoin = '';
+            if ($hasSubUserId && admin_table_exists($pdo, 'users')) {
+                $userJoin = 'LEFT JOIN `users` u ON s.user_id = u.id';
+            } elseif ($hasSubDeviceId && admin_table_exists($pdo, 'devices') && admin_table_exists($pdo, 'users')) {
+                $userJoin = 'LEFT JOIN `devices` d ON (s.device_id = d.system_id OR s.device_id = d.device_uid OR s.device_id = CAST(d.id AS CHAR))
+                             LEFT JOIN `users` u ON d.user_id = u.id';
+            }
+
             $sql = "
                 SELECT s.*, 
                        u.name AS user_name, 
                        u.email AS user_email,
                        p.name AS plan_name
                 FROM `subscriptions` s
-                LEFT JOIN `users` u ON s.user_id = u.id
+                {$userJoin}
                 LEFT JOIN `plans` p ON s.plan_id = p.id
                 WHERE s.`{$expCol}` IS NOT NULL 
                   AND s.`{$expCol}` BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 7 DAY)
+                GROUP BY s.id
                 ORDER BY s.`{$expCol}` ASC
                 LIMIT 5
             ";
             $expiringSoonRows = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
         }
     } catch (Throwable $e) {
-        error_log('Expiring soon query error: ' . $e->getMessage());
+        admin_log_error($e, 'Expiring soon query error');
     }
 }
 
@@ -334,14 +370,15 @@ $recentSubscriptionsMarkup = '';
 if (!empty($recentSubscriptions)) {
     foreach ($recentSubscriptions as $sub) {
         $subId = (int) $sub['id'];
-        $user = htmlspecialchars((string) ($sub['user_name'] ?? ($sub['user_email'] ?? 'User #' . $sub['user_id'])), ENT_QUOTES, 'UTF-8');
-        $plan = htmlspecialchars((string) ($sub['plan_name'] ?? 'Plan #' . $sub['plan_id']), ENT_QUOTES, 'UTF-8');
-        $start = !empty($sub['starts_at']) ? htmlspecialchars((string) $sub['starts_at'], ENT_QUOTES, 'UTF-8') : 'N/A';
-        $expVal = $sub['expires_at'] ?? null;
+        $user = htmlspecialchars((string) ($sub['user_name'] ?? ($sub['user_email'] ?? ($sub['device_id'] ?? 'User #' . ($sub['user_id'] ?? '')))), ENT_QUOTES, 'UTF-8');
+        $plan = htmlspecialchars((string) ($sub['plan_name'] ?? 'Plan #' . ($sub['plan_id'] ?? '')), ENT_QUOTES, 'UTF-8');
+        $startVal = $sub['starts_at'] ?? ($sub['start_date'] ?? null);
+        $start = !empty($startVal) ? admin_utc_date((string)$startVal) : 'N/A';
+        $expVal = $sub['expires_at'] ?? ($sub['expiry_date'] ?? null);
         if (empty($expVal) || ($sub['duration_unit'] ?? '') === 'unlimited') {
             $expiry = '<span style="color:#16a34a; font-weight:600;">Unlimited</span>';
         } else {
-            $expiry = htmlspecialchars((string) $expVal, ENT_QUOTES, 'UTF-8');
+            $expiry = htmlspecialchars(admin_utc_date((string)$expVal), ENT_QUOTES, 'UTF-8');
         }
         $statusVal = strtoupper((string) ($sub['status'] ?? 'ACTIVE'));
         $statusClass = strtolower($statusVal);
@@ -387,9 +424,10 @@ if (!empty($recentSessions)) {
 $expiringMarkup = '';
 if (!empty($expiringSoonRows)) {
     foreach ($expiringSoonRows as $row) {
-        $user = htmlspecialchars((string) ($row['user_name'] ?? ($row['user_email'] ?? 'User #' . $row['user_id'])), ENT_QUOTES, 'UTF-8');
-        $plan = htmlspecialchars((string) ($row['plan_name'] ?? 'Plan #' . $row['plan_id']), ENT_QUOTES, 'UTF-8');
-        $expDate = htmlspecialchars((string) ($row['expires_at'] ?? 'N/A'), ENT_QUOTES, 'UTF-8');
+        $user = htmlspecialchars((string) ($row['user_name'] ?? ($row['user_email'] ?? ($row['device_id'] ?? 'User #' . ($row['user_id'] ?? '')))), ENT_QUOTES, 'UTF-8');
+        $plan = htmlspecialchars((string) ($row['plan_name'] ?? 'Plan #' . ($row['plan_id'] ?? '')), ENT_QUOTES, 'UTF-8');
+        $expVal = $row['expires_at'] ?? ($row['expiry_date'] ?? null);
+        $expDate = !empty($expVal) ? htmlspecialchars(admin_utc_date((string)$expVal), ENT_QUOTES, 'UTF-8') : 'N/A';
         $expiringMarkup .= "<li style=\"margin-bottom:8px;\"><strong>{$user}</strong> ({$plan}) &mdash; <span style=\"color:#b45309; font-weight:600;\">Expires: {$expDate}</span></li>";
     }
 } else {

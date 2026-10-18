@@ -10,6 +10,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../services/SubscriptionService.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
@@ -45,6 +46,11 @@ try {
         echo json_encode(["status" => "error", "message" => "Connection request not found."]);
         exit();
     }
+    if (!in_array($req['status'], ['pending', 'accepted'], true)) {
+        http_response_code(409);
+        echo json_encode(["status" => "error", "message" => "This connection request is no longer pending."]);
+        exit();
+    }
 
     // 2. Strict Authorization Validation: Ensure the caller is the target computer
     if (!empty($targetSystemId) && $req['target_system_id'] !== $targetSystemId) {
@@ -54,20 +60,80 @@ try {
     }
 
     // 3. Expiration Check
-    if (strtotime($req['expires_at']) < time() || $req['status'] === 'expired') {
+    $requestExpiresAt = new DateTimeImmutable($req['expires_at'], new DateTimeZone('UTC'));
+    if ($requestExpiresAt <= new DateTimeImmutable('now', new DateTimeZone('UTC')) || $req['status'] === 'expired') {
         $pdo->prepare("UPDATE connection_requests SET status = 'expired' WHERE id = ?")->execute([$req['id']]);
         http_response_code(410);
         echo json_encode(["status" => "error", "message" => "Connection request has expired."]);
         exit();
     }
 
+    $pdo->beginTransaction();
+    $targetDeviceStmt = $pdo->prepare("
+        SELECT id
+        FROM devices
+        WHERE system_id = ? OR device_uid = ?
+        LIMIT 1
+        FOR UPDATE
+    ");
+    $targetDeviceStmt->execute([$req['target_system_id'], $req['target_system_id']]);
+    if (!$targetDeviceStmt->fetchColumn()) {
+        $pdo->rollBack();
+        http_response_code(404);
+        echo json_encode(["status" => "error", "message" => "The target device is no longer registered."]);
+        exit();
+    }
+
+    $accountIds = array_unique(array_filter([
+        (int)($req['requester_user_id'] ?? 0),
+        (int)($req['target_user_id'] ?? 0)
+    ]));
+    sort($accountIds, SORT_NUMERIC);
+    foreach ($accountIds as $accountId) {
+        $sessionAuth = SubscriptionService::checkConcurrentSessionLimit(
+            (int)$accountId,
+            (string)$req['request_token']
+        );
+        if (empty($sessionAuth['authorized'])) {
+            $pdo->rollBack();
+            http_response_code(403);
+            echo json_encode([
+                "status" => "error",
+                "code" => $sessionAuth['code'] ?? 'CONCURRENT_SESSION_LIMIT_EXCEEDED',
+                "message" => $sessionAuth['message'] ?? 'The account session limit has been reached.'
+            ]);
+            exit();
+        }
+    }
+
+    $otherAcceptedStmt = $pdo->prepare("
+        SELECT id
+        FROM connection_requests
+        WHERE target_system_id = ? AND id <> ?
+          AND status = 'accepted' AND expires_at > UTC_TIMESTAMP()
+        LIMIT 1
+        FOR UPDATE
+    ");
+    $otherAcceptedStmt->execute([$req['target_system_id'], $req['id']]);
+    if ($otherAcceptedStmt->fetchColumn()) {
+        $pdo->rollBack();
+        http_response_code(409);
+        echo json_encode([
+            "status" => "error",
+            "code" => "TARGET_SESSION_ALREADY_APPROVED",
+            "message" => "This device already has an approved session starting."
+        ]);
+        exit();
+    }
+
     // 4. Update status to accepted
     $updateStmt = $pdo->prepare("
         UPDATE connection_requests 
-        SET status = 'accepted', updated_at = NOW() 
+        SET status = 'accepted', updated_at = UTC_TIMESTAMP()
         WHERE id = ?
     ");
     $updateStmt->execute([$req['id']]);
+    $pdo->commit();
 
     echo json_encode([
         "status" => "success",
@@ -78,6 +144,16 @@ try {
     ]);
 
 } catch (\PDOException $e) {
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
     http_response_code(500);
     echo json_encode(["status" => "error", "message" => "Database error: " . $e->getMessage()]);
+} catch (Throwable $e) {
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    error_log('Connection acceptance failed: ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(["status" => "error", "message" => "Unable to accept the connection request."]);
 }

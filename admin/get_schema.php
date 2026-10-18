@@ -1,9 +1,11 @@
 <?php
-require 'includes/db.php';
+header('Content-Type: text/plain');
+require_once __DIR__ . '/includes/db.php';
 $pdo = admin_db();
-foreach(['users', 'devices', 'plans', 'subscriptions', 'payments'] as $t) {
-    echo "TABLE $t\n";
-    foreach($pdo->query("DESCRIBE `$t`")->fetchAll(PDO::FETCH_ASSOC) as $r) {
-        echo $r['Field'].' '.$r['Type']."\n";
-    }
+$tables = ['plans', 'subscriptions', 'devices', 'users'];
+foreach ($tables as $t) {
+    echo "=== DATA IN $t ===\n";
+    $rows = $pdo->query("SELECT * FROM `$t` LIMIT 10")->fetchAll(PDO::FETCH_ASSOC);
+    print_r($rows);
 }
+

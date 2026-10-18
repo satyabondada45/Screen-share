@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/../api_path.php';
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -9,15 +10,8 @@ if (empty($_SESSION['user_id'])) {
     exit();
 }
 
-$dbPath = __DIR__ . '/../config/database.php';
-
 if (!isset($pdo) || !($pdo instanceof PDO)) {
-    if (!file_exists($dbPath)) {
-        http_response_code(500);
-        exit('Database configuration file not found.');
-    }
-
-    require_once $dbPath;
+    require_once deskstream_config_file('database.php');
 }
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -66,7 +60,7 @@ $requestedId = $cleanId;
 $systemId = $device['system_id'] ?: $device['device_uid'];
 
 // Authoritative Entitlement Resolution
-require_once __DIR__ . '/../../backend/services/SubscriptionService.php';
+require_once deskstream_service_file('SubscriptionService.php');
 $entitlements = SubscriptionService::getUserEntitlements((int)$accountId);
 
 // Check Free Plan concurrent session limit
@@ -999,6 +993,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             ) ?>;
         const REQUESTER_SYSTEM_ID =
             <?= json_encode($_GET['requester_system_id'] ?? '', JSON_UNESCAPED_SLASHES) ?>;
+        const REQUEST_TOKEN =
+            <?= json_encode($_GET['token'] ?? '', JSON_UNESCAPED_SLASHES) ?>;
+        const API_BASE =
+            <?= json_encode(deskstream_api_base_path(), JSON_UNESCAPED_SLASHES) ?>;
 
         const WS_URL = <?= json_encode($relayWsUrl) ?>;
 
@@ -1021,6 +1019,94 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         let activeTransport = "WS"; // "WS" or "WEBRTC"
 
         let isStreaming = false;
+        let isStartingStream = false;
+        let streamStartAttempt = 0;
+        let sessionReservation = null;
+        let sessionHeartbeatTimer = null;
+        let heartbeatInProgress = false;
+
+        const sessionApiUrl = endpoint => `${API_BASE}/sessions/${endpoint}.php`;
+
+        async function reserveRemoteSession() {
+            if (!REQUEST_TOKEN) {
+                throw new Error("The approved connection token is missing. Return to the dashboard and reconnect.");
+            }
+            const proposedKey = `${REQUEST_TOKEN}:${crypto.randomUUID()}`;
+            const response = await fetch(sessionApiUrl("start"), {
+                method: "POST",
+                credentials: "same-origin",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    device_id: DEVICE_ID,
+                    session_key: proposedKey,
+                    request_token: REQUEST_TOKEN
+                })
+            });
+            const result = await response.json();
+            if (!response.ok || result.status !== "success" || !result.session_key) {
+                throw new Error(result.message || "The server rejected this remote session.");
+            }
+            sessionReservation = {
+                sessionKey: result.session_key,
+                requestToken: REQUEST_TOKEN
+            };
+            sessionHeartbeatTimer = setInterval(refreshSessionReservation, 30000);
+            console.info("[SESSION] Server reservation active.");
+        }
+
+        async function refreshSessionReservation() {
+            if (!sessionReservation || heartbeatInProgress) return;
+            heartbeatInProgress = true;
+            try {
+                const response = await fetch(sessionApiUrl("heartbeat"), {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        session_key: sessionReservation.sessionKey,
+                        request_token: sessionReservation.requestToken
+                    })
+                });
+                const result = await response.json();
+                if (!response.ok || result.status !== "success") {
+                    throw new Error(result.message || `HTTP ${response.status}`);
+                }
+            } catch (error) {
+                console.error("[SESSION] Reservation heartbeat failed; closing the stream.", error);
+                window.alert("The server could not refresh this session's authorization. The remote desktop session will be disconnected.");
+                stopWebStream();
+            } finally {
+                heartbeatInProgress = false;
+            }
+        }
+
+        function releaseSessionReservation() {
+            if (!sessionReservation) return;
+            const reservation = sessionReservation;
+            sessionReservation = null;
+            if (sessionHeartbeatTimer !== null) {
+                clearInterval(sessionHeartbeatTimer);
+                sessionHeartbeatTimer = null;
+            }
+            const body = JSON.stringify({
+                session_key: reservation.sessionKey,
+                bandwidth_used_mb: 0
+            });
+            const accepted = navigator.sendBeacon(
+                sessionApiUrl("end"),
+                new Blob([body], { type: "application/json" })
+            );
+            if (!accepted) {
+                fetch(sessionApiUrl("end"), {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "Content-Type": "application/json" },
+                    body,
+                    keepalive: true
+                }).catch(error => console.error("[SESSION] Failed to release reservation:", error));
+            }
+            console.info("[SESSION] Reservation release requested.");
+        }
 
         let canvas = null;
 
@@ -1461,8 +1547,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         ============================================================ */
 
         async function toggleAudio() {
-            isAudioEnabled = !isAudioEnabled;
-            if (isAudioEnabled) {
+            const requestedState = !isAudioEnabled;
+            const previousState = isAudioEnabled;
+
+            if (requestedState) {
                 if (audioBtn) {
                     audioBtn.textContent = "🔊 Mute Audio";
                     audioBtn.classList.remove("btn-secondary");
@@ -1480,6 +1568,12 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     }
                 } catch (error) {
                     console.error("[AUDIO] Init error:", error);
+                    if (audioBtn) {
+                        audioBtn.textContent = "🔈 Listen Audio";
+                        audioBtn.classList.remove("btn-warning");
+                        audioBtn.classList.add("btn-secondary");
+                    }
+                    return;
                 }
             } else {
                 if (audioBtn) {
@@ -1488,6 +1582,31 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     audioBtn.classList.add("btn-secondary");
                 }
                 nextAudioTime = 0;
+            }
+
+            try {
+                const response = await fetch("/desktop-api/session/audio", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ enabled: requestedState })
+                });
+                if (!response.ok) {
+                    const detail = await response.text();
+                    throw new Error(detail || `HTTP ${response.status}`);
+                }
+                isAudioEnabled = requestedState;
+                console.log(`[AUDIO] remote mute state synced: enabled=${requestedState}`);
+            } catch (error) {
+                isAudioEnabled = previousState;
+                if (audioBtn) {
+                    audioBtn.textContent = previousState ? "🔊 Mute Audio" : "🔈 Listen Audio";
+                    audioBtn.classList.toggle("btn-warning", previousState);
+                    audioBtn.classList.toggle("btn-secondary", !previousState);
+                }
+                console.error("[AUDIO] Failed to sync remote audio state:", error);
+                nextAudioTime = previousState ? nextAudioTime : 0;
             }
         }
 
@@ -3573,22 +3692,17 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
         ============================================================ */
 
         async function startWebStream() {
+            if (isStartingStream || isStreaming) return;
+            isStartingStream = true;
+            const startAttempt = ++streamStartAttempt;
             console.log(`[SESSION] page loaded`);
             console.log(`[SESSION] authenticated user = <?= json_encode($_SESSION['user_id'] ?? null) ?>`);
             console.log(`[SESSION] session id = <?= json_encode(session_id()) ?>`);
 
             console.log("[AUTH DEBUG] startWebStream called");
-            console.log("[AUTH DEBUG] WebSocket created");
             console.log(`[SESSION] target device = <?= json_encode($_GET['id'] ?? null) ?>`);
             console.log(`[SESSION] relay URL = ${WS_URL}`);
             console.log(`[WS] Attempting:\n${WS_URL}`);
-
-            if (isStreaming) {
-
-                return;
-
-            }
-
 
             canvas =
                 document.getElementById(
@@ -3611,6 +3725,7 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
                     "Unable to create canvas."
                 );
 
+                isStartingStream = false;
                 return;
 
             }
@@ -3653,7 +3768,24 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
             );
 
 
+            try {
+                await reserveRemoteSession();
+            } catch (error) {
+                console.error("[SESSION] Could not reserve this remote session:", error);
+                if (startAttempt === streamStartAttempt) {
+                    alert(error.message || "Unable to authorize this remote session.");
+                    isStartingStream = false;
+                }
+                return;
+            }
+            if (startAttempt !== streamStartAttempt) {
+                releaseSessionReservation();
+                isStartingStream = false;
+                return;
+            }
+
             isStreaming = true;
+            isStartingStream = false;
 
 
             streamBox.style.display =
@@ -3742,7 +3874,10 @@ if (isset($_GET['relay']) && getenv('APP_ENV') !== 'production') {
 
 
         function stopWebStream() {
+            streamStartAttempt++;
+            isStartingStream = false;
             isStreaming = false;
+            releaseSessionReservation();
             stopLocalChatTyping();
             setRemoteChatTyping(false);
             stopRenderLoop();

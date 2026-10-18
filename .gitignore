@@ -10,3 +10,16 @@ target/
 config.json
 agent_config.json
 *.jsonl
+*.key
+*.pem
+scripts/keys/
+*.WebView2/
+**/*.WebView2/
+*.bak
+*.bak*
+backups_*/
+**/backups_*/
+scratch/
+cookies.txt
+desktop-agent/assets.zip
+

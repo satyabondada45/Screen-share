@@ -10,6 +10,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/_auth.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
@@ -23,7 +24,7 @@ $data = json_decode($rawInput, true);
 $targetSystemId = preg_replace('/[^0-9]/', '', (string)($data['target_system_id'] ?? $data['target_id'] ?? ''));
 $requesterSystemId = preg_replace('/[^0-9]/', '', (string)($data['requester_system_id'] ?? $data['requester_id'] ?? ''));
 $requesterName = trim($data['requester_name'] ?? 'Dashboard Viewer');
-$requesterUserId = !empty($data['requester_user_id']) ? (int)$data['requester_user_id'] : null;
+$requesterUserId = requireConnectionUser();
 $localLoopback = !empty($data['local_loopback']);
 
 if (empty($targetSystemId)) {
@@ -38,20 +39,7 @@ if (!$localLoopback && !empty($requesterSystemId) && $requesterSystemId === $tar
     exit();
 }
 
-// Enforce concurrent session limits on the server authorization path
-if (!empty($requesterUserId)) {
-    require_once __DIR__ . '/../../services/SubscriptionService.php';
-    $sessionAuth = SubscriptionService::checkConcurrentSessionLimit((int)$requesterUserId);
-    if (empty($sessionAuth['authorized'])) {
-        http_response_code(403);
-        echo json_encode([
-            "status" => "error",
-            "code" => $sessionAuth['code'] ?? 'LIMIT_EXCEEDED',
-            "message" => $sessionAuth['message'] ?? 'Concurrent session limit exceeded on your account.'
-        ]);
-        exit();
-    }
-}
+require_once __DIR__ . '/../../services/SubscriptionService.php';
 
 try {
     // 1. Find target device directly by system_id or device_uid
@@ -71,6 +59,7 @@ try {
         echo json_encode(["status" => "error", "message" => "Device with ID '{$targetSystemId}' does not exist or has not registered."]);
         exit();
     }
+    $canonicalTargetSystemId = (string)($targetSystem['system_id'] ?: $targetSystem['device_uid']);
 
     // 2. Check online status (active if marked online and heartbeat received within last 30s)
     $secSinceSeen = isset($targetSystem['sec_since_seen']) ? (int)$targetSystem['sec_since_seen'] : 999;
@@ -85,6 +74,21 @@ try {
         exit();
     }
 
+    // Reserve the user's concurrency slot through request creation to prevent parallel requests
+    // from bypassing the Free Plan limit.
+    $pdo->beginTransaction();
+    $sessionAuth = SubscriptionService::checkConcurrentSessionLimit($requesterUserId);
+    if (empty($sessionAuth['authorized'])) {
+        $pdo->rollBack();
+        http_response_code(403);
+        echo json_encode([
+            "status" => "error",
+            "code" => $sessionAuth['code'] ?? 'LIMIT_EXCEEDED',
+            "message" => $sessionAuth['message'] ?? 'Concurrent session limit exceeded on your account.'
+        ]);
+        exit();
+    }
+
     // 3. Generate unique request token
     $requestToken = bin2hex(random_bytes(16));
 
@@ -94,7 +98,7 @@ try {
     $insertStmt = $pdo->prepare("
         INSERT INTO connection_requests 
         (request_token, requester_user_id, requester_system_id, requester_name, target_user_id, target_system_id, status, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW() + INTERVAL 60 SECOND)
+        VALUES (?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP() + INTERVAL 60 SECOND)
     ");
 
     $insertStmt->execute([
@@ -103,9 +107,10 @@ try {
         $requesterSystemId ?: '000000000',
         $requesterName,
         $targetSystem['user_id'],
-        $targetSystemId,
+        $canonicalTargetSystemId,
         $initialStatus
     ]);
+    $pdo->commit();
 
     $requestId = $pdo->lastInsertId();
 
@@ -115,7 +120,7 @@ try {
         "request" => [
             "id" => $requestId,
             "request_token" => $requestToken,
-            "target_system_id" => $targetSystemId,
+            "target_system_id" => $canonicalTargetSystemId,
             "target_name" => $targetSystem['name'],
             "target_ip" => $targetSystem['ip_address'],
             "status" => $initialStatus,
@@ -123,7 +128,11 @@ try {
         ]
     ]);
 
-} catch (\PDOException $e) {
+} catch (\Throwable $e) {
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    error_log('Connection request creation failed: ' . $e->getMessage());
     http_response_code(500);
-    echo json_encode(["status" => "error", "message" => "Database error: " . $e->getMessage()]);
+    echo json_encode(["status" => "error", "message" => "Unable to create the connection request."]);
 }

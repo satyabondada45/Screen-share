@@ -51,14 +51,14 @@ try {
     // 3. Define and seed the 4 canonical plans idempotently
     $defaultPlans = [
         [
-            'name' => 'Welcome Plan',
+            'name' => 'Welcome Plan offered by Friends Software Solutions',
             'slug' => 'welcome',
-            'description' => 'Introductory plan for newly registered users with full access for 6 months.',
+            'description' => 'Welcome Plan offered by Friends Software Solutions. New eligible registrations receive the configured duration.',
             'price' => 0.00,
             'duration_days' => 183,
             'duration_value' => 6,
             'duration_unit' => 'months',
-            'max_devices' => 10,
+            'max_devices' => 100,
             'concurrent_sessions' => 10,
             'status' => 'active',
             'features' => json_encode([
@@ -73,12 +73,12 @@ try {
         [
             'name' => 'Free Plan',
             'slug' => 'free',
-            'description' => 'Standard free tier with 1 concurrent session, 720p streaming, and basic features.',
+            'description' => 'Free Plan with one concurrent remote session, 720p streaming, chat, file transfer, and bidirectional audio.',
             'price' => 0.00,
             'duration_days' => 0,
             'duration_value' => 0,
             'duration_unit' => 'unlimited',
-            'max_devices' => 1,
+            'max_devices' => 100,
             'concurrent_sessions' => 1,
             'status' => 'active',
             'features' => json_encode([
@@ -93,11 +93,11 @@ try {
         [
             'name' => 'Monthly Plan',
             'slug' => 'monthly',
-            'description' => 'Full access for 30 days including session recording and reverse control.',
+            'description' => 'Full access for one calendar month including session recording and reverse control.',
             'price' => 100.00,
             'duration_days' => 30,
-            'duration_value' => 30,
-            'duration_unit' => 'days',
+            'duration_value' => 1,
+            'duration_unit' => 'months',
             'max_devices' => 5,
             'concurrent_sessions' => 5,
             'status' => 'active',
@@ -113,7 +113,7 @@ try {
         [
             'name' => 'Yearly Plan',
             'slug' => 'yearly',
-            'description' => 'Full access for 1 calendar year with maximum performance and priority.',
+            'description' => 'Full access for 12 calendar months including session recording and reverse control.',
             'price' => 1100.00,
             'duration_days' => 365,
             'duration_value' => 1,
@@ -140,30 +140,14 @@ try {
         if ($existingId) {
             echo "Updating existing plan '{$plan['name']}' (ID: $existingId)...\n";
             $update = $pdo->prepare("
-                UPDATE `plans` SET 
-                    `slug` = COALESCE(`slug`, ?),
-                    `description` = COALESCE(`description`, ?),
-                    `price` = ?,
-                    `duration_days` = ?,
-                    `duration_value` = ?,
-                    `duration_unit` = ?,
-                    `max_devices` = ?,
-                    `concurrent_sessions` = ?,
-                    `status` = ?,
-                    `features` = ?
+                UPDATE `plans`
+                SET `slug` = COALESCE(NULLIF(`slug`, ''), ?),
+                    `description` = COALESCE(NULLIF(`description`, ''), ?)
                 WHERE `id` = ?
             ");
             $update->execute([
                 $plan['slug'],
                 $plan['description'],
-                $plan['price'],
-                $plan['duration_days'],
-                $plan['duration_value'],
-                $plan['duration_unit'],
-                $plan['max_devices'],
-                $plan['concurrent_sessions'],
-                $plan['status'],
-                $plan['features'],
                 $existingId
             ]);
         } else {
