@@ -76,31 +76,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Hash the password securely
         $password_hash = password_hash($password, PASSWORD_DEFAULT);
 
+        // Start transaction for atomic user and subscription creation
+        $db->beginTransaction();
+
         // Insert new user with permanent unique_user_id
         $insert_stmt = $db->prepare("INSERT INTO users (name, username, email, password_hash, unique_user_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
         $insert_stmt->execute([$username, $username, $email, $password_hash, $uniqueUserId]);
+        $newUserId = (int)$db->lastInsertId();
+
+        // Automatically assign the Welcome Plan with immutable expiry
+        require_once __DIR__ . '/../../services/SubscriptionService.php';
+        $welcomeSub = SubscriptionService::assignWelcomePlanIfEligible($newUserId, true);
+        if (!$welcomeSub) {
+            throw new RuntimeException("Welcome Plan auto-activation could not be verified for new account.");
+        }
+
+        $db->commit();
 
         if ($isJson) {
             echo json_encode([
                 "status" => "success",
-                "message" => "Registration successful! Please login.",
-                "user_id" => $db->lastInsertId(),
-                "unique_user_id" => $uniqueUserId
+                "message" => "Registration successful! Welcome Plan activated.",
+                "user_id" => $newUserId,
+                "unique_user_id" => $uniqueUserId,
+                "welcome_plan" => [
+                    "plan_name" => $welcomeSub['plan_name'] ?? 'Welcome Plan',
+                    "duration_value" => $welcomeSub['duration_value'] ?? 6,
+                    "duration_unit" => $welcomeSub['duration_unit'] ?? 'months',
+                    "starts_at" => $welcomeSub['starts_at'] ?? null,
+                    "expires_at" => $welcomeSub['expires_at'] ?? null,
+                ]
             ]);
             exit();
         }
 
         // Redirect to login with success message
-        header("Location: /DeskStream/index.php?success=" . urlencode("Registration successful! Please login."));
+        header("Location: /DeskStream/index.php?success=" . urlencode("Registration successful! Welcome Plan activated. Please login."));
         exit();
 
-    } catch (PDOException $e) {
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        error_log("Registration error: " . $e->getMessage());
         if ($isJson) {
             http_response_code(500);
-            echo json_encode(["status" => "error", "message" => "Database error: " . $e->getMessage()]);
+            echo json_encode(["status" => "error", "message" => "Registration failed: " . $e->getMessage()]);
             exit();
         }
-        header("Location: /DeskStream/register.php?error=" . urlencode("Database error: " . $e->getMessage()));
+        header("Location: /DeskStream/register.php?error=" . urlencode("Registration failed: " . $e->getMessage()));
         exit();
     }
 } else {

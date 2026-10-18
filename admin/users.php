@@ -145,7 +145,8 @@ try {
 
                     $pdo->commit();
                     admin_log_action($pdo, 'user_create', "Created user account '{$newUserEmail}' (#{$newUserId}) with automatic Welcome Plan.");
-                    admin_set_flash('success', "User account '{$newUserName}' created successfully with 6-month Welcome Plan activated.");
+                    $durVal = !empty($welcomeSub['duration_value']) ? (int)$welcomeSub['duration_value'] : 6;
+                    admin_set_flash('success', "User account '{$newUserName}' created successfully with {$durVal}-month Welcome Plan activated.");
                 } catch (Throwable $e) {
                     if ($pdo->inTransaction()) {
                         $pdo->rollBack();

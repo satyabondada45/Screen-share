@@ -68,6 +68,52 @@ try {
         exit;
     }
 
+    // Handle Welcome Plan Duration Configuration for Future Registrations
+    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['welcome_duration_submit'])) {
+        if (!admin_verify_csrf_token($_POST['csrf_token'] ?? null)) {
+            admin_set_flash('error', 'Invalid security token. Please refresh and try again.');
+        } else {
+            $months = filter_var($_POST['welcome_duration_months'] ?? null, FILTER_VALIDATE_INT);
+            if ($months === false || $months < 1 || $months > 60) {
+                admin_set_flash('error', 'Welcome Plan duration must be a whole number between 1 and 60 months.');
+            } else {
+                try {
+                    $wStmt = $pdo->prepare("SELECT id, name, duration_value, duration_unit FROM `plans` WHERE `slug` = 'welcome' LIMIT 1");
+                    $wStmt->execute();
+                    $wPlan = $wStmt->fetch(PDO::FETCH_ASSOC);
+                    if (!$wPlan) {
+                        $wStmt = $pdo->prepare("SELECT id, name, duration_value, duration_unit FROM `plans` WHERE LOWER(`name`) LIKE '%welcome%' LIMIT 1");
+                        $wStmt->execute();
+                        $wPlan = $wStmt->fetch(PDO::FETCH_ASSOC);
+                    }
+
+                    if (!$wPlan) {
+                        admin_set_flash('error', 'Welcome Plan configuration was not found in the database.');
+                    } else {
+                        $wId = (int)$wPlan['id'];
+                        $oldMonths = (int)($wPlan['duration_value'] ?? 6);
+                        $days = $months * 30;
+
+                        $updSql = "UPDATE `plans` SET `duration_value` = ?, `duration_unit` = 'months', `duration_days` = ? WHERE `id` = ?";
+                        $pdo->prepare($updSql)->execute([$months, $days, $wId]);
+
+                        admin_log_action(
+                            $pdo,
+                            'welcome_duration_update',
+                            "Changed Welcome Plan duration for future registrations from {$oldMonths} months to {$months} months."
+                        );
+                        admin_set_flash('success', "Welcome Plan registration duration updated to {$months} month" . ($months > 1 ? 's' : '') . " for future accounts. Existing customer subscriptions retain their originally assigned expiry dates.");
+                    }
+                } catch (Throwable $e) {
+                    admin_log_error($e, 'Welcome plan duration update error');
+                    admin_set_flash('error', 'Unable to update Welcome Plan duration: ' . $e->getMessage());
+                }
+            }
+        }
+        header("Location: " . admin_url('plans.php'));
+        exit;
+    }
+
     // Handle Form Submission (Create or Edit)
     if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['plan_submit'])) {
         if (!admin_verify_csrf_token($_POST['csrf_token'] ?? null)) {
@@ -135,7 +181,15 @@ try {
                     $canReverseControl = false;
                     $maxQuality = '720p';
                     $status = 'active';
-                } elseif (in_array($existingSlug, ['welcome', 'monthly', 'yearly'], true)) {
+                } elseif ($existingSlug === 'welcome') {
+                    $price = 0;
+                    $durationUnit = 'months';
+                    $durationValue = min(60, max(1, (int)$durationValue));
+                    $durationDays = $durationValue * 30;
+                    $canRecord = true;
+                    $canReverseControl = true;
+                    $maxQuality = 'full';
+                } elseif (in_array($existingSlug, ['monthly', 'yearly'], true)) {
                     $canRecord = true;
                     $canReverseControl = true;
                     $maxQuality = 'full';
@@ -360,6 +414,18 @@ try {
         ? '<a class="outline-button" href="' . htmlspecialchars(admin_url('plans.php'), ENT_QUOTES, 'UTF-8') . '" style="margin-left:8px;">Cancel</a>' 
         : '';
 
+    // Fetch currently configured Welcome Plan duration for new registrations
+    $currentWelcomeMonths = 6;
+    try {
+        $cwStmt = $pdo->query("SELECT duration_value FROM `plans` WHERE `slug` = 'welcome' OR LOWER(`name`) LIKE '%welcome%' ORDER BY (CASE WHEN `slug` = 'welcome' THEN 0 ELSE 1 END) ASC LIMIT 1");
+        $cwRow = $cwStmt ? $cwStmt->fetch(PDO::FETCH_ASSOC) : null;
+        if ($cwRow && !empty($cwRow['duration_value'])) {
+            $currentWelcomeMonths = (int)$cwRow['duration_value'];
+        }
+    } catch (Throwable $e) {
+        // fallback
+    }
+
     $body = <<<HTML
 <!-- Plans KPI Summary Cards -->
 <div class="card-grid">
@@ -383,6 +449,35 @@ try {
         <p class="value" style="color:#c0392b;">{$kpiTotalSubscribers}</p>
         <div class="trend">Users currently on active plans</div>
     </div>
+</div>
+
+<!-- Welcome Plan Duration Configuration for Future Registrations -->
+<div class="section" id="welcome-config-section" style="border-left: 4px solid var(--accent); background: var(--surface);">
+    <div class="section-header" style="flex-wrap: wrap; gap: 12px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+            <div style="background:var(--accent-soft); color:var(--accent); width:40px; height:40px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:18px;">★</div>
+            <div>
+                <h3 style="margin:0; font-size:16px;">Welcome Plan Duration for Future Registrations</h3>
+                <p style="margin:3px 0 0 0; font-size:13px; color:var(--text-muted);">
+                    Configures the complimentary duration assigned to customer accounts registered in the future. Existing customers' subscriptions retain their originally assigned expiry dates and are never modified.
+                </p>
+            </div>
+        </div>
+        <div>
+            <span class="status-badge status-active" style="font-size:13px; padding:6px 14px;">Current Setting: <strong>{$currentWelcomeMonths} Months</strong></span>
+        </div>
+    </div>
+    <form method="POST" action="plans.php" style="margin-top:16px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:var(--bg); padding:16px; border-radius:var(--radius-md); border:1px solid var(--border);">
+        <input type="hidden" name="csrf_token" value="{$csrfToken}">
+        <input type="hidden" name="welcome_duration_submit" value="1">
+        <label style="display:flex; align-items:center; gap:10px; font-weight:600; color:var(--text-primary); font-size:14px; margin:0;">
+            Duration for Newly Registering Users:
+            <input type="number" name="welcome_duration_months" min="1" max="60" value="{$currentWelcomeMonths}" required style="width:90px; padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:14px; font-weight:600; text-align:center; background:var(--surface);">
+            <span style="font-weight:500; color:var(--text-secondary);">Calendar Months</span>
+        </label>
+        <button type="submit" class="button" style="padding:8px 20px; font-size:14px;">Save Duration Setting</button>
+        <span style="font-size:12px; color:var(--text-muted);">(Permitted range: 1 to 60 calendar months. Default: 6 months. Immutable for already registered users.)</span>
+    </form>
 </div>
 
 <div class="section">

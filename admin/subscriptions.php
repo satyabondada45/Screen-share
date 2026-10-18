@@ -10,6 +10,11 @@ if ($subServiceFile && is_file($subServiceFile)) {
 
 admin_require_auth();
 
+if (isset($_GET['action']) && $_GET['action'] === 'search_customers') {
+    require __DIR__ . '/api_customers.php';
+    exit;
+}
+
 try {
     $pdo = admin_db();
 } catch (Throwable $e) {
@@ -371,36 +376,30 @@ try {
         $statusOptions .= '<option value="' . $value . '"' . ($status === $value ? ' selected' : '') . '>' . $label . '</option>';
     }
 
-    // Load customer accounts for dropdown
-    $userOptions = '';
+    // Customer search prefill handling (on-demand only, never load all users to DOM)
     $prefillUserId = !empty($_GET['user_id']) ? (int)$_GET['user_id'] : 0;
-    $prefillFound = false;
+    $prefillCustomer = null;
 
-    if (admin_table_exists($pdo, 'users')) {
-        $uListStmt = $pdo->query("SELECT id, name, username, email FROM `users` ORDER BY id DESC LIMIT 500");
-        $allUsers = $uListStmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($allUsers as $u) {
-            $uId = (int)$u['id'];
-            if ($uId === $prefillUserId) {
-                $prefillFound = true;
-            }
-            $uName = htmlspecialchars($u['name'] ?: ($u['username'] ?: 'User #' . $uId), ENT_QUOTES, 'UTF-8');
-            $uEmail = htmlspecialchars($u['email'] ?: '', ENT_QUOTES, 'UTF-8');
-            $selected = ($uId === $prefillUserId) ? ' selected' : '';
-            $userOptions .= '<option value="' . $uId . '"' . $selected . '>' . $uName . ($uEmail ? ' (' . $uEmail . ')' : '') . ' — ID #' . $uId . '</option>';
-        }
-
-        if ($prefillUserId > 0 && !$prefillFound) {
-            $singleU = $pdo->prepare("SELECT id, name, username, email FROM `users` WHERE id = ? LIMIT 1");
-            $singleU->execute([$prefillUserId]);
-            $u = $singleU->fetch(PDO::FETCH_ASSOC);
-            if ($u) {
-                $uName = htmlspecialchars($u['name'] ?: ($u['username'] ?: 'User #' . $prefillUserId), ENT_QUOTES, 'UTF-8');
-                $uEmail = htmlspecialchars($u['email'] ?: '', ENT_QUOTES, 'UTF-8');
-                $userOptions = '<option value="' . $prefillUserId . '" selected>' . $uName . ($uEmail ? ' (' . $uEmail . ')' : '') . ' — ID #' . $prefillUserId . '</option>' . $userOptions;
-            }
+    if ($prefillUserId > 0 && admin_table_exists($pdo, 'users')) {
+        $singleU = $pdo->prepare("SELECT id, name, username, email FROM `users` WHERE id = ? LIMIT 1");
+        $singleU->execute([$prefillUserId]);
+        $u = $singleU->fetch(PDO::FETCH_ASSOC);
+        if ($u) {
+            $prefillCustomer = [
+                'id' => (int)$u['id'],
+                'name' => (string)($u['name'] ?: ($u['username'] ?: 'User #' . $prefillUserId)),
+                'email' => (string)($u['email'] ?: ''),
+            ];
         }
     }
+
+    $prefillIdVal = $prefillCustomer ? (int)$prefillCustomer['id'] : '';
+    $prefillName = $prefillCustomer ? htmlspecialchars($prefillCustomer['name'], ENT_QUOTES, 'UTF-8') : '';
+    $prefillEmail = $prefillCustomer ? htmlspecialchars($prefillCustomer['email'], ENT_QUOTES, 'UTF-8') : '';
+    $prefillAvatar = $prefillCustomer ? strtoupper(substr($prefillCustomer['name'], 0, 1)) : 'U';
+    $prefillBadge = $prefillCustomer ? 'ID #' . (int)$prefillCustomer['id'] : '';
+    $selectedDisplay = $prefillCustomer ? 'flex' : 'none';
+    $searchDisplay = $prefillCustomer ? 'none' : 'block';
 
     // Load available plans for manual activation
     $manualPlanOptions = '';
@@ -466,28 +465,64 @@ try {
 
 <div class="section" id="manual-assign">
     <div class="section-header"><h3>Assign, Change or Renew a Subscription Plan</h3></div>
-    <form method="POST" action="{$subscriptionsUrl}" class="detail-panels" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:16px; align-items:end;">
+    <form method="POST" action="{$subscriptionsUrl}" id="plan-assignment-form" class="detail-panels" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:16px; align-items:end;">
         <input type="hidden" name="csrf_token" value="{$adminCsrf}">
         <input type="hidden" name="manual_activation" value="1">
-        <label>Customer Account
-            <select name="user_id" id="assign_user_id" required style="width:100%; border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--bg-card); color:var(--text-primary);">
-                <option value="">-- Choose Customer Account --</option>
-                {$userOptions}
-            </select>
-        </label>
-        <label>Plan to Assign
-            <select name="plan_id" id="assign_plan_id" required style="width:100%; border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--bg-card); color:var(--text-primary);">
+        
+        <!-- Searchable Customer Selector (Debounced, bounded 25-item API results, zero DOM bloat) -->
+        <div class="customer-picker-field" style="position:relative;">
+            <label for="customer_search_input" style="display:block; font-weight:600; font-size:13px; margin-bottom:6px; color:var(--text-primary);">
+                Customer Account <span style="color:var(--danger);">*</span>
+            </label>
+            <input type="hidden" name="user_id" id="assign_user_id" value="{$prefillIdVal}" required>
+            
+            <!-- Selected Customer Display Card -->
+            <div id="customer_selected_box" style="display:{$selectedDisplay}; align-items:center; justify-content:space-between; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm); min-height:42px;">
+                <div style="display:flex; align-items:center; gap:10px; overflow:hidden;">
+                    <div style="background:var(--accent-soft); color:var(--accent); width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; flex-shrink:0;">
+                        <span id="selected_avatar">{$prefillAvatar}</span>
+                    </div>
+                    <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        <strong id="selected_name" style="font-size:13px; color:var(--text-primary);">{$prefillName}</strong>
+                        <span id="selected_email" style="font-size:12px; color:var(--text-muted); margin-left:4px;">{$prefillEmail}</span>
+                        <span id="selected_id_badge" class="kpi-pill" style="margin-left:6px; font-size:11px;">{$prefillBadge}</span>
+                    </div>
+                </div>
+                <button type="button" id="btn_change_customer" class="outline-button" style="padding:4px 10px; font-size:12px; flex-shrink:0; margin-left:8px;" title="Change selected customer">Change</button>
+            </div>
+
+            <!-- Search Input Wrapper -->
+            <div id="customer_search_wrapper" style="display:{$searchDisplay}; position:relative;">
+                <div style="position:relative; display:flex; align-items:center;">
+                    <svg style="position:absolute; left:12px; width:16px; height:16px; color:var(--text-muted); pointer-events:none;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <input type="text" id="customer_search_input" placeholder="Type name, email, or account ID to search..." autocomplete="off" style="width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 10px 10px 36px; background:var(--bg-card); color:var(--text-primary); font-size:13px;">
+                    <span id="customer_search_spinner" style="position:absolute; right:12px; display:none; font-size:12px; color:var(--text-muted);">Searching...</span>
+                </div>
+                
+                <!-- Results Dropdown Panel -->
+                <div id="customer_results_dropdown" style="display:none; position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:1000; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:0 10px 25px -5px rgba(0,0,0,0.15); max-height:280px; overflow-y:auto;">
+                    <!-- Dynamically populated via api_customers.php -->
+                </div>
+            </div>
+            <div id="customer_error_msg" style="color:var(--danger); font-size:12px; margin-top:4px; display:none;"></div>
+        </div>
+
+        <label style="display:block; font-weight:600; font-size:13px; color:var(--text-primary);">Plan to Assign <span style="color:var(--danger);">*</span>
+            <select name="plan_id" id="assign_plan_id" required style="width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; background:var(--bg-card); color:var(--text-primary); font-size:13px; margin-top:6px;">
+                <option value="">-- Choose Subscription Plan --</option>
                 {$manualPlanOptions}
             </select>
         </label>
-        <label>Reason / Reference
-            <input type="text" name="reason" maxlength="500" placeholder="e.g. Manual activation or renewal" required style="width:100%; border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--bg-card); color:var(--text-primary);">
+
+        <label style="display:block; font-weight:600; font-size:13px; color:var(--text-primary);">Reason / Reference <span style="color:var(--danger);">*</span>
+            <input type="text" name="reason" maxlength="500" placeholder="e.g. Annual renewal or manual administrative activation" required style="width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; background:var(--bg-card); color:var(--text-primary); font-size:13px; margin-top:6px;">
         </label>
+
         <div>
-            <button class="button" type="submit" onclick="return confirm('Assign this subscription plan now? Prior active subscriptions for this account will be transitioned.');" style="height:42px; width:100%;">Save Plan Assignment</button>
+            <button class="button" type="submit" id="btn_save_assignment" style="height:42px; width:100%; font-size:14px; font-weight:600;">Save Plan Assignment</button>
         </div>
     </form>
-    <p style="margin-top:8px; font-size:13px; color:var(--text-muted);">Assignments are atomically recorded with the administrator ID, plan entitlements snapshot, UTC activation/expiry timestamps, and audit history. Prior active subscriptions are marked expired without leaving conflicts.</p>
+    <p style="margin-top:8px; font-size:12px; color:var(--text-muted);">Searchable selector queries customer accounts on-demand via authenticated API without loading full user directory to the browser. Prior active subscriptions are marked expired atomically with an audit snapshot.</p>
 </div>
 
 <!-- Search & Filter Bar -->
@@ -534,6 +569,220 @@ try {
     </div>
     {$paginationHtml}
 </div>
+
+<script>
+(function() {
+    const searchInput = document.getElementById('customer_search_input');
+    const searchWrapper = document.getElementById('customer_search_wrapper');
+    const searchSpinner = document.getElementById('customer_search_spinner');
+    const dropdown = document.getElementById('customer_results_dropdown');
+    const hiddenUserId = document.getElementById('assign_user_id');
+    const selectedBox = document.getElementById('customer_selected_box');
+    const btnChange = document.getElementById('btn_change_customer');
+    const selectedAvatar = document.getElementById('selected_avatar');
+    const selectedName = document.getElementById('selected_name');
+    const selectedEmail = document.getElementById('selected_email');
+    const selectedBadge = document.getElementById('selected_id_badge');
+    const errorMsg = document.getElementById('customer_error_msg');
+    const form = document.getElementById('plan-assignment-form');
+
+    let debounceTimer = null;
+    let currentResults = [];
+    let highlightedIndex = -1;
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str).replace(/[&<>"']/g, function(m) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
+        });
+    }
+
+    function hideDropdown() {
+        if (dropdown) dropdown.style.display = 'none';
+        highlightedIndex = -1;
+    }
+
+    function selectCustomer(cust) {
+        if (!cust) return;
+        hiddenUserId.value = cust.id;
+        selectedName.textContent = cust.name;
+        selectedEmail.textContent = cust.email ? '(' + cust.email + ')' : '';
+        selectedAvatar.textContent = (cust.name || 'U').charAt(0).toUpperCase();
+        selectedBadge.textContent = 'ID #' + cust.id + (cust.unique_user_id ? ' • ' + cust.unique_user_id : '');
+        selectedBox.style.display = 'flex';
+        searchWrapper.style.display = 'none';
+        searchInput.value = '';
+        hideDropdown();
+        if (errorMsg) errorMsg.style.display = 'none';
+    }
+
+    if (btnChange) {
+        btnChange.addEventListener('click', function(e) {
+            e.preventDefault();
+            hiddenUserId.value = '';
+            selectedBox.style.display = 'none';
+            searchWrapper.style.display = 'block';
+            searchInput.focus();
+            fetchCustomers('');
+        });
+    }
+
+    function renderResults(users, query) {
+        currentResults = users || [];
+        highlightedIndex = -1;
+        if (!currentResults.length) {
+            dropdown.innerHTML = '<div style="padding:14px; text-align:center; color:var(--text-muted); font-size:13px;">No customer accounts found' + (query ? ' for &ldquo;' + escapeHtml(query) + '&rdquo;' : '') + '.</div>';
+            dropdown.style.display = 'block';
+            return;
+        }
+
+        let html = '';
+        currentResults.forEach((u, idx) => {
+            const avatar = escapeHtml((u.name || 'U').charAt(0).toUpperCase());
+            const name = escapeHtml(u.name || 'User #' + u.id);
+            const email = u.email ? '<span style="color:var(--text-muted); font-size:12px; margin-left:4px;">(' + escapeHtml(u.email) + ')</span>' : '';
+            const uid = u.unique_user_id ? '<span style="font-size:11px; color:var(--text-muted); font-family:monospace; margin-left:6px;">UID: ' + escapeHtml(u.unique_user_id) + '</span>' : '';
+            html += '<div class="customer-result-item" data-index="' + idx + '" role="option" tabindex="-1" style="padding:10px 14px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--border-subtle); transition:background 0.12s ease;">'
+                  + '<div style="display:flex; align-items:center; gap:10px; overflow:hidden;">'
+                  + '<div style="background:var(--accent-soft); color:var(--accent); width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; flex-shrink:0;">' + avatar + '</div>'
+                  + '<div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">'
+                  + '<strong style="color:var(--text-primary); font-size:13px;">' + name + '</strong>' + email + uid
+                  + '</div>'
+                  + '</div>'
+                  + '<div style="flex-shrink:0; margin-left:8px;"><span class="kpi-pill" style="font-size:11px; font-weight:600;">ID #' + u.id + '</span></div>'
+                  + '</div>';
+        });
+
+        if (currentResults.length >= 25) {
+            html += '<div style="padding:8px 12px; font-size:11px; color:var(--text-muted); background:var(--bg); text-align:center;">Showing top 25 matches. Type more characters to refine search.</div>';
+        }
+
+        dropdown.innerHTML = html;
+        dropdown.style.display = 'block';
+
+        dropdown.querySelectorAll('.customer-result-item').forEach(el => {
+            el.addEventListener('click', function() {
+                const idx = parseInt(this.getAttribute('data-index'), 10);
+                if (currentResults[idx]) {
+                    selectCustomer(currentResults[idx]);
+                }
+            });
+            el.addEventListener('mouseenter', function() {
+                highlightItem(parseInt(this.getAttribute('data-index'), 10));
+            });
+        });
+    }
+
+    function highlightItem(idx) {
+        const items = dropdown.querySelectorAll('.customer-result-item');
+        items.forEach((it, i) => {
+            if (i === idx) {
+                it.style.background = 'var(--bg)';
+                it.setAttribute('aria-selected', 'true');
+            } else {
+                it.style.background = '';
+                it.removeAttribute('aria-selected');
+            }
+        });
+        highlightedIndex = idx;
+    }
+
+    function fetchCustomers(q) {
+        if (searchSpinner) searchSpinner.style.display = 'inline';
+        const url = 'api_customers.php?q=' + encodeURIComponent(q) + '&limit=25';
+        fetch(url, { headers: { 'Accept': 'application/json' } })
+            .then(res => {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            })
+            .then(data => {
+                if (searchSpinner) searchSpinner.style.display = 'none';
+                if (data.status === 'success' && Array.isArray(data.users)) {
+                    renderResults(data.users, q);
+                } else {
+                    dropdown.innerHTML = '<div style="padding:14px; text-align:center; color:var(--danger); font-size:13px;">' + escapeHtml(data.message || 'Unable to load accounts.') + '</div>';
+                    dropdown.style.display = 'block';
+                }
+            })
+            .catch(err => {
+                if (searchSpinner) searchSpinner.style.display = 'none';
+                dropdown.innerHTML = '<div style="padding:14px; text-align:center; color:var(--danger); font-size:13px;">Failed to load accounts. Please check network.</div>';
+                dropdown.style.display = 'block';
+            });
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('focus', function() {
+            if (dropdown.style.display === 'none' && !hiddenUserId.value) {
+                fetchCustomers(searchInput.value.trim());
+            }
+        });
+
+        searchInput.addEventListener('input', function() {
+            clearTimeout(debounceTimer);
+            const val = searchInput.value.trim();
+            debounceTimer = setTimeout(function() {
+                fetchCustomers(val);
+            }, 250);
+        });
+
+        searchInput.addEventListener('keydown', function(e) {
+            const items = dropdown.querySelectorAll('.customer-result-item');
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (dropdown.style.display === 'none') {
+                    fetchCustomers(searchInput.value.trim());
+                    return;
+                }
+                if (highlightedIndex < items.length - 1) {
+                    highlightItem(highlightedIndex + 1);
+                    items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+                }
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (highlightedIndex > 0) {
+                    highlightItem(highlightedIndex - 1);
+                    items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+                }
+            } else if (e.key === 'Enter') {
+                if (dropdown.style.display !== 'none' && highlightedIndex >= 0 && currentResults[highlightedIndex]) {
+                    e.preventDefault();
+                    selectCustomer(currentResults[highlightedIndex]);
+                }
+            } else if (e.key === 'Escape') {
+                hideDropdown();
+            }
+        });
+    }
+
+    document.addEventListener('click', function(e) {
+        if (!searchWrapper.contains(e.target) && !dropdown.contains(e.target)) {
+            hideDropdown();
+        }
+    });
+
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            const uidVal = hiddenUserId.value ? parseInt(hiddenUserId.value, 10) : 0;
+            if (isNaN(uidVal) || uidVal <= 0) {
+                e.preventDefault();
+                if (errorMsg) {
+                    errorMsg.textContent = 'Please search and select a customer account first.';
+                    errorMsg.style.display = 'block';
+                }
+                if (searchWrapper.style.display !== 'none') {
+                    searchInput.focus();
+                }
+                return false;
+            }
+            if (!confirm('Assign this subscription plan now? Prior active subscriptions for this account will be transitioned.')) {
+                e.preventDefault();
+                return false;
+            }
+        });
+    }
+})();
+</script>
 HTML;
 
     echo admin_render_page('Subscriptions', 'subscriptions', $body);
