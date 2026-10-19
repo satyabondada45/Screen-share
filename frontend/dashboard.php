@@ -2018,43 +2018,130 @@ function getRelativeTime($timestamp)
             }, 3000);
         }
 
+        let isAliasSaving = false;
+        let isCancellingAliasEdit = false;
+        let aliasRequestId = 0;
+
+        function updateAuthoritativeAlias(newAlias) {
+            const cleanAlias = (typeof newAlias === 'string' ? newAlias.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim() : '') || 'Workstation';
+            const aliasNodes = document.querySelectorAll('#mainHostAlias, #sidebarAliasDisplay');
+            aliasNodes.forEach(node => {
+                if (node) node.textContent = cleanAlias;
+            });
+            const aliasInput = document.getElementById('hostAliasInput');
+            if (aliasInput && document.activeElement !== aliasInput) {
+                aliasInput.value = cleanAlias;
+            }
+            return cleanAlias;
+        }
+
         // 5. Trigger Inline Alias Editing
         function triggerAliasEdit() {
+            if (isAliasSaving) return;
             const aliasSpan = document.getElementById('mainHostAlias');
             const aliasInput = document.getElementById('hostAliasInput');
+            if (!aliasSpan || !aliasInput) return;
+            aliasInput.disabled = false;
             aliasSpan.style.display = 'none';
             aliasInput.style.display = 'inline-block';
             aliasInput.focus();
             aliasInput.select();
         }
 
+        function cancelAliasEdit() {
+            isCancellingAliasEdit = true;
+            const aliasSpan = document.getElementById('mainHostAlias');
+            const aliasInput = document.getElementById('hostAliasInput');
+            const currentConfirmed = aliasSpan ? aliasSpan.textContent : 'Workstation';
+            if (aliasInput) {
+                aliasInput.value = currentConfirmed;
+                aliasInput.style.display = 'none';
+                aliasInput.disabled = false;
+            }
+            if (aliasSpan) {
+                aliasSpan.style.display = 'inline-block';
+            }
+            setTimeout(() => { isCancellingAliasEdit = false; }, 150);
+        }
+
         function handleAliasKey(e) {
             if (e.key === 'Enter') {
+                e.preventDefault();
                 saveAliasInline();
             } else if (e.key === 'Escape') {
-                document.getElementById('mainHostAlias').style.display = 'inline-block';
-                document.getElementById('hostAliasInput').style.display = 'none';
+                e.preventDefault();
+                cancelAliasEdit();
             }
         }
 
         async function saveAliasInline() {
+            if (isCancellingAliasEdit || isAliasSaving) return;
             const aliasInput = document.getElementById('hostAliasInput');
-            const newAlias = aliasInput.value.trim() || 'Workstation';
+            const aliasSpan = document.getElementById('mainHostAlias');
+            if (!aliasInput || !aliasSpan) return;
 
-            document.getElementById('mainHostAlias').innerText = newAlias;
-            document.getElementById('sidebarAliasDisplay').innerText = newAlias;
-            document.getElementById('mainHostAlias').style.display = 'inline-block';
-            aliasInput.style.display = 'none';
+            const trimmed = aliasInput.value.trim();
+            const newAlias = trimmed || 'Workstation';
+            const currentConfirmed = aliasSpan.textContent || 'Workstation';
+
+            if (newAlias === currentConfirmed) {
+                aliasInput.style.display = 'none';
+                aliasSpan.style.display = 'inline-block';
+                return;
+            }
+
+            if (!currentHostUid) {
+                showToast('Device ID not available yet');
+                return;
+            }
+
+            isAliasSaving = true;
+            aliasInput.disabled = true;
+            const currentReq = ++aliasRequestId;
 
             try {
-                await fetch(<?= json_encode($apiBasePath . '/devices/update.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
+                const response = await fetch(<?= json_encode($apiBasePath . '/devices/update.php', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                     body: JSON.stringify({ device_uid: currentHostUid, alias: newAlias })
                 });
-                showToast('Device alias updated to "' + newAlias + '"');
+
+                if (!response.ok) {
+                    let errMsg = `Server error (HTTP ${response.status})`;
+                    try {
+                        const errData = await response.json();
+                        if (errData && errData.message) errMsg = errData.message;
+                    } catch (_) {}
+                    throw new Error(errMsg);
+                }
+
+                const data = await response.json();
+                if (data.status !== 'success') {
+                    throw new Error(data.message || 'Failed to update device alias');
+                }
+
+                if (currentReq !== aliasRequestId) return;
+
+                const confirmedAlias = data.alias || newAlias;
+                updateAuthoritativeAlias(confirmedAlias);
+
+                aliasInput.style.display = 'none';
+                aliasInput.disabled = false;
+                aliasSpan.style.display = 'inline-block';
+
+                showToast('Device alias updated to "' + confirmedAlias + '"');
             } catch (err) {
-                showToast('Saved locally');
+                if (currentReq === aliasRequestId) {
+                    aliasInput.disabled = false;
+                    aliasSpan.textContent = currentConfirmed;
+                    const sidebar = document.getElementById('sidebarAliasDisplay');
+                    if (sidebar) sidebar.textContent = currentConfirmed;
+                    showToast(err.message || 'Could not save alias');
+                }
+            } finally {
+                if (currentReq === aliasRequestId) {
+                    isAliasSaving = false;
+                }
             }
         }
 
@@ -2604,8 +2691,7 @@ function getRelativeTime($timestamp)
                         document.getElementById('sidebarIdDisplay').innerText = formatId(currentHostUid);
 
                         const alias = dbHostDev.name || 'Workstation';
-                        document.getElementById('mainHostAlias').innerText = alias;
-                        document.getElementById('hostAliasInput').value = alias;
+                        updateAuthoritativeAlias(alias);
 
                         isOnline = (dbHostDev.is_online === 1 || dbHostDev.is_online === true);
                         if (!agentSystemId) {

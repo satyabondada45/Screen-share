@@ -79,6 +79,7 @@ try {
             $systemId = $providedUid;
         }
         $resolvedUserId = $userId ?: $existing['user_id'];
+        $resolvedDeviceName = !empty($existing['name']) ? $existing['name'] : $hostname;
         
         $updateStmt = $pdo->prepare("
             UPDATE devices 
@@ -94,7 +95,7 @@ try {
             WHERE id = ?
         ");
         $updateStmt->execute([
-            $hostname, 
+            $resolvedDeviceName, 
             $osType, 
             $clientIp, 
             $resolvedUserId ?: null, 
@@ -113,7 +114,7 @@ try {
                 "id" => $existing['id'],
                 "system_id" => (string)$systemId,
                 "device_uid" => (string)$systemId,
-                "device_name" => $hostname,
+                "device_name" => $resolvedDeviceName,
                 "machine_identifier" => $existing['machine_identifier'] ?: $machineId,
                 "os_type" => $osType,
                 "ip_address" => $clientIp,
